@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - uses: jdx/mise-action@v2
+      - run: mise run lint
+      # The test lanes below both pass --all-features, so the default-feature build (what
+      # `cargo install --path crates/tma` produces) would otherwise never be compiled here.
+      - name: Check (default features)
+        run: cargo check --workspace
+
+  # The floor declared as `rust-version` in [workspace.package]. Pinned rather than a range so a
+  # dependency bump that raises the real floor fails here instead of in a user's install.
+  msrv:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.88"
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo check --workspace --all-features
+
+  test-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # python3 is preinstalled on the runner; tmux is not. Built from source because the distro
+      # package is older than the declared 3.6 floor (3.4 prints the 0x1f field separator as a
+      # literal `\037`, breaking every list-panes parse).
+      - name: Cache tmux
+        id: tmux-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/tmux-bin
+          key: tmux-3.6a-${{ runner.os }}
+      - name: Install tmux deps
+        run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison
+      - name: Build tmux 3.6a
+        if: steps.tmux-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL https://github.com/tmux/tmux/releases/download/3.6a/tmux-3.6a.tar.gz | tar xz
+          cd tmux-3.6a && ./configure --prefix="$HOME/tmux-bin" && make -j"$(nproc)" && make install
+      - name: Install tmux
+        run: |
+          echo "$HOME/tmux-bin/bin" >> "$GITHUB_PATH"
+          "$HOME/tmux-bin/bin/tmux" -V
+      # --all-features matches `mise run test`: the manifest-fixture suites are behind tma-core's
+      # default-off `fixtures` feature, so without it 49 detection tests never run.
+      - name: Test (tmux required)
+        run: TMA_REQUIRE_TMUX=1 cargo test --workspace --all-features
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      # Built from source at the tested 3.6a: brew ships newer tmux (3.7b broke the PTY-attach
+      # test helper; compatibility with 3.7 is tracked separately).
+      - name: Cache tmux
+        id: tmux-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/tmux-bin
+          key: tmux-3.6a-${{ runner.os }}
+      - name: Install tmux deps
+        run: brew install libevent ncurses bison utf8proc
+      - name: Build tmux 3.6a
+        if: steps.tmux-cache.outputs.cache-hit != 'true'
+        run: |
+          curl -fsSL https://github.com/tmux/tmux/releases/download/3.6a/tmux-3.6a.tar.gz | tar xz
+          cd tmux-3.6a
+          ./configure --prefix="$HOME/tmux-bin" --enable-utf8proc \
+            CPPFLAGS="-I$(brew --prefix libevent)/include -I$(brew --prefix ncurses)/include -I$(brew --prefix utf8proc)/include" \
+            LDFLAGS="-L$(brew --prefix libevent)/lib -L$(brew --prefix ncurses)/lib -L$(brew --prefix utf8proc)/lib"
+          make -j"$(sysctl -n hw.ncpu)" && make install
+      - name: Install tmux
+        run: |
+          echo "$HOME/tmux-bin/bin" >> "$GITHUB_PATH"
+          "$HOME/tmux-bin/bin/tmux" -V
+      - name: Test (tmux required)
+        run: TMA_REQUIRE_TMUX=1 cargo test --workspace --all-features
+
+  # Optional: mirrors `nix flake check` (which pins tmux via nativeCheckInputs). Non-blocking so a
+  # nix-side hiccup never gates the cargo lanes above.
+  nix-flake-check:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      # Determinate Nix ships flakes enabled; no extra_nix_config needed. The cache rides the
+      # regular GitHub Actions cache, so it needs no FlakeHub account.
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - uses: DeterminateSystems/magic-nix-cache-action@main
+      - run: nix flake check

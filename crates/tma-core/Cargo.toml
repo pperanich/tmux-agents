@@ -1,0 +1,25 @@
+[package]
+name = "tma-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure detection core for tmux-agents: snapshot/evidence types, manifest schema, verdict fold."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+regex.workspace = true
+
+[features]
+# Test-support fixture loader. Off by default so the crate stays lean for consumers.
+fixtures = []
+
+[dev-dependencies]
+proptest.workspace = true

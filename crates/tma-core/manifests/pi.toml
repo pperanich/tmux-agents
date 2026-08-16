@@ -1,0 +1,132 @@
+min_engine_version = "0.1"
+
+# pi coding agent (https://github.com/earendil-works/pi) — LIVE-AUDITED on 0.82.1
+# (captured 2026-07-26) in a scratch tmux server, driving trivial / tool-using / trust-prompt
+# turns under an isolated `PI_CODING_AGENT_DIR` (a copy of the user's config so the real
+# `~/.pi/agent` was never touched: pi authenticates from a file-based API key in `auth.json`,
+# not a keychain, so the isolated dir authenticated cleanly — unlike cursor's HOME-bound login).
+# The audit wired the `[hooks]` adapter from the verified extension events. Everything here is
+# real evidence, not documented-basis (the pi docs are a map: they name only `tool_call` and
+# `project_trust`, but the full ExtensionAPI event set lives in the installed package's
+# `dist/core/extensions/types.d.ts`, and firing/ordering was observed live).
+#
+# IDENTITY (headline finding): pi does NOT run as `pi` on the cheap read path. Its launcher is a
+# node script (`#!/usr/bin/env node`, symlinked as `pi`), so the two tmux read paths DISAGREE:
+#   - `#{pane_current_command}` = `node`  (the resolved interpreter)
+#   - `ps -eo comm` (the process-tree walk) = `pi`  (pi sets its own process title)
+# `node` is every Node app, so it is unsafe alone; `pi` is specific but the process-tree walk is
+# the only path that sees it. The `title_patterns` secondary signal makes this safe AND gives a
+# passive path: pi sets a STABLE terminal title `π - <cwd-basename>` (e.g. `π - myproj`; the
+# leading glyph is U+03C0), verified to stay put even DURING a working turn — no cursor-style
+# flicker to tool names — so a plain `title_matches` catch needs no stickiness hold (the
+# pid-anchored `@tma_title_match_pid` machinery still applies but never has to bridge a flicker).
+# So a `node`/`pi` pane is pi only when `#{pane_title}` matches `^π `. Honest gaps: (a) during
+# pi's pre-trust STARTUP the title is still the terminal default (hostname), and `session_start`
+# has not fired yet, so a pi pane sitting at the "Trust project folder?" prompt is not yet
+# identifiable — it becomes identifiable once the TUI loads (title set) or the session registers;
+# (b) `process_names = ["pi"]` is what the walk actually matches — `node` is kept as the
+# `#{pane_current_command}` interpreter (belt-and-suspenders, title-gated so it cannot false-match).
+# THE RESCUE (registration-first): the `session_start` hook stamps `@agent_session` and marks
+# the pane an agent pane. Registration is STICKY — honored on later reads even though the pane comm
+# stays `node`/`pi` — so once a hook-wired pi pane starts, tma tracks it for the whole session, and
+# a hook-registered pane bypasses the title gate entirely (like gemini/cursor).
+[identity]
+process_names = ["node", "pi"]
+title_patterns = ["^π "]
+
+# Hook tier: VERIFIED and WIRED. pi has NO settings.json hook block; instead an EXTENSION
+# system — JS/TS modules auto-discovered from `~/.pi/agent/extensions/` (or `.pi/extensions/`)
+# exporting `default function (pi: ExtensionAPI)` and subscribing with `pi.on("<event>", handler)`.
+# `tma install-hooks pi` drops a self-contained JS extension (`assets/pi-extension.js`, the
+# `PiAdapter`, NOT a JSON edit) that shells out to `tma-hook pi <event>` fire-and-forget. pi's
+# events carry NO session id and `PI_SESSION_ID` is injected only into bash-tool CHILD processes
+# (not pi itself), so the extension reads `ctx.sessionManager.getSessionId()` and emits it as the
+# snake_case `session_id` key `parse_session_id` reads — the generic `map_event` then resolves the
+# snake_case events below with zero pi-specific parser code (like cursor's camelCase).
+#
+# VERIFIED EVENTS (fired in BOTH print `-p` and interactive tui modes; `.js` auto-discovery
+# confirmed) and their observed payload key sets (the extension forwards only `{session_id}`, so
+# the daemon never sees these heavy fields — they are recorded for evidence):
+#   session_start        : {type, reason}   (reason "startup")                 -> lifecycle start
+#   session_shutdown     : {type, reason}   (reason "quit")                    -> lifecycle end
+#   before_agent_start   : {type, prompt, images?, systemPrompt, systemPromptOptions} -> working
+#   tool_execution_start : {type, toolCallId, toolName, args}                  -> working
+#   agent_settled        : {type}   (fires once per turn, AFTER agent_end)     -> idle
+# DELIBERATELY UNMAPPED (fire, but add no coverage): agent_start (redundant with
+#   before_agent_start), turn_start/turn_end + message_start/message_end (per-message noise),
+#   tool_execution_end / tool_call / tool_result (redundant with tool_execution_start for
+#   `working`; agent_settled is the clean idle landing), model_select / input / user_bash.
+#
+# BLOCKED IS NOT HOOK-COVERED, and pi has NO recurring approval state (honest gap). pi auto-runs
+# tools with no per-tool permission prompt — tool gating is an EXTENSION concern (`tool_call` can
+# return `{block:true}` + `ctx.ui.confirm`), not a built-in blocked state. The only approval-class
+# native event is `project_trust` (the one-time "Trust project folder?" startup gate), and it
+# fires BEFORE the title is set and before `session_start`, so a pi pane showing it is not yet
+# identifiable as pi (see identity gap (a)) — mapping it to `blocked` could never fire on an
+# identified pane. So `blocked` is left OUT of `covers` and carries no screen rule: it is a genuine
+# absence in pi, not an unmet capture.
+[hooks]
+covers = ["working", "idle", "lifecycle"]
+
+# session_start: the session is up (reason "startup"). Registers the pane and records
+# `@agent_session` from the injected `session_id` (the identity rescue).
+[[hooks.map]]
+event = "session_start"
+claim = { lifecycle = "start" }
+
+# session_shutdown: the session is gone (reason "quit"). Deregister is idempotent.
+[[hooks.map]]
+event = "session_shutdown"
+claim = { lifecycle = "end" }
+
+# before_agent_start: a turn is starting (payload carries the user `prompt`) ⇒ working.
+[[hooks.map]]
+event = "before_agent_start"
+claim = { state = "working" }
+
+# tool_execution_start: the agent is running a tool mid-turn (`toolName`/`args`) ⇒ working.
+[[hooks.map]]
+event = "tool_execution_start"
+claim = { state = "working" }
+
+# agent_settled: the turn is fully settled — no retry, compaction, or queued continuation left
+# (fires last, once per turn, after agent_end) ⇒ idle. This is the clean working→idle landing.
+[[hooks.map]]
+event = "agent_settled"
+claim = { state = "idle" }
+
+# Capture fallback: a `working` screen rule from real captures (redacted), driven live in
+# a scratch tmux server at two widths. idle and blocked carry NO rule:
+#   - idle is the ABSENCE of the working chrome (the composer region is empty; the footer status
+#     line + model row render in both states), so there is no positive idle chrome to anchor — the
+#     stop is signaled by the `agent_settled` hook, and the idle fixtures below exist only as the
+#     negative regression that the working rule never mis-fires on them.
+#   - blocked has no state in pi at all (see the [hooks] note): no rule, honestly.
+[capture]
+visible = ["working"]
+
+# working: pi's built-in streaming loader row, a braille spinner + the literal text `Working...`
+# (the spinner frame animates ⠋⠙⠹⠸…, so only the text is a stable anchor). Present throughout a
+# turn, absent at idle (verified against the idle fixtures). pi's chrome is not bottom-pinned (the
+# loader floats in the transcript as content scrolls), so the rule scans the whole visible screen
+# like cursor rather than a small bottom window. It uses the `visible` region: capture is
+# `-S -50`, so on a pane shorter than the capture window the tail carries prior-turn scrollback
+# ABOVE the visible screen, and a whole-screen `tail_lines(40)` could match a prior turn's
+# `Working...` out of that scrollback (a stale `working` on an idle split pane). `visible` clamps
+# evaluation to the last `#{pane_height}` lines — the visible screen only — closing that leak.
+[[rules]]
+state = "working"
+priority = 10
+region = "visible"
+match = { contains = "Working..." }
+
+# --- telemetry: context utilization via pi's getContextUsage() ---
+# pi's extension API exposes `ctx.getContextUsage()` (earendil-works/pi, verified 2026-07-29): the
+# current context usage for the active model, returning `{ tokens, contextWindow, percent }` — a
+# precomputed percent against pi's OWN window, so no `[telemetry.windows]` lookup is needed — or
+# undefined when no model/window is available. `tma install-hooks pi`'s extension forwards it on the
+# turn-settled `agent_settled` event to `tma event --kind context`; the `pi-context-json` parser
+# reads the percent (fail-safe to no gauge when the window is unknown).
+[telemetry.context]
+channel = "event"
+format = "pi-context-json"

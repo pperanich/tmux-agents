@@ -1,0 +1,21 @@
+# tmux-agents task runner. No [tools] section on purpose: the Rust toolchain stays rustup's
+# business, and the MSRV that matters is the `rust-version` declared in Cargo.toml.
+
+[tasks.test]
+description = "Run the full test suite; --no-fail-fast so one red binary cannot hide the other counts."
+run = "cargo test --workspace --all-features --no-fail-fast"
+
+# Which lints are on lives in [workspace.lints] so a bare `cargo clippy` sees the same posture; this
+# only escalates them. Links into private items are allowed: the modules document their own
+# internals, and those links resolve for the reader who passes --document-private-items.
+[tasks.lint]
+description = "Clippy with warnings denied, a formatting check, and a doc build so a dead rustdoc link fails here."
+run = [
+  "cargo clippy --workspace --all-targets --all-features -- -D warnings",
+  "cargo fmt --all --check",
+  'RUSTDOCFLAGS="-D warnings -A rustdoc::private_intra_doc_links" cargo doc --workspace --all-features --no-deps',
+]
+
+[tasks.fmt]
+description = "Auto-format the workspace."
+run = "cargo fmt --all"

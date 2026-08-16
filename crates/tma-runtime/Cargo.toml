@@ -1,0 +1,33 @@
+[package]
+name = "tma-runtime"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tmux-agents tier-2 runtime: detection pipeline (config, manifests, identity, cycle, capture, debug) atop the tma-tmux I/O crate."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tma-core = { path = "../tma-core" }
+# The tmux I/O crate: the read path, control-mode pool, and guarded write adapter the
+# cycle/capture/debug pipeline drive. Runtime never spawns tmux itself; it goes through here.
+tma-tmux = { path = "../tma-tmux" }
+serde = { workspace = true }
+toml.workspace = true
+thiserror.workspace = true
+# `tma event` compiles a manifest hook `matcher` (a regex) to test against a hook payload.
+# regex is already in the build graph via tma-core; declaring it here makes it a direct
+# dependency of the event parser now that `event` lives in this crate.
+regex.workspace = true
+# `ipc::reload_daemon` (`tma reload`) sends the per-server daemon SIGHUP; std exposes no signal
+# API. rustix is the workspace's safe syscall layer; signal-hook owns handler registration (nudge).
+rustix = { workspace = true }
+signal-hook = { workspace = true }
+
+[dev-dependencies]
+# Shared scratch-socket harness + daemon flock gate for the integration tests.
+tma-test-support = { path = "../tma-test-support" }

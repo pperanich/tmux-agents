@@ -1,0 +1,20 @@
+min_engine_version = "0.1"
+name = "approve"
+label = "Approve"
+kind = "keys"
+when = { state = ["blocked"], detail = ["permission"] }
+
+# Affirmative answer to a pending permission prompt. Sequences are the confirm key of each agent's
+# captured permission-prompt chrome (the same real captures the blocked screen rules anchor on):
+#   claude — `❯ 1. Yes` selection cursor, so option 1 confirms.
+#   codex  — footer `Press enter to confirm or esc to cancel`, so Enter confirms.
+# Only agents whose confirm key is unambiguous captured chrome are covered; a per-agent, per-version
+# fixture capture (ACTIONS.md open question 2) precedes widening this to selection-list agents.
+[keys]
+claude = ["1"]
+codex = ["Enter"]
+
+# OpenCode answers over HTTP instead of keystrokes: the broker POSTs the reply to the pending
+# permission request rather than sending a key into the pane. `once` grants this one request.
+[api]
+opencode = { op = "permission-reply", reply = "once" }

@@ -1,0 +1,13 @@
+[book]
+title = "tmux-agents"
+description = "Agent state monitor for tmux: detect coding agents in panes, surface who is blocked, and jump to them."
+src = "docs"
+language = "en"
+
+[build]
+build-dir = "book"
+create-missing = false
+
+[output.html]
+default-theme = "navy"
+git-repository-url = "https://github.com/pperanich/tmux-agents"

@@ -1,0 +1,47 @@
+# agent: cursor
+# state: blocked
+# title: Shell Command Output
+# command: node
+# pid: 0
+# captured_at: 1785072274210
+---
+cd '/private/tmp/claude-501/-Users-redacted-user-Documents-repos-oss-tmux-agents/7fbd08c7-626a-451b-9bd6-db79394720b0/scratc
+hpad/curproj2' && exec ~/.local/bin/agent --trust
+ [38;5;31m  /[1m[38;5;39mprivate[0m[38;5;31m/[38;5;103mtm[38;5;31m/[38;5;103mclau[38;5;31m/[38;5;103m-Users-redacted-user-Documents-repos-oss-t[38;5;31m/[38;5;103m7[38;5;31m/[38;5;103ms[38;5;31m/[1m[38;5;39mcurproj2[0m[38;5;31m [38;5;76m❯[39m [32mcd[39m [33m'/private/tmp/claude-501/-Users-redacted-user
+-Documents-repos-oss-tmux-agents/7fbd08c7-626a-451b-9bd6-db79394720b0/scratchpad/curproj2'[39m && [4m[32mexec[0m [32m~/.local/bin/agent[39m --
+trust
+
+
+  Cursor Agent
+  [2mv2026.07.23-e383d2b[0m
+  [2mTip: Use /config to customize Cursor settings and behavior.[0m
+
+ [48;2;36;36;40m                                                                                                                      [49m
+ [48;2;36;36;40m Run this shell command (I have not allowlisted it): uname -a                                                         [49m
+ [48;2;36;36;40m                                                                                                                      [49m
+
+  Running [38;2;168;181;230muname -a[39m now.
+
+  $ uname -a [2mWaiting for approval...[0m
+
+[38;2;167;139;250m────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m $  uname -a [2min .[0m
+
+ [1m[38;2;167;139;250mRun this command?[0m
+ [2mNot in allowlist: uname[0m
+  [38;2;167;139;250m→ [1mRun (once)[0m[38;2;167;139;250m (y)[39m
+    Add Shell(uname) to allowlist? (tab)
+    Run Everything (shift+tab)
+    Skip & tell the agent what to do instead (esc or n)
+
+
+
+
+
+
+
+
+
+
+
+

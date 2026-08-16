@@ -1,0 +1,355 @@
+# Agent coverage
+
+`tma` detects an agent's state from three kinds of evidence: hook events the
+agent fires, the pane's on-screen chrome, and the process running in the pane.
+This page documents, per agent, which hook events map to which states, which
+states the screen rules cover, and how each agent's pane is identified.
+
+Every mapping here is verified against real agent behavior, not documentation:
+each table reflects events actually observed firing with a full payload.
+
+## Coverage matrix
+
+| agent | mechanism | hook coverage | context telemetry | notes |
+|---|---|---|---|---|
+| Claude Code | `settings.json` `hooks` block or plugin manifest | working / idle / blocked / lifecycle | statusline push shim: per-turn `context_window.used_percentage`, parsed by `claude-statusline-json` (event channel) | The `Notification` matcher distinguishes permission prompts from idle reminders. `tma install-hooks claude` writes the block and the statusline context shim. |
+| Codex CLI | two channels: a `notify` program in `config.toml` (payload as a trailing argv arg) and a Claude-style `hooks.json` in `CODEX_HOME` (payload on stdin, real session id) | working / idle / blocked / lifecycle, all hook-covered; blocked also screen-carried | rollout `token_count` file-tail, parsed by `codex-rollout-jsonl` (file-tail channel): the per-turn `token_count` event carries `total_token_usage` + `model_context_window`, so the percent needs no model table | `tma install-hooks codex` writes both. The `hooks.json` entries need one-time in-TUI trust (`/hooks`) before they fire. Discovery keys the pane's rollout file off `@agent_session`; its cross-version stability is the fixture caveat in ACTIONS.md open question 6. |
+| OpenCode | JS plugin in `~/.config/opencode/plugin/` | working / idle / blocked / lifecycle (registration only); blocked also screen-carried | — | No session-end or subagent hooks; deregistration rides the pid-change / pane-close path. `tma install-hooks opencode` writes the plugin. Answers `approve`/`deny` over its HTTP API rather than keystrokes (API lane, below). |
+| Gemini CLI | `settings.json` `hooks` object, native event names | working / idle / blocked / lifecycle, hook- and screen-carried | — (turn-granularity token counts only) | Reuses the Claude JSON editor over `~/.gemini/settings.json`. Local config is gated behind a per-folder trust prompt. |
+| Cursor CLI | user-level `~/.cursor/hooks.json` in cursor's own shape, plus a `statusLine` shim in `~/.cursor/cli-config.json` | working / idle / lifecycle via hooks; blocked screen-only | statusLine push shim: per-turn `context_window` (`total_input_tokens` / `context_window_size`), parsed by `cursor-statusline-json` (event channel). The `statusLine` mechanism works but is undocumented (highest churn risk) — a payload change degrades to an absent gauge | Cursor exposes no permission hook, so blocked rides a screen rule. `tma install-hooks cursor` writes cursor's own hooks JSON shape and the statusLine context shim. |
+| pi | extension module in `~/.pi/agent/extensions/` | working / idle / lifecycle via the extension; no blocked | `getContextUsage()` push shim: the extension forwards pi's `ctx.getContextUsage()` (a precomputed `percent` + absolute `contextWindow`) on the turn-settled event, parsed by `pi-context-json` (event channel) | pi auto-runs tools with no approval state, so there is no blocked signal at all. `tma install-hooks pi` drops the extension. |
+
+The context-telemetry column records how tma obtains each agent's context-window
+utilization percent (`@agent_context_pct`), declared per agent by a
+`[telemetry.context]` manifest block naming the channel shape (`event` /
+`file-tail` / `screen`) and a compiled-in parser `format`. Claude Code's
+statusline command receives a per-turn JSON payload; `tma install-hooks claude`
+installs a chaining statusline shim that runs the user's existing statusline
+command unchanged and forwards the payload to `tma event --agent claude --kind
+context --pane "$TMUX_PANE" --payload -` fire-and-forget. Codex uses the pull
+shape instead: the poll cycle tails the last
+64 KiB of the session's rollout JSONL (discovered from `@agent_session`), reads
+the newest `token_count` record, and stamps the gauge under the same
+evidence-time guard — no shim, no persisted offset. pi uses the push shape like
+Claude: its extension API exposes `ctx.getContextUsage()` directly (a precomputed
+`percent` against pi's own window, so no window table is needed), which
+`tma install-hooks pi`'s extension forwards on the turn-settled event, parsed by
+`pi-context-json`. Cursor also uses the push shape: its `~/.cursor/cli-config.json`
+carries a `statusLine` command that runs per turn with a `context_window` payload
+(`total_input_tokens` / `context_window_size`), which `tma install-hooks cursor`'s
+chaining shim forwards to `tma event --agent cursor --kind context --pane
+"$TMUX_PANE" --payload -`, parsed by `cursor-statusline-json`.
+Cursor's `statusLine` mechanism works but is absent from its documented config
+reference, so it is the highest-churn channel: the parser reads only the two
+confirmed numeric fields and fails safe (a missing field is ignored, never a wrong
+stamp and never a clear), letting a payload change degrade to an absent gauge.
+Gemini exposes only turn-granularity token counts (too coarse for a live gauge),
+so its row carries no gauge. An agent with no `[telemetry.context]` block has no
+gauge, and a context-gated action (e.g. `compact`) refuses `no-coverage` on it
+rather than `gated`.
+
+### Absolute token counts
+
+Some of those channels also carry the raw number the percent is made of. Where
+that number is unambiguously **the tokens currently in the context window**, tma
+stamps it as `@agent_tokens` (with `@agent_tokens_at`, its evidence time) and
+emits it as the `tokens` key on the JSON rows. Where it is not, nothing is
+stamped: an absolute under a name that is wrong half the time is worse than no
+absolute at all, and the percent is unaffected either way.
+
+| agent | `@agent_tokens` | why |
+|---|---|---|
+| pi | yes — `context_usage.tokens` | the number pi divides by `contextWindow` to get the `percent` it sends; a footprint by construction |
+| Cursor CLI | yes — `context_window.total_input_tokens` | the numerator of the percent tma computes, in the same `context_window` object Claude publishes; Claude's copy of that object carries `used_percentage: 78` beside `total_input_tokens: 156000` over a 200000 window, which is what pins the field's meaning |
+| Claude Code | yes, from 2.1.132 — `context_window.total_input_tokens` | the numerator of the `used_percentage` Claude computes, in the object Cursor's row cites. Gated on the payload's own `version` because the pre-2.1.132 cumulative-fields bug corrupts the count and the percent together (`used_percentage: 247` beside `total_input_tokens: 494000`), and early in such a session the percent still reads plausible while the count is already wrong. Below the gate, or with no parsable version, the count stays absent and any stored one is cleared |
+| Codex CLI | no | `total_token_usage` mixes the two meanings (below) |
+| Gemini CLI, OpenCode | no | no context channel at all |
+
+Codex is the interesting one. Its `token_count` record carries a
+`total_token_usage` whose terms disagree about what they measure:
+`input_tokens` tracks `last_token_usage.input_tokens` exactly (the per-request
+context sent — a footprint), while `output_tokens` climbs past the last turn's
+(a session-cumulative counter). Their sum, which the gauge divides by
+`model_context_window`, is therefore a hybrid: dominated by the footprint term,
+so the percent is sound, but not a quantity either "tokens in context" or
+"tokens spent" describes. Until a live `token_count` reading settles it
+(ACTIONS.md open question 6), Codex panes carry a gauge and no count.
+
+Nothing here is a spend or cost figure. tma stamps no cumulative usage and ships
+no pricing table; `@agent_tokens` is a level, not a total, and adding it up
+across turns means nothing.
+
+tma also records each pane's model name in `@agent_model`, taken from the hook
+registration payload where the agent sends one: Claude's `SessionStart`, Codex's
+session hooks (a common `model` input field), and Cursor's `sessionStart` each
+carry `model` as a top-level string, stamped last-write-wins on the
+registration-class event (a pane's model changes only via the agent's own
+switcher). Codex additionally keeps `@agent_model` fresh from the rollout tail's
+`turn_context` record as a fallback; the hook and tail write the same value and do
+not fight. Gemini, OpenCode, and pi send no model in their hook payloads, so their
+panes carry no `@agent_model`. The label feeds `tma doctor`'s recognized-model
+line: a model no `[telemetry.windows]` entry names is reported, not warned about.
+
+## OpenCode API lane
+
+OpenCode answers a pending permission prompt over HTTP rather than by keystroke, so
+`tma act approve` / `deny` on an OpenCode pane POST the reply instead of sending a
+key. The bundled `approve`/`deny` actions carry an `[api]` transport for OpenCode
+(`op = "permission-reply"`, `reply = once` / `reject`); the keys path is untouched
+for every other agent. `interrupt` stays keys-everywhere.
+
+The captured request/response pair (verified against the `@opencode-ai/sdk` v2
+types shipped with OpenCode 1.18.0), the evidence a new operation needs:
+
+- **event** — `permission.asked`, `properties = { id, sessionID, permission, … }`;
+  the `id` is the reply's `requestID`. The plugin forwards it as `request_id`
+  (accepting `requestID` too), stamped to `@agent_permission_request` under the
+  session-ownership filter and cleared on the working/idle edge or a
+  `permission.replied` event.
+- **endpoint** — `POST {serverUrl}/permission/{requestID}/reply` with body
+  `{"reply": "once" | "always" | "reject"}`, a 2xx on success and 404 once the
+  prompt is answered or withdrawn. The plugin stamps `{serverUrl}` (from its
+  `PluginInput.serverUrl`) to `@agent_api_endpoint` at registration; the server
+  pins its own port, so there is no hardcoded default. `[api.opencode] api_base`
+  in `config.toml` is the fallback when the plugin cannot stamp it.
+
+`tma doctor` warns on an OpenCode pane that has a pending `@agent_permission_request`
+but no resolvable endpoint.
+
+Agents with partial coverage get hybrid treatment: hook events for what they
+report, screen-capture fallback for what they do not. The per-agent manifest
+declares which states its hooks cover (`[hooks].covers`) and which its screen
+rules can see (`[capture].visible`).
+
+Hooks always reference a stable wrapper script (`tma-hook`), never the binary
+directly: the wrapper resolves the binary at fire time and exits silently when it
+is missing, so rebuilds and moves never surface as hook failures. `tma
+install-hooks <agent>` writes the wiring (idempotent, additive, printing a diff
+first) and `--check` verifies it. For the installer's per-agent caveats
+(including the codex and gemini trust gates), see
+[install-agent-hooks](../how-to/install-agent-hooks.md).
+
+## Bundled action key sequences
+
+The `keys` actions tma ships send a per-agent key sequence
+through the `tma-tmux` write path. Each element is one `send-keys` argument with
+named-key interpretation on, so `Enter`, `Escape`, and `/compact` mean what tmux
+says. An agent with no cell for an action is not covered by it (the action does
+not apply to that agent's panes).
+
+| action | claude | codex | gemini |
+|---|---|---|---|
+| `approve` | `1` | `Enter` | — |
+| `deny` | `Escape` | `Escape` | — |
+| `interrupt` | `Escape` | `Escape` | `Escape` |
+| `compact` | `/compact` `Enter` | — | — |
+
+These sequences derive from each agent's captured prompt chrome (the same
+captures the blocked/working screen rules anchor on): `approve` is the confirm
+key of the permission prompt (Claude's `❯ 1. Yes` selection cursor, Codex's
+`Press enter to confirm` footer), `deny` and `interrupt` are the reject/cancel
+key (`esc`). Gemini has no captured confirm/reject key, so it carries only
+`interrupt`; `compact` is Claude-only until other agents' compact commands are
+captured. The sequences are provisional pending per-agent, per-version keystroke
+fixtures, the same discipline detection rules get (ACTIONS.md open question 2):
+where a prompt offers numbered choices, "approve" means option 1 by convention.
+
+## Per-agent hook mappings
+
+### Claude Code mapping
+
+| hook | tma event | state effect |
+|---|---|---|
+| `SessionStart` | agent-start | pane registered, state `idle` |
+| `UserPromptSubmit` | working | `working` |
+| `PreToolUse` / `PostToolUse` | working (heartbeat) | `working`, refreshes liveness |
+| `Notification` (permission / idle-prompt) | blocked | `blocked` |
+| `Stop` | idle | `idle` |
+| `SubagentStart` / `SubagentStop` | subagent bookkeeping | append/remove session id in `@agent_subagents`; never a top-level state change |
+| `SessionEnd` | agent-end | pane deregistered, options removed |
+
+The `Notification` matcher `permission_prompt|elicitation_dialog` separates
+permission prompts from idle reminders; it runs as a regex over the whole raw
+JSON payload, so it hits whether the discriminator lands in `message` or a
+`notification_type` field.
+
+Re-verified against Claude Code 2.1.212 (2026-07-29): driving a live
+Bash permission prompt fired `Notification` with `notification_type":"permission_prompt"`
+and `message":"Claude needs your permission"` — unchanged, so the matcher still
+covers the one blocking flow. No new blocking `notification_type` was observed, so
+the matcher is **not widened** (capture-gated: nothing captured justifies it). The
+idle-reminder `Notification` could not be reproduced — it fires only when a real
+terminal loses focus, and a detached scratch pane (no attached client, 15+ min
+idle) never triggered it; idle stays driven by the `Stop` hook regardless, so a
+name change there would not affect tma.
+
+### OpenCode mapping
+
+A JS plugin in `~/.config/opencode/plugin/` forwards OpenCode's event-bus events
+to `tma-hook opencode <token>` with the payload on stdin.
+
+| OpenCode event | tma event | state effect |
+|---|---|---|
+| `session.created` | `session-start` | pane registered, state `idle` |
+| `session.status` = busy / `chat.message` / `tool.execute.before` | `user-prompt-submit` | `working` |
+| `session.idle` / `session.status` = idle | `stop` | `idle` |
+| `permission.asked` | `permission-required` | `blocked` |
+
+Only `blocked` is reliably visible on screen, so `[capture].visible =
+["blocked"]`.
+
+Two further event-bus signals were captured live (driving `opencode serve`'s
+`/event` SSE stream through the HTTP API, 2026-07-29) and deliberately left both
+**observed but not wired**:
+
+- `permission.replied` — `{sessionID, requestID, reply:"once"|"always"|"reject"}`,
+  fires the instant a pending `permission.asked` is answered. It clears `blocked`,
+  but it is redundant with tokens the plugin already forwards on the same edge: an
+  approve (`once`/`always`) is immediately followed by `tool.execute.before`
+  (⇒ `working`) and a reject/turn-end by `session.idle` (⇒ `idle`). Since the plugin
+  must be live to receive `permission.replied` at all, it is live for those too, so
+  wiring it adds no coverage. Wiring it correctly would also need the reject-vs-approve
+  split, and only the `once` (approve) case was captured — so, capture-gated, it
+  stays unwired.
+- `session.deleted` — `{sessionID, info:{…full session record…}}`, fires only on an
+  **explicit** session delete (API/TUI action), not on TUI/process exit (a closed
+  pane's session persists on disk, undeleted). It is therefore not the session-end
+  signal tma lacks: deregistering on it would remove a still-live pane, and (since
+  tma's deregister is keyed on the pane, not the session id) a delete of some *other*
+  background session would wrongly deregister the active one. Real OpenCode
+  session-end continues to ride the pid-change / pane-close path.
+
+### Codex mapping
+
+Codex has two mechanisms, both wired by `tma install-hooks codex`. The `notify`
+program in `<CODEX_HOME>/config.toml` is spawned on a notification with the JSON
+appended as a trailing argv argument (not stdin); it fires only
+`agent-turn-complete`, whose payload carries `thread-id`/`turn-id`, not a
+`session_id`.
+
+| Codex notify type | tma event | state effect |
+|---|---|---|
+| `agent-turn-complete` | `notify` (matcher `agent-turn-complete`) | `idle` |
+
+The Claude-style `<CODEX_HOME>/hooks.json` (its `command` must be a string, not
+an argv array) delivers one JSON payload on stdin with a real `session_id`, so
+registration and the subagent guard are live here.
+
+| Codex hooks.json event | tma event | state effect |
+|---|---|---|
+| `SessionStart` | agent-start | pane registered, state `idle` |
+| `UserPromptSubmit` | working | `working` (fires pre-response, lands even on a failed turn) |
+| `PreToolUse` / `PostToolUse` | working | `working` |
+| `PermissionRequest` | blocked | `blocked`/permission (payload names the pending tool) |
+| `Stop` | idle | `idle` |
+| `SessionEnd` | agent-end | pane deregistered, options removed |
+| `SubagentStart` / `SubagentStop` | subagent bookkeeping | append/remove session id in `@agent_subagents` |
+
+Combined: `[hooks].covers = ["working", "idle", "blocked", "lifecycle"]`. Blocked
+is also screen-carried for the daemonless, quiet-edge, and untrusted-hook cases,
+so `codex.toml` ships `[capture].visible = ["working", "blocked"]`.
+
+### Gemini mapping
+
+A Claude-shape `hooks` object in `~/.gemini/settings.json`, so `tma install-hooks
+gemini` reuses the Claude JSON editor unchanged. Payloads arrive on stdin with a
+real snake_case `session_id`; Gemini uses its own native event names.
+
+| Gemini event | tma event | state effect |
+|---|---|---|
+| `SessionStart` (`source` = "startup") | agent-start | pane registered, state `idle` |
+| `BeforeAgent` (`prompt`) | working | `working` |
+| `BeforeTool` / `AfterTool` (`tool_name`/`tool_response`) | working | `working` |
+| `AfterAgent` (`prompt_response`/`stop_hook_active`) | idle | `idle` (fires last in a turn) |
+| `Notification` (`notification_type` = "ToolPermission") | blocked | `blocked`/`permission` |
+| `SessionEnd` (`reason` = "exit") | agent-end | pane deregistered, options removed |
+| `SubagentStart` / `SubagentStop` | subagent bookkeeping | wired but inert (no gemini subagent events) |
+
+`blocked` is gated by the `ToolPermission` matcher so a future non-permission
+notification cannot false-block. Coverage: `[hooks].covers = ["working", "idle",
+"blocked", "lifecycle"]` and `[capture].visible = ["working", "blocked"]`; idle
+rides the `AfterAgent` hook with no idle rule, since its composer chrome overlaps
+working on screen.
+
+### Cursor mapping
+
+User-level `~/.cursor/hooks.json` only (a project `.cursor/hooks.json` fires
+nothing). The shape is cursor's own, not Claude's: `{"version": 1, "hooks":
+{"<event>": [{"command": "…"}]}}`, so `tma install-hooks cursor` uses a
+dedicated adapter. Payloads arrive on stdin with a real snake_case `session_id`.
+
+| Cursor event | tma event | state effect |
+|---|---|---|
+| `sessionStart` (`model`, `is_background_agent`) | agent-start | pane registered, state `idle` |
+| `beforeSubmitPrompt` (`prompt`) | working | `working` (interactive only; headless takes the prompt from argv) |
+| `preToolUse` / `postToolUse` (`tool_name`/`tool_output`) | working | `working` |
+| `postToolUseFailure` (`failure_type`/`error_message`/`is_interrupt`) | working | `working` (matcher `"is_interrupt":false`) |
+| `stop` (token counts, `status`) | idle | `idle` |
+| `sessionEnd` (`reason`/`final_status` = "completed") | agent-end | pane deregistered, options removed |
+| `subagentStart` / `subagentStop` | not observed | absent (see below) |
+
+`blocked` is not hook-covered: Cursor exposes no dedicated permission hook
+(`beforeShellExecution` fires for approved and pending commands alike), so it
+rides the approval-dialog screen rule. Coverage: `[hooks].covers = ["working",
+"idle", "lifecycle"]` and `[capture].visible = ["working", "blocked"]`.
+
+`postToolUseFailure` (captured 2026-07-29): a `cat` of a missing file
+exited non-zero and fired `postToolUseFailure` carrying `failure_type":"error"`,
+`error_message`, and `is_interrupt":false`; the agent recovered and produced its
+final answer, so this is a **working continuation** (the failure sibling of
+`postToolUse`), not a blocked signal. It is wired to `working` behind the matcher
+`"is_interrupt":false`: the user-abort variant (`is_interrupt":true`) was not
+captured, so it stays unmapped rather than false-stamp `working` on a turn the
+human just stopped (cursor fires no `stop` on an interrupt, so a wrong `working`
+would linger). The original hypothesis that this event could distinguish a tool
+failure from the screen-rule-only `blocked` inference did not hold: a failed tool
+does not block, it continues, so `blocked` remains screen-carried only.
+
+`subagentStart` / `subagentStop`: **absent** (re-verified 2026-07-29). Cursor
+fires no subagent hook even when the model narrates spawning a "background
+subagent" — a `-p --force` prompt asking for a parallel sub-task produced the
+narration but no hook. By the Claude precedent (subagent events are
+ownership-filtered bookkeeping, never state-driving) this is no coverage loss:
+even if captured they would not drive pane state.
+
+Cursor's context gauge rides a separate file from its hooks: `~/.cursor/cli-config.json`
+carries a `statusLine` command (`{"type": "command", "command": "…", "padding": N}`)
+that Cursor runs per turn with a JSON payload on stdin whose `context_window` object
+holds `total_input_tokens` and `context_window_size`. `tma install-hooks cursor`
+installs a chaining statusLine shim there (like Claude's, sharing the same machinery):
+it runs the user's existing statusLine command unchanged, preserves sibling keys such
+as `padding` byte-faithfully, and forwards the payload to `tma event context`. The
+`cursor-statusline-json` parser computes the percent from the two fields with no window
+table. This `statusLine` mechanism works but is absent from Cursor's documented config
+reference (confirmed live 2026-07-29): it is the highest-churn context channel, so a
+missing `context_window` is ignored rather than treated as a clear, and a payload change
+degrades to an absent gauge instead of a wrong one.
+
+### pi mapping
+
+JS/TS modules auto-discovered from `~/.pi/agent/extensions/` subscribe with
+`pi.on("<event>", handler)`. `tma install-hooks pi` drops a self-contained
+extension that shells out to `tma-hook pi <event>` fire-and-forget, is inert
+outside tmux, and never blocks pi. pi's events carry no session id, so the
+extension reads `ctx.sessionManager.getSessionId()` and forwards `{session_id}`.
+
+| pi event | tma event | state effect |
+|---|---|---|
+| `session_start` (`reason`="startup") | agent-start | pane registered, state `idle` |
+| `before_agent_start` (`prompt`, `systemPrompt`, …) | working | `working` |
+| `tool_execution_start` (`toolName`, `args`) | working | `working` |
+| `agent_settled` (`type` only) | idle | `idle` (fires once per turn) |
+| `session_shutdown` (`reason`="quit") | agent-end | pane deregistered, options removed |
+| `SubagentStart` / `SubagentStop` | subagent bookkeeping | wired but inert (no pi subagent events) |
+
+`blocked` is not a pi state: pi auto-runs tools with no per-tool permission
+prompt, so there is neither a hook nor a screen rule for it. Coverage:
+`[hooks].covers = ["working", "idle", "lifecycle"]` and `[capture].visible =
+["working"]` (the `Working...` loader row).
+
+On the turn-settled `agent_settled` event the extension additionally forwards pi's
+`ctx.getContextUsage()` to `tma event --kind context`. pi's `ContextUsage` carries
+a precomputed `percent` and an absolute `contextWindow` (both `null` right after a
+`/compact` until the next assistant response, and the whole object omitted when no
+model/window is available), so the `pi-context-json` parser reads the percent with
+no window table; an unknown window stamps no gauge (fail-safe, not wrong).

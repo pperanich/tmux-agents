@@ -1,0 +1,59 @@
+#!/bin/sh
+# tma-hook — stable wrapper script for agent hooks (tmux-agents).
+#
+# Agent configs (e.g. ~/.claude/settings.json) reference THIS script, never the `tma`
+# binary directly. The wrapper resolves the binary fresh on every fire and exits 0
+# silently when it is missing, so rebuilds, moves, and uninstalls never surface to the
+# agent as a hook failure (late-binding pattern, tmux-agent-sidebar's hook.sh).
+#
+# Frozen contract: `tma-hook <agent> <event-name>`, hook payload on stdin.
+#
+# Additive extension for Codex: agents that deliver the payload as a trailing ARGV
+# argument instead of on stdin pass it as a THIRD positional (`tma-hook <agent> <event>
+# <payload-json>`). Codex's `notify` program does exactly this — it spawns
+# `tma-hook codex notify <JSON>` with the notification appended as argv. When arg 3 is
+# present the wrapper feeds it to `tma event` on stdin, so the internal `tma event` grammar
+# stays uniform (payload always arrives on stdin) and the two-arg stdin contract that Claude
+# and OpenCode use is unchanged.
+#
+# Binary resolution order: $TMA_BIN, a sibling `tma` next to this script, then $PATH.
+# $TMA_HOOK_SOCKET (optional) pins a tmux server by name (`-L`); used by the test suite
+# and unusual multi-server setups. Normal installs rely on the inherited $TMUX.
+
+agent=$1
+event=$2
+payload_arg=$3
+[ -n "$agent" ] || exit 0
+[ -n "$event" ] || exit 0
+
+if [ -n "$TMA_BIN" ] && [ -x "$TMA_BIN" ]; then
+  bin=$TMA_BIN
+else
+  dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)
+  if [ -n "$dir" ] && [ -x "$dir/tma" ]; then
+    bin="$dir/tma"
+  else
+    bin=$(command -v tma 2>/dev/null)
+  fi
+fi
+
+# Binary absent (rebuild in flight, uninstalled): succeed silently so the agent never
+# observes a hook failure.
+[ -n "$bin" ] || exit 0
+
+# Payload source: a third positional (Codex's argv-delivered notify JSON) is piped in on
+# stdin; otherwise the caller's stdin is passed through unchanged (Claude/OpenCode).
+if [ -n "$payload_arg" ]; then
+  feed_payload() { printf '%s' "$payload_arg"; }
+else
+  feed_payload() { cat; }
+fi
+
+if [ -n "$TMA_HOOK_SOCKET" ]; then
+  feed_payload | "$bin" event --agent "$agent" --kind "$event" --socket-name "$TMA_HOOK_SOCKET" --payload - >/dev/null 2>&1
+else
+  feed_payload | "$bin" event --agent "$agent" --kind "$event" --payload - >/dev/null 2>&1
+fi
+
+# Always succeed: a hook must never break the agent, even if tma exits nonzero.
+exit 0

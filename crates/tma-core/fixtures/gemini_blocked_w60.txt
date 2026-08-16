@@ -1,0 +1,47 @@
+# agent: gemini
+# state: blocked
+# title: ✋  Action Required
+# command: node
+# pid: 0
+# captured_at: 1785096790200
+---
+       [38;2;255;255;255mnumbers in Spain.[39m
+   [38;2;255;255;255m35. Thirty-five is the minimum age required to become the
+[39m       [38;2;255;255;255mPresident of the United States.[39m
+   [38;2;255;255;255m36. Thirty-six is the number of inches in a standard[39m
+       [38;2;255;255;255myard.[39m
+   [38;2;255;255;255m37. Thirty-seven is the normal core temperature of the[39m
+       [38;2;255;255;255mhuman body in degrees Celsius.[39m
+   [38;2;255;255;255m38. Thirty-eight is the number of slots on a standard[39m
+       [38;2;255;255;255mAmerican roulette wheel, which includes 1 through 36,
+[39m       [38;2;255;255;255m0, and 00.[39m
+   [38;2;255;255;255m39. Thirty-nine is the number of books in the Old[39m
+[38;2;95;95;95m▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄▄
+[39m[48;2;95;95;95m [38;2;215;175;255m> [38;2;255;255;255mUse run_shell_command to run exactly: rm -rf[39m
+   [38;2;255;255;255m/tmp/h19_probe_c[39m
+[38;2;95;95;95m[49m▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀▀
+
+[38;2;255;255;175mℹ Gemini CLI update available! 0.46.0 → 0.52.0[39m
+  [38;2;255;255;175mInstalled via Homebrew. Please update with "brew upgrade[39m
+  [38;2;255;255;175mgemini-cli".[39m
+[38;2;215;175;255m✦ [38;2;255;255;255mThis command will forcefully and recursively remove the[39m
+  [38;2;255;255;255mdirectory [38;2;215;175;255m/tmp/h19_probe_c[38;2;255;255;255m and all its contents from the[39m
+  [38;2;255;255;255mfile system.[39m
+
+[38;2;135;135;135m╭──────────────────────────────────────────────────────────╮
+│[39m [1m[38;2;255;255;175m? Shell  [0m[38;2;255;255;255mrm -rf /tmp/h19_probe_c[39m                         [38;2;135;135;135m│
+│[39m [38;2;135;135;135m╭──────────────────────────────────────────────────────╮[39m [38;2;135;135;135m│
+│[39m [38;2;135;135;135m│[39m [38;2;135;215;215mrm[38;2;255;255;255m -rf /tmp/h19_probe_c[39m                              [38;2;135;135;135m│[39m [38;2;135;135;135m│
+│[39m [38;2;135;135;135m╰──────────────────────────────────────────────────────╯[39m [38;2;135;135;135m│
+│[39m Allow execution of [1m[38;2;255;255;175m[Shell][0m?                              [38;2;135;135;135m│
+│[39m                                                          [38;2;135;135;135m│
+│[39m [38;2;215;255;215m[48;2;0;95;0m●[39m [38;2;215;255;215m1.[39m [38;2;215;255;215mAllow once[39m               [49m                           [38;2;135;135;135m│
+│[39m [38;2;255;255;255m [39m [38;2;255;255;255m2.[39m [38;2;255;255;255mAllow for this session[39m                              [38;2;135;135;135m│
+│[39m [38;2;255;255;255m [39m [38;2;255;255;255m3.[39m [38;2;255;255;255mNo, suggest changes (esc)[39m                           [38;2;135;135;135m│
+╰──────────────────────────────────────────────────────────╯
+
+
+
+
+
+

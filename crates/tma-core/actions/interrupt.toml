@@ -1,0 +1,13 @@
+min_engine_version = "0.1"
+name = "interrupt"
+label = "Interrupt"
+kind = "keys"
+when = { state = ["working"] }
+
+# Interrupt a working agent. Escape is the interrupt/cancel key each agent advertises on its working
+# screen (captured chrome): claude `esc to interrupt`, codex/gemini `esc to cancel`. Gating on
+# `working` disambiguates the key from `deny` (Escape on a blocked prompt rejects it instead).
+[keys]
+claude = ["Escape"]
+codex = ["Escape"]
+gemini = ["Escape"]

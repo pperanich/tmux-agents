@@ -1,0 +1,160 @@
+min_engine_version = "0.1"
+
+# Cursor CLI (`cursor-agent` / `agent`, https://cursor.com/cli) — LIVE-AUDITED on 2026.07.23-e383d2b
+# (2026-07-25, re-driven 2026-07-26) in a scratch tmux server. The re-drive overturned the earlier
+# "hookless" finding: cursor's CLI DOES fire USER-level hooks (`~/.cursor/hooks.json`), so cursor
+# now has a real hook registration path (below). The identity title signal ships as the fallback
+# for panes that are not hook-wired. Everything here is real evidence, not documented-basis.
+#
+# IDENTITY (finding): cursor does NOT run as `cursor-agent`. The `~/.local/bin/agent` launcher
+# execs node, so the two tmux read paths DISAGREE and NEITHER is `cursor-agent`:
+#   - `#{pane_current_command}` = `node`  (the resolved interpreter)
+#   - `ps -eo comm` (the process-tree walk) = `agent`  (basename of the argv[0] the launcher set)
+# Both are generic (`node` is every Node app; `agent` is a common process name), so process_names
+# alone is unsafe. The SECONDARY SIGNAL that makes them safe: `title_patterns` NARROW the match —
+# a `node`/`agent` pane is cursor only when `#{pane_title}` matches a pattern (or the
+# flicker-stickiness hold is live). The reliable cursor title is `Cursor Agent`, set at
+# startup/idle; during actions the title flickers to the tool name (`Shell Command Output`, …)
+# and — verified — does NOT reliably revert afterward, so the title alone is a startup/idle catch,
+# held across the flicker by the pid-anchored stickiness (`@tma_title_match_pid`). A
+# hook-registered pane (below) bypasses the title gate entirely: its identity is the SessionStart
+# hook (like gemini), with the title as fallback for unregistered panes.
+[identity]
+process_names = ["node", "agent"]
+title_patterns = ["^Cursor Agent$"]
+
+# Hook tier: VERIFIED and WIRED. An earlier drive tested only PROJECT-level `.cursor/hooks.json`
+# and saw nothing fire; the re-drive tested USER-level `~/.cursor/hooks.json` (in the real
+# authenticated HOME — an isolated HOME cannot authenticate: cursor's login state binds to the
+# real HOME beyond config + keychain, empirically confirmed) and the hooks FIRE. Cursor's
+# hooks.json schema differs from Claude/gemini: `{"version":1,"hooks":{"<event>":[{"command":"<string>"}]}}`,
+# lowercase event names, one JSON payload on STDIN carrying a real snake_case `session_id` — so
+# `parse_session_id` reads it and the SessionStart registration (the identity rescue) is live, and
+# `install-hooks cursor` writes this shape (the `CursorAdapter`, not the Claude JSON editor). The
+# generic `map_event` resolves the lowercase events below with no cursor-specific parser code.
+#
+# VERIFIED EVENTS (captured in both headless `-p` and interactive turns) and their payload key
+# sets — every payload carries `session_id`, `conversation_id`, `hook_event_name`, `cursor_version`,
+# `workspace_roots`, `user_email`, `transcript_path`:
+#   sessionStart      : + model, is_background_agent                       -> lifecycle start (register)
+#   sessionEnd        : + reason/final_status ("completed"), duration_ms   -> lifecycle end (deregister)
+#   beforeSubmitPrompt: + prompt, attachments   (INTERACTIVE only: headless takes the prompt from
+#                         argv, so it does not fire there)                 -> working (turn start)
+#   preToolUse        : + tool_name ("Shell"/…), tool_input, tool_use_id   -> working (tool starting)
+#   postToolUse       : + tool_output, duration                           -> working (turn continues)
+#   stop              : + status, loop_count, token counts                 -> idle (turn complete)
+#   postToolUseFailure: + error_message, failure_type, is_interrupt   (a tool errored mid-turn) ->
+#                         working (the turn CONTINUES; captured 2026-07-29, see the map entry below)
+# DELIBERATELY UNMAPPED (fire, but add no coverage): afterAgentThought (multi-fire reasoning),
+#   beforeShellExecution/afterShellExecution (shell audit — redundant with preToolUse/postToolUse,
+#   and NOT a blocked signal: they fire for auto-approved AND approval-pending commands alike, and
+#   the hook's permission verdict is observer-only, the CLI's own allowlist still gates),
+#   preCompact (none observed). subagentStart/Stop: NOT observed even when the model narrated
+#   spawning a "background subagent" (re-verified 2026-07-29) — cursor fires no subagent hook, so
+#   they stay unmapped (the ownership-guard precedent: subagent events are bookkeeping, not
+#   state-driving, so this is no coverage loss).
+#
+# BLOCKED IS NOT HOOK-COVERED (honest gap). Cursor has NO dedicated permission/approval hook event:
+# the on-screen approval ("Not in allowlist: …") is signaled by no distinct hook (beforeShellExecution
+# fires for both approved and pending commands). So `blocked` rides the SCREEN RULE below, not a hook,
+# and is left OUT of `covers`. `afterAgentResponse` was wired but never observed firing, so it is not
+# mapped either (no guessing).
+[hooks]
+covers = ["working", "idle", "lifecycle"]
+
+# sessionStart: the session is up. Registers the pane and records `@agent_session` from the
+# payload's `session_id` (the identity rescue — this is what lets tma track a `node`-comm
+# cursor pane for the whole session).
+[[hooks.map]]
+event = "sessionStart"
+claim = { lifecycle = "start" }
+
+# sessionEnd: the conversation is gone (reason "completed"). Deregister is idempotent; cursor can
+# open multiple conversations per pane (each its own session_id), so start/end may fire more than
+# once in one pane's life — a re-register on the next sessionStart is harmless.
+[[hooks.map]]
+event = "sessionEnd"
+claim = { lifecycle = "end" }
+
+# beforeSubmitPrompt: a turn is starting (carries the user `prompt`) ⇒ working. Interactive only.
+[[hooks.map]]
+event = "beforeSubmitPrompt"
+claim = { state = "working" }
+
+# preToolUse: the agent is about to run a tool mid-turn (`tool_name`/`tool_input`) ⇒ working.
+[[hooks.map]]
+event = "preToolUse"
+claim = { state = "working" }
+
+# postToolUse: a tool finished but the turn continues (`tool_output` present) ⇒ still working.
+[[hooks.map]]
+event = "postToolUse"
+claim = { state = "working" }
+
+# postToolUseFailure: a tool ERRORED mid-turn (`failure_type":"error"`, `error_message`) ⇒ still
+# working — captured live 2026-07-29 (a `cat`-of-a-missing-file that exited non-zero), after which
+# the agent recovered and produced its final answer, so this is a working continuation exactly like
+# postToolUse, NOT a blocked signal. Gated on `is_interrupt":false`: a user-abort variant
+# (`is_interrupt":true`) was NOT captured, so it stays unmapped rather than false-stamp working on a
+# turn the human just stopped (cursor fires no stop on an interrupt, so a wrong working could linger).
+[[hooks.map]]
+event = "postToolUseFailure"
+matcher = '"is_interrupt":\s*false'
+claim = { state = "working" }
+
+# stop: the turn is complete (token counts, `status`) ⇒ idle. Verified to fire on clean turn
+# completion (an interrupted turn fires no stop — expected).
+[[hooks.map]]
+event = "stop"
+claim = { state = "idle" }
+
+# --- telemetry: context utilization via the statusLine push shim ---
+# Cursor's `~/.cursor/cli-config.json` carries a `statusLine` command
+# (`{"type":"command","command":"…","padding":N}`) run per turn with a JSON payload on stdin whose
+# `context_window` object carries `total_input_tokens` and `context_window_size` (confirmed live
+# 2026-07-29). `tma install-hooks cursor` installs a chaining statusLine shim (like Claude's) that
+# forwards the payload to `tma event context`; the `cursor-statusline-json` parser computes the
+# percent. CHURN CAVEAT: this mechanism works but is ABSENT from Cursor's documented config reference
+# — the highest-churn channel of the batch — so a payload change degrades to an absent gauge (the
+# parser fails safe: a missing field is ignored, never a wrong stamp and never a clear).
+[telemetry.context]
+channel = "event"
+format = "cursor-statusline-json"
+
+# Capture fallback: working + blocked screen rules from real captures (redacted), driven live in
+# a scratch tmux server at two widths. idle is NOT capture-visible (idle is the absence of
+# working/blocked plus the stop hook; the composer chrome overlaps working, so no idle rule).
+# Every visible state has a real fixture behind it.
+[capture]
+visible = ["working", "blocked"]
+
+# Region note: unlike codex/claude, cursor's composer/footer chrome is NOT pinned to the bottom
+# row — it sits at the END of the conversation content with blank rows filling the pane below it.
+# So these rules scan the whole visible screen rather than a small bottom window. They use the
+# `visible` region: it scopes to the last `#{pane_height}` lines, i.e. the visible screen only.
+# Capture is `-S -50`, so on a pane shorter than the capture window the tail carries up to 50
+# lines of prior-turn scrollback ABOVE the visible screen, and a whole-screen `tail_lines(40)`
+# could match a prior turn's approval/footer chrome out of that scrollback (a false `blocked` on
+# cursor, since blocked is screen-authoritative). `visible` clamps that out. The rules are still
+# safe because both anchors are UNIQUE to their state (the idle composer carries neither — proven
+# by the negative fixture regression).
+
+# blocked: the shell-approval dialog. Both anchors are invariant across widths and unique to the
+# approval prompt (absent from idle and working). Higher priority than working so a transient
+# co-render resolves to blocked. detail = permission. This is the ONLY blocked signal cursor
+# offers (no permission hook), so the rule carries real weight.
+[[rules]]
+state = "blocked"
+detail = "permission"
+priority = 100
+region = "visible"
+match = { all = [ { contains = "Run this command?" }, { contains = "Not in allowlist" } ] }
+
+# working: the active-turn footer. `ctrl+c to stop` appears only while a turn is running (absent at
+# idle, where the footer is just the composer hint; and absent on the blocked dialog, which
+# replaces the footer with the approval options).
+[[rules]]
+state = "working"
+priority = 10
+region = "visible"
+match = { contains = "ctrl+c to stop" }

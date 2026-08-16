@@ -1,0 +1,107 @@
+min_engine_version = "0.1"
+
+[identity]
+process_names = ["claude"]
+
+[hooks]
+covers = ["working", "idle", "blocked", "lifecycle"]
+
+[[hooks.map]]
+event = "SessionStart"
+claim = { lifecycle = "start" }
+
+[[hooks.map]]
+event = "SessionEnd"
+claim = { lifecycle = "end" }
+
+[[hooks.map]]
+event = "UserPromptSubmit"
+claim = { state = "working" }
+
+[[hooks.map]]
+event = "PreToolUse"
+claim = { state = "working" }
+
+[[hooks.map]]
+event = "PostToolUse"
+claim = { state = "working" }
+
+[[hooks.map]]
+event = "Notification"
+matcher = "permission_prompt|elicitation_dialog"
+claim = { state = "blocked", detail = "permission" }
+
+[[hooks.map]]
+event = "Stop"
+claim = { state = "idle" }
+
+[capture]
+visible = ["working", "idle", "blocked"]
+
+# --- telemetry: context utilization via the statusline push shim ---
+# Claude's statusline command receives a per-turn JSON payload carrying a `context_window` object
+# (`used_percentage` pre-computed). `tma install-hooks claude` installs a chaining statusline shim
+# that forwards it to `tma event context`; the `claude-statusline-json` parser reads the percent.
+[telemetry.context]
+channel = "event"
+format = "claude-statusline-json"
+
+# --- blocked: permission / confirmation / trust dialogs (selection chrome) ---
+# Anchor on the invariant selection cursor parked on the affirmative option
+# (`❯ 1. Yes …`): present in Claude's write/command permission prompts, its first-run
+# trust dialog, and confirmation dialogs alike, and it sits inside the tail window at
+# every captured width. Free-text question forms ("Do you want to …?") are deliberately
+# NOT matched — they appear verbatim in ordinary conversation, so matching them
+# false-blocks, and blocked is the one signal users must be able to trust. The
+# leading `\s*` tolerates the indent the box draws (the bare `^❯` anchor never matched a
+# real capture). The model-picker overlay uses "❯ 2. Opus"/"1. Default", never
+# "❯ 1. Yes", so it stays a held history view rather than a false block.
+# Backed by real captures at two widths each: the notes.txt write permission and the
+# first-run trust dialog.
+[[rules]]
+state = "blocked"
+detail = "permission"
+priority = 100
+region = "tail_lines(30)"
+match = { line_regex = '^\s*❯ 1\. Yes' }
+
+# --- history views: overlays/pickers freeze state, never restate ---
+# Covers the model picker AND the detailed-transcript viewer. The transcript viewer
+# is Claude's conversation-history overlay, toggled with ctrl+o; its invariant footer is
+# `Showing detailed transcript · ctrl+o to toggle`, captured live 2026-07-25 at two widths
+# (claude_transcript_w{100,60}.txt, redacted). Both are history views: the on-screen text is
+# scrolled-back history, so any blocker/idle chrome in it must NOT restate the live state —
+# skip_state_update raises `history_view` and the fold freezes the prior stamp.
+[[rules]]
+state = "idle"
+priority = 90
+region = "tail_lines(30)"
+skip_state_update = true
+match = { any = [
+  { contains = "Select model" },
+  { contains = "Enter to set as default" },
+  { contains = "Showing detailed transcript" },
+] }
+
+# --- working: braille spinner in the OSC title (U+2800..U+28FF) ---
+[[rules]]
+state = "working"
+priority = 60
+region = "title"
+match = { regex = '[\x{2800}-\x{28FF}]' }
+
+# --- idle: idle marker in the OSC title ---
+[[rules]]
+state = "idle"
+priority = 50
+region = "title"
+match = { contains = "✳" }
+
+# --- idle fallback: the interactive prompt's mode status line is present (⏵⏵ / ⏸),
+#     absent during permission dialogs and overlays; disambiguated to working by the
+#     title spinner in the fold. ---
+[[rules]]
+state = "idle"
+priority = 40
+region = "tail_lines(6)"
+match = { any = [ { contains = "⏵⏵" }, { contains = "⏸" } ] }

@@ -1,0 +1,37 @@
+# agent: claude
+# state: unknown
+# title: ✳ Run shell command echo test
+# command: claude
+# pid: 26943
+# captured_at: 1784594613
+---
+[38;5;174m│[39m   [38;5;246mOpus 4.8 (1M context) with hi… · Claude Max · [39m   [2m[38;5;174m│[0m Fixed a permission-check bypass affecting … [38;5;174m│
+│[39m   [38;5;[email]xxxxxxxxxxxxxxxx's Organization[39m               [2m[38;5;174m│[0m [3m[38;5;246m/release-notes for more[0m                     [38;5;174m│
+│[39m [38;5;246m/…[path]xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx[39m [2m[38;5;174m│[0m                                             [38;5;174m│
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+[39m
+ [38;5;220m⚠[39m [38;5;220m2 MCP servers need authentication[38;5;246m · run [pat[39m
+
+ [38;5;174m▎[39m [38;5;174mFable 5 is now a standard part of your Max plan[39m
+ [38;5;174m▎[39m You can use up to 50% of your weekly usage limit on Fable 5. If you hit your limit, you can
+ [38;5;174m▎[39m continue on Fable 5 with usage credits. Fable 5 draws down usage faster than Opus 4.8. Run [path]
+ [38;5;174m▎[39m and select Fable to use it. Learn more:
+ [38;5;174m▎[39m [94m]8;id=1iz7s2z;https:[path]xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\https:[path]xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx[39m]8;;\
+
+[38;5;239m[48;5;237m❯ [38;5;231mRun the shell command: echo hello-from-tma[39m
+[38;5;153m[49m▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+[39m   [1m[38;5;153mSelect model[0m
+   [38;5;246mSwitch between Claude models. Your pick becomes the default for new sessions. For [39m
+   [38;5;246mother/previous model names, specify with --model.[39m
+
+     [38;5;246m1. [39mDefault (recommended)  [38;5;246mOpus 4.8 with 1M context · Best for everyday, complex tasks[39m
+   [38;5;153m❯[39m [38;5;246m2. [38;5;114mOpus[39m [38;5;114m✔[39m                 [38;5;246mOpus 4.8 with 1M context · Best for everyday, complex tasks[39m
+     [38;5;246m3. [39mFable                  [38;5;174mFable 5[38;5;246m · Most capable for your hardest and longest-running tasks[39m
+     [38;5;246m4. [39mSonnet                 [38;5;174mSonnet 5[38;5;246m · Efficient for routine tasks[39m
+     [38;5;246m5. [39mHaiku                  [38;5;246mHaiku 4.5 · Fastest for quick answers[39m
+
+   [38;5;174m●[38;5;246m High effort (default) [38;5;239m←/→ to adjust[39m
+
+   [38;5;246mUse [1m/fast[0m[38;5;246m to turn on Fast mode (Opus 4.8).[39m
+
+   [38;5;246mEnter to set as default · s to use this session only · Esc to cancel[39m

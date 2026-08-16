@@ -1,0 +1,42 @@
+# agent: claude
+# state: idle
+# title: ✳ Update README links and documentation
+# command: claude
+# pid: 14040
+# captured_at: 1784662417
+---
+
+
+[38;5;231m⏺[39m Now verify all in-book links in the two new files resolve, and README links too.
+
+  [38;5;246mRan [1m1[0m[38;5;246m shell command [39m
+
+[38;5;231m⏺[39m All links resolve. Committing.
+
+  [38;5;246mRan [1m1[0m[38;5;246m shell command [39m
+
+[38;5;231m⏺[39m Committed [38;5;153m[redact[39m. [38;5;153m[re[39m now documented and framed as the preferred path.
+
+  [1mAdded:[0m
+  - [38;5;153mreference/[re-build-deploy-tool.md[39m — three deploy layers, subcommand table, config surface ([38;5;153m[workspace.metadata.runner][39m /
+  [38;5;153m[package.metadata.[redac][39m), output conventions. Defers per-flag detail to [38;5;153mtools/runner/README.md[39m (no second copy to drift).
+  - [38;5;153mtutorials/build-deploy-with-[re.md[39m — task walkthrough: doctor → build group → [red Layer 2 → [red → [redacte → [re staging.
+  - Both registered in [38;5;153mSUMMARY.md[39m; linked from [38;5;153mgetting-started.md[39m Next steps.
+
+  [1mREADME:[0m quickstart now leads with [38;5;153m[re[39m as the preferred build/run path, [38;5;153mcargo build[39m/[38;5;153mcargo run[39m demoted to quick single-crate compiles. Fixed the
+  boot-image invocation bug ([38;5;153m--target [reda <elf>[39m → [38;5;153m--board [reda --apu <elf>[39m).
+
+  [1mAlso fixed:[0m stale [38;5;153m../../docs/DECISIONS.md[39m → [38;5;153m../../DECISIONS.md[39m in the tool README (the canonical page readers get sent to).
+
+  All in-book + README links verified resolving. Two commits this session, both on [38;5;153mmain[39m, not pushed.
+
+  One deliberate choice: the book cites [38;5;153mtools/runner/README.md[39m as a plain code-path, not a hyperlink — mdbook can't link outside [38;5;153msrc/[39m, so a
+  [38;5;153m../../../tools/...[39m link would 404 in the rendered HTML. If you'd rather have a clickable link, I can point it at the GitHub blob URL instead.
+
+[38;5;246m✻[39m [38;5;246mCooked for 4m 0s[39m
+                                                                                                                [38;5;246mnew task? [38;5;153m/clear[38;5;246m to save [38;5;153m136k tokens[39m
+[38;5;244m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m❯ [2mUse the GitHub blob URL for the tool README link[0m
+[38;5;244m─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
+[39m  [38;5;172m[CAVEMAN][39m
+  [38;5;211m⏵⏵ bypass permissions on[38;5;246m (shift+tab to cycle) · ← for agents[39m

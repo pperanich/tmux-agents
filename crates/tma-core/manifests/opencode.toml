@@ -1,0 +1,77 @@
+min_engine_version = "0.1"
+
+# OpenCode (https://opencode.ai) — verified against the Homebrew build 1.17.15.
+#
+# Identity: the process is a Bun single-file executable; `pane_current_command`
+# reports `opencode.exe` (the resolved binary), not `opencode` (the launcher
+# symlink). Both spellings are listed so a non-Homebrew install that keeps the
+# `opencode` comm still matches. Verified live: a pane running `opencode` showed
+# `#{pane_current_command} = opencode.exe`.
+[identity]
+process_names = ["opencode.exe", "opencode"]
+
+# Hook tier: OpenCode's plugin bridge (a JS module in `~/.config/opencode/plugin/`)
+# spawns `tma-hook opencode <event>` with the payload on stdin. `tma install-hooks
+# opencode` writes that plugin (see tma/src/install.rs, opencode adapter). The plugin
+# normalizes OpenCode's native event bus (verified live: `session.created`,
+# `session.status` {busy|idle}, `session.idle`, `session.error`, `permission.asked`,
+# plus the `chat.message`/`tool.execute.before` hooks) into the stable wrapper tokens
+# below. Registration (start) is covered; there is no session-end event on TUI close
+# (the process just exits), so deregistration rides the universal pid-change / pane-close
+# path, not a hook. OpenCode emits no Claude-style subagent hooks (confirmed:
+# no subagent event observed across driven sessions), so the subagent guard is inert here.
+[hooks]
+covers = ["working", "idle", "blocked", "lifecycle"]
+
+# session.created — mark the pane an OpenCode pane, record @agent_session, idle.
+[[hooks.map]]
+event = "session-start"
+claim = { lifecycle = "start" }
+
+# session.status{busy} + chat.message + tool.execute.before — a turn is running.
+[[hooks.map]]
+event = "user-prompt-submit"
+claim = { state = "working" }
+
+# session.idle + session.status{idle} — the turn finished, prompt is ready.
+[[hooks.map]]
+event = "stop"
+claim = { state = "idle" }
+
+# permission.asked — OpenCode is waiting on a tool-permission approval. The plugin
+# only fires this token for `permission.asked`, so it maps unconditionally (no matcher):
+# unlike Claude's `Notification`, OpenCode has no idle-reminder variant on this channel.
+[[hooks.map]]
+event = "permission-required"
+claim = { state = "blocked", detail = "permission" }
+
+# Capture fallback: only `blocked` has invariant, false-positive-resistant chrome.
+# OpenCode's OSC title is the static string "OpenCode" (no state-bearing spinner, unlike
+# Claude), and its idle/working screens differ only by a per-message `▣ … · <elapsed>`
+# footer that is present in both — too fragile to key on. So working/idle are hook-only;
+# the screen fallback contributes `blocked`, which is exactly the state a hookless/quiet
+# pane most needs (a permission prompt stops output, so the daemon's quiet-edge capture
+# lands right on it). Honest: declare only what the rules below reliably detect.
+[capture]
+visible = ["blocked"]
+
+# --- blocked: the tool-permission dialog ------------------------------------------------
+# Anchored on the dialog's invariant chrome: the `Permission required` header together
+# with the `Allow once` / `Reject` button row. Verified tool-invariant across a bash
+# (`# Shell command`) and a file-edit (`→ Edit …`) permission prompt, each captured live;
+# the tool-specific subtitle is deliberately NOT matched. Requiring all three tokens makes
+# a false block from conversation prose effectively impossible (blocked is the one signal
+# users must trust). The engine strips ANSI before matching, so the OSC-colored
+# `△ Permission required` reads as contiguous text; `contains` is width-agnostic, so the
+# button row wrapping at narrow panes (verified at w60) does not break the match.
+# Backed by three real captures: bash-permission at w100 + w60 and edit-permission at w60.
+[[rules]]
+state = "blocked"
+detail = "permission"
+priority = 100
+region = "tail_lines(24)"
+match = { all = [
+  { contains = "Permission required" },
+  { contains = "Allow once" },
+  { contains = "Reject" },
+] }

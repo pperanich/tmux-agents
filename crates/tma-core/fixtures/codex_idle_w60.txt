@@ -1,0 +1,24 @@
+# agent: codex
+# state: idle
+# title: codex-project
+# command: codex-aarch64-a
+# pid: 14072
+# captured_at: 1784683100
+---
+[2m╭─────────────────────────────────────────────────╮[0m
+[2m│ >_ [0;1mOpenAI Codex[0;2m (v0.145.0)                      │[0m
+[2m│                                                 │[0m
+[2m│ model:     [0mgpt-5.6-sol low[2m   [0m[38;5;6m/model[2m[39m to change   │[0m
+[2m│ directory: [0m[redacted]xxxxxxxxxxxxxxxxxxxxxxxxxxxxxx │[0m
+[2m╰─────────────────────────────────────────────────╯[0m
+
+  [1mTip:[0m Our most capable model yet. GPT-5.6 Sol can tackle
+  complex code changes, dig into research, produce polished
+  documents, and take on your most ambitious work. Sol is
+  highly capable at lower reasoning efforts—try starting
+  lower, then turn it up for harder jobs.
+
+
+[1m›[0m [2mRun [path]x on my current changes[0m
+
+  [38;2;246;226;183mgpt-5.6-sol low[2m[39m · [0m[38;2;171;223;167m[redacted]xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx

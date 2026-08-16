@@ -1,0 +1,19 @@
+min_engine_version = "0.1"
+name = "deny"
+label = "Deny"
+kind = "keys"
+when = { state = ["blocked"], detail = ["permission"] }
+
+# Reject a pending permission prompt. Escape is the cancel/reject key of each agent's captured
+# permission-prompt chrome:
+#   codex  — footer `Press enter to confirm or esc to cancel`, so Escape cancels.
+#   claude — Escape dismisses the permission prompt (rejects the tool call); safer than guessing the
+#            "No" option's number, which varies with the prompt variant.
+# Same coverage caveat as approve (ACTIONS.md open question 2).
+[keys]
+claude = ["Escape"]
+codex = ["Escape"]
+
+# OpenCode rejects over HTTP instead of keystrokes: `reject` denies the pending request.
+[api]
+opencode = { op = "permission-reply", reply = "reject" }

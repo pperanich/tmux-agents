@@ -1,0 +1,34 @@
+[package]
+name = "tma-ui"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tmux-agents display layer: the picker, jump, ls/status surfaces, and ANSI-to-ratatui converter. Consumes CycleReport + config from tma-runtime; never spawns tmux."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tma-core = { path = "../tma-core" }
+# The tier-2 runtime crate: display reads CycleReport + config and drives cycle/jump
+# through runtime. There is no direct `tma-tmux` edge, but runtime re-exports `Tmux`, so the
+# rule that every touchpoint goes through `tma_runtime::ui` is held by the source guard in
+# tests/ui_boundary.rs, not by the compiler.
+tma-runtime = { path = "../tma-runtime" }
+# The pure UI core: the shell re-exports its `Selection` and `ansi_to_text` so the surfaces
+# compile unchanged, and each surface's draw drives its per-surface `update` fold.
+tma-ui-core = { path = "../tma-ui-core" }
+# The picker UI stack, now concentrated here off the bin: the ratatui frame,
+# crossterm terminal control, and nucleo fuzzy matcher.
+ratatui.workspace = true
+crossterm.workspace = true
+nucleo.workspace = true
+
+[dev-dependencies]
+# `surfaces` unit tests parse a `StatusStyles` fragment from a TOML literal to assert glyph/colour
+# rendering. toml is already in the build graph via runtime; declaring it dev-only keeps it off
+# the shipped surface.
+toml.workspace = true

@@ -1,0 +1,37 @@
+# agent: claude
+# state: idle
+# title: ✳ Run shell command echo test
+# command: claude
+# pid: 26943
+# captured_at: 1784594840
+---
+
+  Split walls of green glow
+  one shell breathes beside another
+  tab holds them as one
+
+  [1mLine 1 — "Split walls of green glow"[0m
+  Panes divide a single terminal window into rectangular
+  regions, each rendering its own output. The "green glow"
+  evokes the classic terminal phosphor look while the
+  "walls" are the borders tmux draws between splits.
+
+  [1mLine 2 — "one shell breathes beside another"[0m
+  Each pane runs an independent shell process, living and
+  working in parallel. "Breathes beside" captures how they
+  sit side by side, alive at once, without interfering with
+  each other.
+
+  [1mLine 3 — "tab holds them as one"[0m
+  In tmux the "tab" is the window, the container grouping
+  all panes together. Though the panes are separate
+  processes, the window binds them into a single switchable
+  unit.
+
+[38;5;246m✻[39m [38;5;246mWorked for 8s
+[39m  [38;5;220mYou've used 90% of your session limit · resets 10:40pm (…[39m
+[38;5;244m────────────────────────────────────────────────────────────
+[39m❯ 
+[38;5;244m────────────────────────────────────────────────────────────
+[39m  [38;5;172m[CAVEMAN][39m
+  [38;5;246m⏸ manual mode on · ← for agents[39m

@@ -1,0 +1,176 @@
+min_engine_version = "0.1"
+
+# Codex CLI (https://github.com/openai/codex) — audited against the Homebrew build
+# 0.145.0 (`codex-cli 0.145.0`) driven live in a scratch tmux server. Re-driven 2026-07-25
+# with a working ChatGPT login, so the turn-gated events and the working/blocked screens
+# below are now real evidence, not deferred.
+#
+# Identity: the Homebrew cask installs a platform-suffixed binary
+# (`codex-aarch64-apple-darwin`) reached through a `codex` symlink. The two comm
+# sources tma reads DISAGREE, so both spellings are required:
+#   - the `ps -eo comm` process-tree walk reports `codex` (the kernel p_comm, set from
+#     argv[0] of the invoked symlink) — this is what identifies the pane as an agent
+#     pane, and is also the un-truncated comm on installs whose binary is literally named
+#     `codex` (e.g. the npm launcher on Linux);
+#   - `#{pane_current_command}` (the foreground check) reports `codex-aarch64-a`, the
+#     macOS libproc comm of the resolved binary, truncated to 15 chars. If this is not
+#     matched, `foreground_is_agent` is false and the fold caps every screen verdict at
+#     `unknown` — so the truncated spelling must be listed even though it is arch- and
+#     OS-specific. Verified: a pane running `codex` showed `#{pane_current_command} =
+#     codex-aarch64-a` while `ps` showed `codex` (re-verified 2026-07-25: every
+#     capture header reads `command: codex-aarch64-a`).
+[identity]
+process_names = ["codex", "codex-aarch64-a"]
+
+# Hook tier: TWO mechanisms, both wired by `tma install-hooks codex`.
+#
+# 1. `notify`: the single notify program set in `<CODEX_HOME>/config.toml` as
+#    `notify = ["prog", "arg", ...]`. Codex SPAWNS it and appends the notification JSON as
+#    a trailing ARGV argument (not stdin); the tma-hook wrapper forwards that argv payload
+#    to `tma event` on stdin. Verified live 2026-07-25 by capturing a real fire: exactly ONE
+#    notification type, `agent-turn-complete`, with argv payload keys `type`, `thread-id`,
+#    `turn-id`, `cwd`, `client`, `input-messages`, `last-assistant-message` = turn complete
+#    ⇒ `idle`. The payload carries `thread-id`/`turn-id`, not `session_id`.
+#
+# 2. `hooks.json` (turn-gated completion): Codex 0.145.0 ships a Claude-style hook system
+#    at `<CODEX_HOME>/hooks.json` — `{"hooks": {"<Event>": [{"hooks": [{"type":
+#    "command", "command": "<string>"}]}]}}` (the `command` is a string; an array is
+#    rejected: "invalid type: sequence, expected a string"). Command hooks receive one JSON
+#    payload on STDIN with `session_id`/`transcript_path`/`cwd`/`hook_event_name`/`model`
+#    (+ `turn_id`/`permission_mode` on turn-scoped events, `prompt` on UserPromptSubmit,
+#    `tool_name`/`tool_input` on the tool + permission events) — so unlike notify these carry
+#    a real `session_id` and the subagent guard is live.
+#    VERIFIED LIVE 2026-07-25 with a completed turn (a logging hook under a scratch
+#    CODEX_HOME): SessionStart (source "startup"), UserPromptSubmit (fires on submit, before
+#    the model responds), PreToolUse + PostToolUse (tool_name `Bash`, tool_input/tool_response),
+#    PermissionRequest (fires exactly when an approval prompt appears — payload carries
+#    `tool_name`/`tool_input`, NO matcher needed), Stop (turn complete, `last_assistant_message`),
+#    and SessionEnd (reason "other", even on an interrupted turn) all delivered stdin payloads.
+#    This closes the former "blocked is not hook-covered" gap: PermissionRequest hook-covers
+#    `blocked`. Codex is no longer the notify-only differentiator case.
+#    TRUST GATE (load-bearing): a non-managed hook runs only after the user reviews and
+#    trusts the exact definition inside the codex TUI (`/hooks`); until then it is SILENTLY
+#    skipped (verified: same run without `--dangerously-bypass-hook-trust` executed nothing,
+#    no warning). Trust is recorded against the hook's hash, so a changed wrapper path needs
+#    re-trust. `tma install-hooks codex` prints this next step.
+#
+# Coverage: `working` (UserPromptSubmit/PreToolUse/PostToolUse), `idle` (Stop + notify
+# agent-turn-complete), `blocked` (PermissionRequest), lifecycle (SessionStart/SessionEnd) —
+# every mapped event verified live per above. SubagentStart/SubagentStop are wired
+# normatively for the subagent guard (present in the 0.145.0 event set, payload shape
+# turn-gated/unverified).
+[hooks]
+covers = ["working", "idle", "blocked", "lifecycle"]
+
+# SessionStart — the session is up (fires on startup; payload `source` = "startup").
+# Registers the pane (payload carries `session_id`).
+[[hooks.map]]
+event = "SessionStart"
+claim = { lifecycle = "start" }
+
+# SessionEnd — the session is gone (verified to fire even on an interrupted turn).
+[[hooks.map]]
+event = "SessionEnd"
+claim = { lifecycle = "end" }
+
+# UserPromptSubmit — a turn was submitted (fires before the model responds, so it works
+# even when the turn later fails) ⇒ working.
+[[hooks.map]]
+event = "UserPromptSubmit"
+claim = { state = "working" }
+
+# PreToolUse — the agent is about to run a tool mid-turn ⇒ still working.
+[[hooks.map]]
+event = "PreToolUse"
+claim = { state = "working" }
+
+# PostToolUse — a tool finished but the turn continues ⇒ still working.
+[[hooks.map]]
+event = "PostToolUse"
+claim = { state = "working" }
+
+# PermissionRequest — an approval prompt is on screen; the turn is parked waiting on the
+# user ⇒ blocked. Fires unconditionally (no matcher): codex sends this event only when it
+# actually needs approval, and the payload's `tool_name`/`tool_input` name the pending tool.
+# This is the hook that finally hook-covers `blocked`.
+[[hooks.map]]
+event = "PermissionRequest"
+claim = { state = "blocked", detail = "permission" }
+
+# Stop — the turn finished, the composer is ready again ⇒ idle (the hooks.json twin of the
+# notify agent-turn-complete idle; whichever channel is wired lands the idle stamp).
+[[hooks.map]]
+event = "Stop"
+claim = { state = "idle" }
+
+# agent-turn-complete — the turn finished ⇒ idle. The matcher fires only on that notification
+# type, so a future/other notify payload is simply unmapped (no spurious idle). `tma event`
+# receives the argv-delivered JSON via the wrapper.
+[[hooks.map]]
+event = "notify"
+matcher = "agent-turn-complete"
+claim = { state = "idle" }
+
+# Capture fallback: the `working` (streaming) and `blocked` (approval prompt) screens
+# were driven live 2026-07-25 and captured at two widths each (redacted). Idle stays
+# hook-only (Stop / notify) — the codex idle screen is just the composer + welcome box with
+# no invariant state-bearing chrome worth a rule, and the real idle captures
+# (codex_idle_w{100,60}.txt) are kept as negative fixtures so a screen rule never mis-reads
+# idle as working/blocked.
+[capture]
+visible = ["working", "blocked"]
+
+# --- blocked: the command-approval prompt -----------------------------------------------
+# Anchored on the approval dialog's invariant chrome: the "Would you like to run the
+# following command?" question together with the "Press enter to confirm or esc to cancel"
+# footer. Requiring BOTH makes a false block from conversation prose effectively impossible
+# (blocked is the one signal users must trust). The engine strips ANSI before matching and
+# `contains` is width-agnostic, so the dialog wrapping at w60 (verified) does not break the
+# match. Backed by two real captures (codex_blocked_w{100,60}.txt).
+# EVIDENCE SCOPE: only the command-exec approval prompt was driven; patch/other approval
+# prompt variants were not captured, so this rule targets the command approval specifically.
+# General blocked coverage does not depend on it — the PermissionRequest hook fires for
+# every approval type — so a patch-approval screen fixture is a nice-to-have follow-up, not
+# a coverage gap.
+[[rules]]
+state = "blocked"
+detail = "permission"
+priority = 100
+region = "tail_lines(24)"
+match = { all = [
+  { contains = "Would you like to run the following command?" },
+  { contains = "Press enter to confirm" },
+] }
+
+# --- working: the braille spinner in the OSC title (U+2800..U+28FF) ---------------------
+# Codex sets the pane title to `<spinner> <dir>` while a turn streams (verified: `⠙ proj`,
+# `⠹ proj`), reverting to the plain dir name when idle and to `[ ! ] Action Required | dir`
+# when blocked — so the braille glyph is working-specific. Same mechanism as claude.toml's
+# working-title rule; width-independent.
+[[rules]]
+state = "working"
+priority = 60
+region = "title"
+match = { regex = '[\x{2800}-\x{28FF}]' }
+
+# Context telemetry: the rollout JSONL under `<CODEX_HOME>/sessions/YYYY/MM/DD/` records a
+# `token_count` event per turn carrying `total_token_usage` + `model_context_window`, so the percent
+# is computable with no model table. The reader (a `tma-runtime` edge) discovers the pane's rollout
+# file from the hook-registered `@agent_session` (the session id is in the filename), tails the last
+# 64 KiB from EOF, and stamps `@agent_context_pct` under the evidence-time guard. Discovery stability
+# across Codex versions is the fixture-treatment caveat tracked in ACTIONS.md open question 6.
+[telemetry.context]
+channel = "file-tail"
+format = "codex-rollout-jsonl"
+
+# --- working: the streaming footer on the live screen -----------------------------------
+# The mid-turn footer `• Working (Ns • esc to interrupt)` carries the invariant token
+# `esc to interrupt`, present only while a turn streams (verified absent from the idle and
+# blocked captures). A screen-side twin of the title rule, so working is still detected on
+# terminals/configs where the OSC title does not propagate to `#{pane_title}`. Backed by two
+# real captures (codex_working_w{100,60}.txt).
+[[rules]]
+state = "working"
+priority = 55
+region = "tail_lines(20)"
+match = { contains = "esc to interrupt" }

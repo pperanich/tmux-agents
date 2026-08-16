@@ -1,0 +1,12 @@
+min_engine_version = "0.1"
+name = "compact"
+label = "Compact"
+kind = "keys"
+when = { state = ["idle"], context_pct_min = 75 }
+
+# Compact the context window once it is high and the agent is idle. The bundled threshold is
+# 75; retune it by shadowing this file. Claude Code's compact command is `/compact` Enter;
+# other agents are omitted until their compact command is captured. Fires only where the agent
+# declares a context telemetry channel — on a no-telemetry agent the gate refuses `no-coverage`.
+[keys]
+claude = ["/compact", "Enter"]

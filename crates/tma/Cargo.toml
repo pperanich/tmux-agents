@@ -1,0 +1,57 @@
+[package]
+name = "tma"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tmux-agents CLI: agent state monitor, picker, jump, and stamping for tmux."
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "tma"
+path = "src/main.rs"
+
+[dependencies]
+tma-core = { path = "../tma-core" }
+# The tmux I/O crate: the read path, control-mode pool, and guarded write adapter the
+# bin's poll/daemon/picker/jump/install commands drive. The only crate that spawns tmux.
+tma-tmux = { path = "../tma-tmux" }
+# The tier-2 runtime crate: config, manifests + hook-event vocabulary, identity, the
+# poll cycle, on-demand capture, the `tma event` bridge, and the debug/explain surfaces the
+# bin's commands drive.
+tma-runtime = { path = "../tma-runtime" }
+# The tier-3 daemon crate: consumed for exactly one thing — dispatching the
+# `tma daemon` subcommand (`run_cli`). No non-daemon code path in the bin touches it.
+tma-daemon = { path = "../tma-daemon" }
+# The display crate: the picker, jump, and ls/status surfaces the bin dispatches. The
+# ratatui/crossterm/nucleo UI stack moved here with it, so the bin no longer names them.
+tma-ui = { path = "../tma-ui" }
+clap.workspace = true
+thiserror.workspace = true
+# `tma debug redact` compiles user-supplied `--pattern` regexes to redact a capture.
+# regex is already in the build graph via tma-core; declaring it here makes it a direct
+# dependency of the redaction path.
+regex.workspace = true
+# `tma install-hooks` reads/writes the tmux-hook install record (hooks-state.toml).
+# serde is pulled in transitively; declaring it makes the derive available in the bin.
+serde = { workspace = true }
+toml.workspace = true
+# `tma install-hooks codex` merges the `notify` key into Codex's `config.toml`
+# format-preserving: comments and unrelated keys survive, and an install→uninstall
+# round-trip is byte-identical. The serde-based `toml` above discards all of that, so the
+# document-model parser is a second, separate dependency rather than a re-export of it.
+toml_edit = "0.25"
+# Redaction sizes width-preserving placeholders by terminal display columns, not char
+# count, so wide (CJK) tokens keep their width. unicode-width is already in the tree
+# via ratatui (0.2); declaring it makes UnicodeWidth{Str,Char} available directly (no
+# genuinely new transitive dep).
+unicode-width = "0.2"
+# Unified, colorized config diffs in `install-hooks` (diff-confirm-write). Bin-only.
+similar.workspace = true
+
+[dev-dependencies]
+# Shared scratch-socket harness + daemon flock gate for the integration tests.
+tma-test-support = { path = "../tma-test-support" }

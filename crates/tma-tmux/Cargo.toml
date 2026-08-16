@@ -1,0 +1,22 @@
+[package]
+name = "tma-tmux"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The tmux I/O crate for tmux-agents: the only crate that spawns tmux (read path, control-mode pool, guarded write adapter)."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tma-core = { path = "../tma-core" }
+thiserror.workspace = true
+# control.rs uses `poll`, `fcntl` (non-blocking control-client fds), and `getuid`; there is
+# no std equivalent; rustix is the workspace's safe syscall layer.
+rustix = { workspace = true }
+
+[dev-dependencies]
+tma-test-support = { path = "../tma-test-support" }

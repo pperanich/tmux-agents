@@ -1,0 +1,182 @@
+min_engine_version = "0.1"
+
+# Gemini CLI (https://github.com/google-gemini/gemini-cli), LIVE-AUDITED on 0.46.0 (hooks
+# captured 2026-07-25; blocked-coverage + screen rules re-driven 2026-07-26; title-audited
+# 2026-07-26) in an isolated-HOME scratch tmux server with a logging hook wired via a
+# project-level `.gemini/settings.json`. The audit wired the `[hooks]` adapter, hook-covered
+# `blocked` (the Notification approval hook) and shipped screen rules, then added the passive
+# title identity below. The hook system remains the strongest coverage, but the passive
+# identity means a pane with no hooks wired is no longer invisible to `ls`/`watch`/the picker.
+#
+# CAPTURE NOTE (honesty): the payloads below are REAL fires (0.46.0), not constructed. The
+# 2026-07-26 re-drive unblocked a fresh isolated-HOME capture: with `GEMINI_API_KEY` read from
+# the SOPS path and `security.auth.selectedType` pre-seeded, it re-verified every mapped event
+# fires with the SAME payload key sets (no drift), and additionally captured the Notification
+# approval payload and the working/blocked/idle screens. The fixtures in tma-runtime/src/event.rs
+# replay these payloads (paths redacted); the screen fixtures live in tma-core/fixtures/.
+#
+# IDENTITY (headline finding): gemini does NOT run as `gemini`. The Homebrew/npm launcher is a
+# node script (`.../@google/gemini-cli/bundle/gemini.js`), so a live gemini pane shows as `node`
+# on BOTH tmux read paths (`#{pane_current_command}` and the `ps -eo comm` process-tree walk;
+# both re-verified `node` on 0.46.0). So the process name alone is unusable: `["gemini"]` would
+# never match a real pane, and `["node"]` alone would false-identify EVERY Node app in any pane's
+# process tree as gemini.
+#
+# The passive rescue is the `title_patterns` secondary signal. gemini's OSC pane title encodes
+# its state as `<glyph>  <phrase> (<cwd-basename>)`, and — unlike cursor, whose title is reliable
+# only at idle — gemini sets a distinct title in EVERY state its TUI sits in (live-observed
+# 0.46.0 in an isolated HOME, cwd basename redacted):
+#   idle    : `◇  Ready (<dir>)`
+#   working : `✦  Working… (<dir>)`      (steady for the whole turn; no tool-name flicker)
+#   blocked : `✋  Action Required (<dir>)`   (the approval prompt; the re-drive saw this title too)
+# So `process_names = ["node"]` NARROWED by the three state title_patterns below is a safe passive
+# identity: a `node` pane is gemini only when its title matches one of the three patterns. Because
+# all three states carry a matching title, the pattern set covers every state the pane can sit in
+# — the title is NOT merely a startup/idle catch here (it is for cursor). The pid-anchored
+# stickiness (`@tma_title_match_pid`) is the safety net for the brief uncovered transients only:
+# the startup window before gemini first sets its title, and any unobserved sub-phrase under the
+# same state glyph — once a title has matched, identity holds while the agent pid is unchanged. A
+# bare `node` pane carrying none of these titles is never claimed.
+#
+# THE HOOK PATH STILL WINS when wired: the SessionStart hook stamps `@agent_session` and marks
+# the pane an agent pane, honored on later reads even with no walkable agent process (the comm
+# stays `node`) and regardless of title — so `install-hooks gemini` remains the strongest
+# coverage. The passive identity only changes that a HOOKLESS gemini pane is no longer invisible:
+# it is identified from the title, which is what makes the [capture] screen rules below reachable
+# without hooks (before, they could only fire on a hook-registered pane).
+[identity]
+process_names = ["node"]
+title_patterns = ["^◇  Ready ", "^✦  Working…", "^✋  Action Required "]
+
+# Hook tier: VERIFIED and WIRED. Gemini ships a Claude-compatible hook system
+# (`gemini hooks` subcommand, incl. `gemini hooks migrate --from-claude`) configured in
+# `settings.json` under a `hooks` object shaped EXACTLY like Claude's:
+#   {"hooks": {"<Event>": [{"hooks": [{"type": "command", "command": "…"}]}]}}
+# So `tma install-hooks gemini` reuses the Claude JSON editor unchanged, writing to
+# `~/.gemini/settings.json` (the user-level settings; a project `.gemini/settings.json` is the
+# per-repo override, which is what the capture used). Command hooks receive one JSON
+# payload on STDIN with a real `session_id` (snake_case, so `parse_session_id` reads it), a
+# `transcript_path`, `cwd`, `hook_event_name`, and a `timestamp`.
+#
+# NATIVE EVENT NAMES (verified, NOT the Claude vocabulary) and their captured payload key sets:
+#   SessionStart : session_id, transcript_path, cwd, hook_event_name, timestamp, source
+#                    (source = "startup")                              -> lifecycle start
+#   SessionEnd   : session_id, transcript_path, cwd, hook_event_name, timestamp, reason
+#                    (reason = "exit"; fired 3x on quit, deregister is idempotent) -> lifecycle end
+#   BeforeAgent  : + prompt                                            -> working (turn start)
+#   AfterAgent   : + prompt, prompt_response, stop_hook_active         -> idle (turn complete)
+#   BeforeTool   : + tool_name (`run_shell_command`), tool_input        -> working (tool starting)
+#   AfterTool    : + tool_name, tool_input, tool_response               -> working (turn continues)
+#   BeforeModel / AfterModel : + llm_request / llm_response            -> DELIBERATELY UNMAPPED
+#     (they fire MULTIPLE times per turn, and an AfterModel lands within ~16 ms of the final
+#     AfterAgent in the capture; mapping AfterModel -> working risks a working-clobbers-idle race
+#     against AfterAgent's idle. BeforeAgent + the tool events already cover `working`, so the
+#     model-boundary events add no coverage, only race surface. Left unmapped by intent.)
+#
+# BLOCKED IS HOOK-COVERED (2026-07-26). The earlier turn auto-approved (`no sandbox`, folder
+# trusted), so it saw no approval prompt and recorded no Notification. The re-drive drove a turn
+# that DOES hit approval: an isolated-HOME interactive turn under `--approval-mode default` (auth pre-seeded
+# `security.auth.selectedType = "gemini-api-key"`, NOT yolo) whose tool was a WRITE command (`rm
+# -rf …`; read-only commands like `uname`/`echo` auto-approve at policy priority 50, so they never
+# prompt). When the "Allow execution of [Shell]?" prompt appeared, gemini fired a `Notification`
+# hook BEFORE the prompt was answered (verified in three separate drives; order was BeforeTool ->
+# Notification, with AfterAgent NOT yet fired, i.e. the turn paused at the prompt). The payload:
+#   Notification : + notification_type ("ToolPermission"), message ("Tool Confirm Shell Command
+#                    requires execution"), details {type:"exec", title, command, rootCommand}
+#                    + the usual session_id/transcript_path/cwd envelope       -> blocked/permission
+# gemini's source confirms it: `notifyHooks(deps, details)` fires only when `shouldConfirmExecute`
+# returns confirmation details (an approval is needed) and is skipped when the command auto-approves.
+# `NotificationType.ToolPermission` is the ONLY notification type gemini 0.46.0 emits, but the map
+# below still MATCHES on it (mirroring claude's `Notification` matcher) so a future non-permission
+# notification cannot mis-claim blocked. So `blocked` is now in `covers`, hook-carried AND
+# screen-carried (the [capture] rule below is the fallback for non-hook-wired panes).
+#
+# FOLDER-TRUST GATE (installer caveat, verified in the capture): gemini gates local config
+# (hooks/MCP/skills) behind a per-FOLDER trust prompt ("Trusting a folder allows Gemini CLI to
+# load its local configurations, including … hooks …"). Until the working dir is trusted, the
+# hooks do not load; once trusted, they fire and gemini reports success (there is no separate
+# per-hook silent-skip trust gate like codex's `/hooks`). `tma install-hooks gemini` prints this
+# next step. A per-folder `trusted_hooks.json` records what was trusted.
+[hooks]
+covers = ["working", "idle", "blocked", "lifecycle"]
+
+# SessionStart: the session is up (source "startup"). Registers the pane and records
+# `@agent_session` from the payload's `session_id` (the identity rescue above).
+[[hooks.map]]
+event = "SessionStart"
+claim = { lifecycle = "start" }
+
+# SessionEnd: the session is gone (reason "exit"). Deregister is idempotent, so the observed
+# triple-fire on quit is harmless.
+[[hooks.map]]
+event = "SessionEnd"
+claim = { lifecycle = "end" }
+
+# BeforeAgent: a turn is starting (payload carries the user `prompt`) ⇒ working.
+[[hooks.map]]
+event = "BeforeAgent"
+claim = { state = "working" }
+
+# BeforeTool: the agent is about to run a tool mid-turn (`tool_name`/`tool_input`) ⇒ working.
+[[hooks.map]]
+event = "BeforeTool"
+claim = { state = "working" }
+
+# AfterTool: a tool finished but the turn continues (`tool_response` present) ⇒ still working.
+[[hooks.map]]
+event = "AfterTool"
+claim = { state = "working" }
+
+# AfterAgent: the turn is complete (`prompt_response` + `stop_hook_active`) ⇒ idle. Fires last
+# in a turn (after every BeforeModel/AfterModel), so idle is the state that lands.
+[[hooks.map]]
+event = "AfterAgent"
+claim = { state = "idle" }
+
+# Notification: gemini fires this when a tool call needs approval. The `ToolPermission`
+# matcher gates on the payload's `notification_type` so only a permission notification claims
+# blocked; detail = permission. This is the approval-prompt signal claude has and codex has
+# (PermissionRequest), now confirmed for gemini too.
+[[hooks.map]]
+event = "Notification"
+matcher = "ToolPermission"
+claim = { state = "blocked", detail = "permission" }
+
+# Capture fallback: working + blocked screen rules from real captures (0.46.0, 2026-07-26,
+# redacted), driven live in an isolated-HOME scratch tmux server at two widths (100 and 60).
+# The title identity above makes these reachable PASSIVELY: a hookless gemini pane is now
+# identified and captured, so these rules fire without a hook registration (before, the pane had
+# to be hook-wired to be seen at all).
+# idle is NOT capture-visible: the idle composer (`> Type your message or @path/to/file`) shares
+# its chrome with working, so it carries no state-unique anchor — idle rides the AfterAgent hook.
+# Every visible state has a real fixture (and the idle negatives prove the anchors are
+# state-unique). Both rules scan `Region::Visible`: gemini's approval dialog and thinking footer
+# sit at the END of the conversation content (not pinned to the bottom), so a whole-screen scan
+# is needed, but clamped to the visible screen so `capture-pane -S` scrollback from a prior turn
+# cannot false-match.
+[capture]
+visible = ["working", "blocked"]
+
+# blocked: the shell-approval dialog ("Allow execution of [Shell]?" + the "Allow once" option).
+# Both anchors are invariant across widths and unique to the approval prompt — absent from idle
+# (the plain composer) and from working (the thinking footer), proven by the idle/working
+# negatives. Higher priority than working so a transient co-render resolves to blocked. detail =
+# permission. Gemini also sets an OSC title `✋  Action Required (<dir>)` at the prompt; that title
+# (and the idle/working ones) drives passive IDENTITY, not state — the state here is carried by
+# this screen rule (and the Notification hook), the title only makes the pane visible.
+[[rules]]
+state = "blocked"
+detail = "permission"
+priority = 100
+region = "visible"
+match = { all = [ { contains = "Allow execution of" }, { contains = "Allow once" } ] }
+
+# working: the model-thinking footer (`⠋ <phrase>… (esc to cancel, Ns)`). The gerund phrase and
+# elapsed seconds vary, but `esc to cancel` is invariant and appears ONLY while a turn is running:
+# absent at idle (the footer is just the composer hint) and absent on the blocked dialog (whose
+# only "esc" is the parenthetical `(esc)` on the "No, suggest changes" option, not `esc to cancel`).
+[[rules]]
+state = "working"
+priority = 10
+region = "visible"
+match = { contains = "esc to cancel" }

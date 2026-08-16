@@ -1,0 +1,108 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  # Runs before anything is built: a tag that disagrees with the workspace version would ship
+  # tarballs whose `tma --version` contradicts their own filename.
+  version:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the workspace version
+        run: |
+          tag="$GITHUB_REF_NAME"
+          case "$tag" in
+            v[0-9]*.[0-9]*.[0-9]*) ;;
+            *) echo "tag '$tag' is not v<semver>" >&2; exit 1 ;;
+          esac
+          version=$(cargo metadata --format-version 1 --no-deps \
+            | jq -r '.packages[] | select(.name == "tma") | .version')
+          if [ "$tag" != "v$version" ]; then
+            echo "tag '$tag' does not match crate version '$version'" >&2
+            exit 1
+          fi
+          echo "releasing $tag"
+
+  build:
+    needs: version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Both Apple targets build on the arm64 runner: the Xcode SDK is universal, so
+          # x86_64 is a `--target` away and there is no Intel-runner lifecycle to track.
+          - target: aarch64-apple-darwin
+            os: macos-14
+          - target: x86_64-apple-darwin
+            os: macos-14
+          # musl for Linux: crt-static is on by default there, so the tarball runs on any
+          # distro regardless of its glibc.
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-24.04-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - name: Install musl tools
+        if: endsWith(matrix.target, '-musl')
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        run: cargo build --release -p tma --target ${{ matrix.target }}
+      - name: Package
+        # COPYFILE_DISABLE keeps macOS bsdtar from writing an AppleDouble `._tma` sidecar
+        # next to the binary when the build leaves an extended attribute on it.
+        env:
+          COPYFILE_DISABLE: "1"
+        run: |
+          set -eu
+          dir="tma-$GITHUB_REF_NAME-${{ matrix.target }}"
+          mkdir "$dir"
+          cp "target/${{ matrix.target }}/release/tma" "$dir/"
+          cp LICENSE-MIT LICENSE-APACHE "$dir/"
+          tar czf "$dir.tar.gz" "$dir"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: tarball-${{ matrix.target }}
+          path: tma-*.tar.gz
+          if-no-files-found: error
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: tarball-*
+          merge-multiple: true
+      # One SHA256SUMS over every tarball, in `sha256sum -c` format. scripts/install.sh reads
+      # its own line out of this file, so the names must stay bare (no dist/ prefix).
+      - name: Checksums
+        working-directory: dist
+        run: |
+          sha256sum tma-*.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "$GITHUB_REF_NAME" \
+            --generate-notes \
+            dist/tma-*.tar.gz dist/SHA256SUMS

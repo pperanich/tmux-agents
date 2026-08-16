@@ -1,0 +1,28 @@
+[package]
+name = "tma-ui-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tmux-agents UI core: the Elm-style pure fold (Key/Event/Effect, Selection, RefreshGate, PreviewCache, ANSI-to-ratatui) shared by the watch and picker surfaces. No crossterm, no tmux."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The DTO/vocabulary the core folds over: `AgentRow` (the payload every rows/preview Event and the
+# Focus Effect carry) and `AgentState`, both from `tma_core`. Also backs the ANSI lexer's drift-guard
+# test, cross-checked against `tma_core::engine::strip_ansi` over a shared fixture corpus (ansi.rs).
+# The core deps only tma-core (no runtime edge): it holds no `Tmux` handle, so no tmux I/O is
+# reachable, now compiler-enforced rather than by grep gate.
+tma-core = { path = "../tma-core" }
+# `Text`/`Style`/`Span` for the ANSI converter and the `PreviewCache` it feeds.
+ratatui.workspace = true
+# The picker's fuzzy `Matcher` is the associated resource (`Res`) the picker `update` takes;
+# declared here so the crate's dep set is fixed even though the fold itself lives in `picker.rs`.
+nucleo.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

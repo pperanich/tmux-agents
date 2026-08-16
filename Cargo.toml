@@ -1,0 +1,50 @@
+[workspace]
+resolver = "2"
+members = ["crates/tma-core", "crates/tma-tmux", "crates/tma-runtime", "crates/tma-daemon", "crates/tma-ui-core", "crates/tma-ui", "crates/tma", "crates/tma-test-support"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+# The floor the dependency graph already imposes: ratatui 0.30 and its ratatui-core /
+# ratatui-widgets / instability siblings declare 1.88, the highest in the tree.
+rust-version = "1.88"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/pperanich/tmux-agents"
+
+# Lint posture lives here, not in the `mise run lint` task, so a bare `cargo clippy` and
+# rust-analyzer see it too. `unreachable_pub` is allow-by-default and keeps the crate boundaries
+# honest: an item public to the world but reachable from nowhere is a boundary leak.
+[workspace.lints.rust]
+unreachable_pub = "warn"
+
+[workspace.dependencies]
+# Pure-core deps (serde/toml grammar + errors). tma-core stays I/O-free (D7).
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
+thiserror = "2"
+# Screen-rule matching (contains/regex/line_regex). The measured detection need N12
+# anticipated — a pure-core dep, distinct from the deferred UI stack below.
+regex = "1"
+# Safe syscall layer (policy: no direct libc anywhere; all syscalls go through rustix).
+# 1.1 matches crossterm 0.29's transitive rustix, so one build of the crate serves both.
+rustix = { version = "1.1", features = ["event", "fs", "net", "pipe", "process", "system"] }
+signal-hook = "0.4"
+# Binary-only deps.
+clap = { version = "4", features = ["derive"] }
+# Unified config diffs for the installer's diff-confirm-write path (bin-only). `inline` enables
+# word-level emphasis within replaced lines.
+similar = { version = "3", features = ["inline"] }
+# UI stack (N12/AD9) — the picker (T11).
+# Default-off: `crossterm` is the backend, `layout-cache` keeps the split solver memoized. The
+# rest of the defaults (the `row!`/`line!` macros, widget-calendar and its `time` dependency,
+# underline-color) are unused; `Modifier::UNDERLINED` is ungated.
+ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
+crossterm = "0.29"
+nucleo = "0.5"
+# Pure-crate invariant testing (dev-only): property tests for the tma-core / tma-ui-core folds.
+# Default-off: no `ProptestConfig` anywhere, so the fork/timeout runner (rusty-fork, tempfile) is
+# dead weight. `bit-set` is the shrink bookkeeping the default runner needs.
+proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
+
+[profile.release]
+lto = "thin"

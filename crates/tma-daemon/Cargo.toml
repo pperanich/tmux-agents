@@ -1,0 +1,32 @@
+[package]
+name = "tma-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "tmux-agents tier-3 daemon: the event-hub serve loop and notification dispatch. Strictly additive — never required."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+tma-core = { path = "../tma-core" }
+# The tmux I/O crate: the control-mode pool, guarded write adapter, and read path the
+# serve loop drives.
+tma-tmux = { path = "../tma-tmux" }
+# The tier-2 runtime crate: config, manifests, on-demand capture, the shared
+# `apply_event` bridge, the `ipc` wire protocol, and the `notify::fire` primitive the daemon's
+# dispatch reuses so the daemon and daemonless paths cannot diverge.
+tma-runtime = { path = "../tma-runtime" }
+# The daemon needs `flock` (single-instance), `poll` (the thread-based accept /
+# liveness loop, no async runtime), a self-pipe + `sigaction` for clean SIGTERM/SIGINT shutdown,
+# and `setsid` for the detached-daemon path. std exposes none of these. rustix is the workspace's
+# safe syscall layer; signal-hook owns handler registration.
+rustix = { workspace = true }
+signal-hook = { workspace = true }
+
+[dev-dependencies]
+# Shared scratch-socket harness + daemon flock gate for the integration tests.
+tma-test-support = { path = "../tma-test-support" }

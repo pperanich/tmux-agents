@@ -1,0 +1,17 @@
+[package]
+name = "tma-test-support"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Shared integration-test harness for tmux-agents (scratch tmux socket, daemon flock gate). Dev-dependency only; never shipped."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# The harness calls `flock`/`getuid` directly (the daemon-test gate + scratch-socket cleanup);
+# there is no std equivalent. Already in the workspace build graph via crossterm/rustix.
+rustix = { workspace = true }
