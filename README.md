@@ -1,5 +1,8 @@
 # tmux-agents
 
+[![CI](https://github.com/pperanich/tmux-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/pperanich/tmux-agents/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/pperanich/tmux-agents)](https://github.com/pperanich/tmux-agents/releases/latest)
+
 `tma` is an agent state monitor for tmux. It detects coding agents running in
 your tmux panes, shows at a glance which are blocked, working, or idle, and
 jumps you to the one that needs you. State lives in tmux's own pane options, so
