@@ -19,3 +19,9 @@ run = [
 [tasks.fmt]
 description = "Auto-format the workspace."
 run = "cargo fmt --all"
+
+# The release workflow refuses a tag that disagrees with the workspace version, so the bump, the
+# commit and the tag are one step. It stops before the push.
+[tasks.release]
+description = "Bump the workspace version to <version>, commit it, and tag it (does not push)."
+run = "scripts/release.sh"
