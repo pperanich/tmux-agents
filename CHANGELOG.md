@@ -22,6 +22,12 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   want it. What the shim buys is the context-window gauge (`@agent_tokens`) and the
   compact action that gates on it; hooks cover everything else.
 
+### Changed
+
+- Releases are gated on the test suite. The release workflow used to build straight from the tag
+  without running a test, which is how v0.2.0 shipped over a red Linux lane; the build now waits on
+  the same suite CI runs.
+
 ## [0.2.1] - 2026-08-17
 
 ### Fixed
