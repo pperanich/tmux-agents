@@ -10,12 +10,40 @@ writing, preserving unrelated config. Pass `--yes` to apply without the prompt.
 The hook-event wiring points at the `tma-hook` wrapper, never the binary directly,
 so rebuilds never break it.
 
-The one exception is the statusline context shim (Claude and Cursor). It cannot go
-through the wrapper, because it has to run the statusline command you already had
-and pass its output through, so it embeds the resolved `tma` path instead, with a
+## The statusline context shim (opt-in)
+
+One piece of wiring is not installed by default: the statusline context shim for
+Claude and Cursor. It is the only edit tma makes to a value you already own —
+your `statusLine` command — rather than adding tma's own keys beside it, so you
+have to ask for it:
+
+```
+tma install-hooks claude --statusline    # wire it
+tma install-hooks claude --no-statusline # remove it, restoring what it wrapped
+```
+
+It buys one thing: the context-window gauge (`@agent_tokens`), which the compact
+action gates on. That metric appears in no hook payload — the statusline payload
+is the only place an agent reports it. Skip the shim and everything else works
+unchanged, because state, jumps and notifications all come from the hook events.
+
+Because an agent's `statusLine` takes exactly one command, the shim composes
+rather than replaces: it reads the payload once, forwards a copy to `tma event
+--kind context` in the background, and pipes the same bytes to the command you
+already had, whose output is still what gets rendered. It cannot go through the
+`tma-hook` wrapper for that reason, so it embeds the resolved `tma` path with a
 `$PATH` lookup behind it: `[ -x "$_TMA_BIN" ] || _TMA_BIN=tma`. Move the binary
-without a `$PATH` entry and the context gauge stops, while your statusline itself
-keeps working, which is the failure this shape is chosen for.
+without a `$PATH` entry and the context gauge stops while your statusline keeps
+working, which is the failure this shape is chosen for.
+
+If you would rather own the composition yourself, point `statusLine` at a script
+of your own that calls `tma-hook <agent> context` alongside your real statusline,
+and leave the shim uninstalled — `tma-hook` is generic over the event name, and
+`tma event` falls back to `$TMUX_PANE` from the environment.
+
+`--check` follows the same three-way split: bare, it reports a shim that is
+installed but was never asked for (naming both remedies); `--check --statusline`
+requires it; `--check --no-statusline` requires its absence.
 
 For which states each agent's hooks cover and why, see
 [Agent coverage](../reference/agent-coverage.md). For every flag and path

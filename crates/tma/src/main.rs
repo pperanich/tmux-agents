@@ -208,6 +208,11 @@ fn main() -> ExitCode {
             ensure_daemon,
         }),
         Some(Command::InstallHooks(args)) => install::run(install::InstallOpts {
+            statusline: match (args.statusline, args.no_statusline) {
+                (true, _) => install::Statusline::Install,
+                (_, true) => install::Statusline::Remove,
+                _ => install::Statusline::Keep,
+            },
             agent: args.agent,
             uninstall: args.uninstall,
             check: args.check,

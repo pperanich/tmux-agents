@@ -12,6 +12,22 @@ use super::json_value::{self, Value};
 // Cursor (`~/.cursor/cli-config.json`) share this machinery — same `statusLine` object
 // shape, only the agent name in the forward and the config file differ.
 
+/// What this run should do about the statusline shim, from the `install-hooks` flag pair.
+///
+/// The shim is the one piece of wiring that edits a value the user already owns — their statusline
+/// command — rather than adding tma's own keys beside it, so it is opt-in and says so out loud in
+/// all three directions. `Keep` (neither flag) touches nothing but still reports an installed shim
+/// as drift, because a shim nobody asked for should not sit in a user's settings unremarked.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum Statusline {
+    /// `--statusline`: wire it, and keep its binary path fresh on re-install.
+    Install,
+    /// `--no-statusline`: strip ours, leaving the wrapped command behind.
+    Remove,
+    /// Neither flag: leave the file alone, and report a shim that is there.
+    Keep,
+}
+
 /// The substring identifying a tma context shim for `agent` inside a `statusLine.command`. `--check`
 /// treats a command lacking it as clobbered (the forward was overwritten). The user may still freely
 /// edit the wrapped inner command — that keeps the marker, so it stays recognized.
@@ -121,8 +137,12 @@ pub(super) fn edit_statusline_uninstall(old: &str, agent: &str) -> Result<String
 pub(super) enum StatuslineWiring {
     Wired,
     NotInstalled,
-    /// Present but clobbered (the forward overwritten) or stale (a different binary path); the reason.
-    Drift(String),
+    /// A `statusLine` command that is not tma's shim: the user's own, or ours overwritten. Which of
+    /// those it is depends on what the run asked for, so the verdict is left to the caller — under
+    /// `--statusline` it means clobbered, and otherwise it is simply someone else's command.
+    Foreign,
+    /// Our shim, but not what we would write now (a moved binary); the reason.
+    Stale(String),
 }
 
 /// Classify the statusline shim (read-only): `Wired` when the current shim is exactly what we would
@@ -135,15 +155,12 @@ pub(super) fn classify_statusline(
 ) -> StatuslineWiring {
     match statusline_command(root) {
         None => StatuslineWiring::NotInstalled,
-        Some(c) if !c.contains(&statusline_marker(agent)) => StatuslineWiring::Drift(format!(
-            "agent {agent}: statusline command in {} is not tma's context shim (clobbered); reinstall",
-            settings.display()
-        )),
+        Some(c) if !c.contains(&statusline_marker(agent)) => StatuslineWiring::Foreign,
         Some(c) => {
             if c == render_statusline_shim(bin, agent, &extract_statusline_inner(c)) {
                 StatuslineWiring::Wired
             } else {
-                StatuslineWiring::Drift(format!(
+                StatuslineWiring::Stale(format!(
                     "agent {agent}: statusline context shim in {} references a different binary; reinstall",
                     settings.display()
                 ))
@@ -224,19 +241,20 @@ mod tests {
             classify_statusline(&root, &bin(), &settings, "claude"),
             StatuslineWiring::Wired
         ));
-        // A user overwriting the whole command (removing our forward) is a clobber.
-        let clobbered =
+        // A command that carries no forward of ours is foreign: the user's own line, or ours
+        // overwritten. Only a run that asked for the shim reads that as a clobber.
+        let foreign =
             json_value::parse(r#"{"statusLine":{"type":"command","command":"my-line.sh"}}"#)
                 .unwrap();
         assert!(matches!(
-            classify_statusline(&clobbered, &bin(), &settings, "claude"),
-            StatuslineWiring::Drift(_)
+            classify_statusline(&foreign, &bin(), &settings, "claude"),
+            StatuslineWiring::Foreign
         ));
         // A moved binary path is stale (still ours, but not what we would write now).
         let stale = json_value::parse(&installed).unwrap();
         assert!(matches!(
             classify_statusline(&stale, &PathBuf::from("/new/tma"), &settings, "claude"),
-            StatuslineWiring::Drift(_)
+            StatuslineWiring::Stale(_)
         ));
         // No statusLine at all is a clean not-installed.
         assert!(matches!(
@@ -310,7 +328,7 @@ mod tests {
         ));
         assert!(matches!(
             classify_statusline(&root, &bin(), &cfg, "claude"),
-            StatuslineWiring::Drift(_)
+            StatuslineWiring::Foreign
         ));
 
         // Uninstall restores the original, padding intact.

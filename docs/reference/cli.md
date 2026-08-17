@@ -723,6 +723,8 @@ with `--check`.
 |---|---|
 | `--uninstall` | Remove tma's hook wiring (symmetric to install). |
 | `--check` | Verify hook wiring and report drift. Bare (`--check`) inspects every known agent; with an agent named, the drift report and exit code scope to that agent. The shared wrapper and tmux server hooks are always checked. |
+| `--statusline` | Also wire the statusline context shim (Claude, Cursor), which composes tma's context intake into the agent's own `statusLine` command. Opt-in: it edits a command you own. With `--check`, require it. |
+| `--no-statusline` | Remove the shim, restoring the command it wrapped. With `--check`, require its absence. |
 | `--yes` | Apply without the interactive diff confirmation (scripts, tests). |
 | `--settings <PATH>` | Override the agent settings path (env `TMA_CLAUDE_SETTINGS`). |
 | `--gemini-settings <PATH>` | Override Gemini's `settings.json` path (env `TMA_GEMINI_SETTINGS`). Defaults to `~/.gemini/settings.json`. |

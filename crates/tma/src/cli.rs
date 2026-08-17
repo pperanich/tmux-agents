@@ -156,6 +156,15 @@ pub(crate) struct InstallHooksArgs {
     /// agent. The shared wrapper + tmux server hooks are always checked.
     #[arg(long)]
     pub(crate) check: bool,
+    /// Also wire the statusline context shim, which composes tma's context intake into the agent's
+    /// own `statusLine` command (Claude, Cursor) to read the context-window gauge. Opt-in, because
+    /// it edits a command you own. With `--check`, require it.
+    #[arg(long)]
+    pub(crate) statusline: bool,
+    /// Remove the statusline context shim, restoring the command it wrapped. With `--check`,
+    /// require its absence. Given neither flag, an installed shim is left alone but reported.
+    #[arg(long = "no-statusline", conflicts_with = "statusline")]
+    pub(crate) no_statusline: bool,
     /// Apply without the interactive diff confirmation (scripts, tests).
     #[arg(long)]
     pub(crate) yes: bool,

@@ -475,7 +475,8 @@ fn gather(
         .unwrap_or(0);
 
     // Hook wiring diagnosis (the `install-hooks --check` machinery, read-only).
-    let hook_diag = install::diagnose_hooks(manifests, tmux, focus_events);
+    let hook_diag =
+        install::diagnose_hooks(manifests, tmux, focus_events, install::Statusline::Keep);
 
     // Identify agent panes the same way the poll cycle's read half does — but never stamp. A `ps`
     // that cannot run costs the identification below (registered panes still resolve) and nothing

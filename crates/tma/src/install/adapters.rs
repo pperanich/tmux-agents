@@ -16,7 +16,8 @@ use super::js_bridge::{
 use super::json_value::Value;
 use super::paths::{tma_bin, ConfigPaths};
 use super::statusline::{
-    classify_statusline, edit_statusline_install, edit_statusline_uninstall, StatuslineWiring,
+    classify_statusline, edit_statusline_install, edit_statusline_uninstall, Statusline,
+    StatuslineWiring,
 };
 use super::{
     apply_file, apply_if_changed, classify_root, read_or_empty_object, reported, HookWiring,
@@ -36,6 +37,7 @@ pub(super) trait AgentAdapter {
         paths: &ConfigPaths,
         wrapper: &Path,
         assume_yes: bool,
+        statusline: Statusline,
     ) -> bool;
 
     /// Undo the agent-config wiring, symmetric to [`AgentAdapter::install`]. `true` on success
@@ -50,7 +52,13 @@ pub(super) trait AgentAdapter {
 
     /// Classify this agent's config wiring read-only (the per-agent half of `--check`/`doctor`).
     /// Each adapter parses its own config file, so no pre-parsed root is threaded in.
-    fn classify(&self, lm: &LoadedManifest, paths: &ConfigPaths, wrapper: &Path) -> HookWiring;
+    fn classify(
+        &self,
+        lm: &LoadedManifest,
+        paths: &ConfigPaths,
+        wrapper: &Path,
+        statusline: Statusline,
+    ) -> HookWiring;
 }
 
 /// The installer adapter for an agent, or `None` when tma has none. Returning `None` (never a
@@ -160,20 +168,65 @@ fn hook_channel(agent: &str, events: &[String], wired: &[bool]) -> Channel {
     }
 }
 
-/// The statusline-shim channel (Claude and cursor), naming the file the shim belongs in.
-fn statusline_channel(agent: &str, sl: StatuslineWiring, settings: &Path) -> Channel {
-    match sl {
-        StatuslineWiring::Wired => Channel {
-            present: true,
-            current: true,
-            reasons: Vec::new(),
-        },
-        StatuslineWiring::Drift(reason) => Channel {
+/// The statusline-shim channel (Claude and cursor), naming the file the shim belongs in. The shim is
+/// opt-in, so what counts as drift depends on what this run asked for: an absent shim is only a
+/// problem under `--statusline`, and a present one is a problem under `--no-statusline` — or under
+/// neither flag, where it means a shim is sitting in the user's settings that nothing requested.
+fn statusline_channel(
+    agent: &str,
+    sl: StatuslineWiring,
+    settings: &Path,
+    want: Statusline,
+) -> Channel {
+    let ok = |present| Channel {
+        present,
+        current: true,
+        reasons: Vec::new(),
+    };
+    match (sl, want) {
+        (StatuslineWiring::Wired, Statusline::Install) => ok(true),
+        // Nothing of tma's is in that file: absent, or the user's own command sitting where the shim
+        // would go. Neither is drift for a run that did not ask for the shim.
+        (
+            StatuslineWiring::NotInstalled | StatuslineWiring::Foreign,
+            Statusline::Remove | Statusline::Keep,
+        ) => ok(false),
+        // Our shim, but stale (a moved binary): a repair under `--statusline`, and still a shim
+        // nobody asked for otherwise, so it is reported either way.
+        (StatuslineWiring::Stale(reason), Statusline::Install) => Channel {
             present: true,
             current: false,
             reasons: vec![reason],
         },
-        StatuslineWiring::NotInstalled => Channel {
+        (StatuslineWiring::Wired | StatuslineWiring::Stale(_), Statusline::Keep) => Channel {
+            present: true,
+            current: false,
+            reasons: vec![format!(
+                "agent {agent}: statusline context shim is installed in {} but was not asked for; \
+                 keep it with `--statusline` or remove it with `--no-statusline`",
+                settings.display()
+            )],
+        },
+        (StatuslineWiring::Wired | StatuslineWiring::Stale(_), Statusline::Remove) => Channel {
+            present: true,
+            current: false,
+            reasons: vec![format!(
+                "agent {agent}: statusline context shim is still installed in {}; re-run \
+                 `tma install-hooks {agent} --no-statusline` to remove it",
+                settings.display()
+            )],
+        },
+        // Asked for the shim and something else holds the slot: the forward was overwritten.
+        (StatuslineWiring::Foreign, Statusline::Install) => Channel {
+            present: true,
+            current: false,
+            reasons: vec![format!(
+                "agent {agent}: statusline command in {} is not tma's context shim (clobbered); \
+                 re-run with `--statusline` to re-wrap it",
+                settings.display()
+            )],
+        },
+        (StatuslineWiring::NotInstalled, Statusline::Install) => Channel {
             present: false,
             current: false,
             reasons: vec![format!(
@@ -181,6 +234,32 @@ fn statusline_channel(agent: &str, sl: StatuslineWiring, settings: &Path) -> Cha
                 settings.display()
             )],
         },
+    }
+}
+
+/// Apply this run's statusline intent to a settings text, returning it with the label for the diff
+/// the user confirms — so the prompt names what the change actually contains. `Keep` returns the
+/// text untouched, which is what makes an install without either flag leave a user's statusline
+/// exactly as they left it. `None` after printing the reason: the caller aborts.
+fn apply_statusline(
+    text: String,
+    agent: &str,
+    intent: Statusline,
+    file: &Path,
+) -> Option<(String, &'static str)> {
+    let edited = match intent {
+        Statusline::Install => edit_statusline_install(&text, &tma_bin(), agent)
+            .map(|new| (new, "agent hooks + statusline context shim")),
+        Statusline::Remove => edit_statusline_uninstall(&text, agent)
+            .map(|new| (new, "agent hooks (statusline context shim removed)")),
+        Statusline::Keep => return Some((text, "agent hooks")),
+    };
+    match edited {
+        Ok(pair) => Some(pair),
+        Err(err) => {
+            eprintln!("tma: cannot edit {}: {err}", file.display());
+            None
+        }
     }
 }
 
@@ -205,14 +284,15 @@ impl AgentAdapter for ClaudeAdapter {
         paths: &ConfigPaths,
         wrapper: &Path,
         assume_yes: bool,
+        statusline: Statusline,
     ) -> bool {
         let events = manifests::hook_events(&lm.manifest);
         let settings = &paths.settings;
         let Some(old) = reported(read_or_empty_object(settings)) else {
             return false;
         };
-        // Chain both edits (hooks, then the statusline context shim) so the whole settings.json change
-        // is one diff + one confirm.
+        // Chain both edits (hooks, then whatever the run asked for on the statusline) so the whole
+        // settings.json change is one diff + one confirm.
         let with_hooks = match edit_settings_install(&old, wrapper, &lm.name, &events) {
             Ok(new) => new,
             Err(err) => {
@@ -220,20 +300,11 @@ impl AgentAdapter for ClaudeAdapter {
                 return false;
             }
         };
-        let new = match edit_statusline_install(&with_hooks, &tma_bin(), &lm.name) {
-            Ok(new) => new,
-            Err(err) => {
-                eprintln!("tma: cannot edit {}: {err}", settings.display());
-                return false;
-            }
+        let Some((new, label)) = apply_statusline(with_hooks, &lm.name, statusline, settings)
+        else {
+            return false;
         };
-        apply_file(
-            settings,
-            &old,
-            &new,
-            assume_yes,
-            "agent hooks + statusline context shim",
-        )
+        apply_file(settings, &old, &new, assume_yes, label)
     }
 
     fn uninstall(
@@ -273,7 +344,13 @@ impl AgentAdapter for ClaudeAdapter {
         }
     }
 
-    fn classify(&self, lm: &LoadedManifest, paths: &ConfigPaths, wrapper: &Path) -> HookWiring {
+    fn classify(
+        &self,
+        lm: &LoadedManifest,
+        paths: &ConfigPaths,
+        wrapper: &Path,
+        statusline: Statusline,
+    ) -> HookWiring {
         let events = manifests::hook_events(&lm.manifest);
         let root = match classify_root(&lm.name, &paths.settings) {
             Ok(root) => root,
@@ -283,7 +360,7 @@ impl AgentAdapter for ClaudeAdapter {
         let sl = classify_statusline(&root, &tma_bin(), &paths.settings, &lm.name);
         classify_channels(&[
             hook_channel(&lm.name, &events, &wired),
-            statusline_channel(&lm.name, sl, &paths.settings),
+            statusline_channel(&lm.name, sl, &paths.settings, statusline),
         ])
     }
 }
@@ -306,6 +383,7 @@ impl AgentAdapter for GeminiAdapter {
         paths: &ConfigPaths,
         wrapper: &Path,
         assume_yes: bool,
+        _statusline: Statusline,
     ) -> bool {
         let events = manifests::hook_events(&lm.manifest);
         let settings = &paths.gemini_settings;
@@ -360,7 +438,13 @@ impl AgentAdapter for GeminiAdapter {
         }
     }
 
-    fn classify(&self, lm: &LoadedManifest, paths: &ConfigPaths, wrapper: &Path) -> HookWiring {
+    fn classify(
+        &self,
+        lm: &LoadedManifest,
+        paths: &ConfigPaths,
+        wrapper: &Path,
+        _statusline: Statusline,
+    ) -> HookWiring {
         let events = manifests::hook_events(&lm.manifest);
         let root = match classify_root(&lm.name, &paths.gemini_settings) {
             Ok(root) => root,
@@ -385,6 +469,7 @@ impl AgentAdapter for CursorAdapter {
         paths: &ConfigPaths,
         wrapper: &Path,
         assume_yes: bool,
+        statusline: Statusline,
     ) -> bool {
         let events = manifests::hook_events(&lm.manifest);
         let hooks = &paths.cursor_hooks;
@@ -401,24 +486,25 @@ impl AgentAdapter for CursorAdapter {
         if !hooks_ok {
             return false;
         }
-        // The statusLine context shim in the separate cli-config.json.
+        // The statusLine context shim in the separate cli-config.json. `Keep` never opens that file
+        // at all: an install that was not asked for a shim has no business rewriting it.
+        if statusline == Statusline::Keep {
+            return true;
+        }
         let cfg = &paths.cursor_cli_config;
         let Some(old_cfg) = reported(read_or_empty_object(cfg)) else {
             return false;
         };
-        match edit_statusline_install(&old_cfg, &tma_bin(), &lm.name) {
-            Ok(new) => apply_file(
-                cfg,
-                &old_cfg,
-                &new,
-                assume_yes,
-                "cursor statusline context shim",
-            ),
-            Err(err) => {
-                eprintln!("tma: cannot edit {}: {err}", cfg.display());
-                false
-            }
-        }
+        let Some((new, _)) = apply_statusline(old_cfg.clone(), &lm.name, statusline, cfg) else {
+            return false;
+        };
+        apply_file(
+            cfg,
+            &old_cfg,
+            &new,
+            assume_yes,
+            "cursor statusline context shim",
+        )
     }
 
     fn uninstall(
@@ -476,7 +562,13 @@ impl AgentAdapter for CursorAdapter {
         }
     }
 
-    fn classify(&self, lm: &LoadedManifest, paths: &ConfigPaths, wrapper: &Path) -> HookWiring {
+    fn classify(
+        &self,
+        lm: &LoadedManifest,
+        paths: &ConfigPaths,
+        wrapper: &Path,
+        statusline: Statusline,
+    ) -> HookWiring {
         let events = manifests::hook_events(&lm.manifest);
         let root = match classify_root(&lm.name, &paths.cursor_hooks) {
             Ok(root) => root,
@@ -490,7 +582,7 @@ impl AgentAdapter for CursorAdapter {
         let sl = classify_statusline(&cfg_root, &tma_bin(), &paths.cursor_cli_config, &lm.name);
         classify_channels(&[
             hook_channel(&lm.name, &events, &wired),
-            statusline_channel(&lm.name, sl, &paths.cursor_cli_config),
+            statusline_channel(&lm.name, sl, &paths.cursor_cli_config, statusline),
         ])
     }
 }
@@ -505,6 +597,7 @@ impl AgentAdapter for OpenCodeAdapter {
         paths: &ConfigPaths,
         wrapper: &Path,
         assume_yes: bool,
+        _statusline: Statusline,
     ) -> bool {
         install_opencode_plugin(&paths.opencode_plugin, wrapper, assume_yes)
     }
@@ -519,7 +612,13 @@ impl AgentAdapter for OpenCodeAdapter {
         uninstall_opencode_plugin(&paths.opencode_plugin, assume_yes)
     }
 
-    fn classify(&self, lm: &LoadedManifest, paths: &ConfigPaths, wrapper: &Path) -> HookWiring {
+    fn classify(
+        &self,
+        lm: &LoadedManifest,
+        paths: &ConfigPaths,
+        wrapper: &Path,
+        _statusline: Statusline,
+    ) -> HookWiring {
         let installed = std::fs::read_to_string(&paths.opencode_plugin)
             .map(|t| t.contains(OPENCODE_PLUGIN_MARKER))
             .unwrap_or(false);
@@ -548,6 +647,7 @@ impl AgentAdapter for PiAdapter {
         paths: &ConfigPaths,
         wrapper: &Path,
         assume_yes: bool,
+        _statusline: Statusline,
     ) -> bool {
         install_js_bridge(
             &paths.pi_extension,
@@ -575,7 +675,13 @@ impl AgentAdapter for PiAdapter {
         )
     }
 
-    fn classify(&self, lm: &LoadedManifest, paths: &ConfigPaths, wrapper: &Path) -> HookWiring {
+    fn classify(
+        &self,
+        lm: &LoadedManifest,
+        paths: &ConfigPaths,
+        wrapper: &Path,
+        _statusline: Statusline,
+    ) -> HookWiring {
         let installed = std::fs::read_to_string(&paths.pi_extension)
             .map(|t| t.contains(PI_EXTENSION_MARKER))
             .unwrap_or(false);
@@ -604,6 +710,7 @@ impl AgentAdapter for CodexAdapter {
         paths: &ConfigPaths,
         wrapper: &Path,
         assume_yes: bool,
+        _statusline: Statusline,
     ) -> bool {
         // Two mechanisms, both wired: the notify key in config.toml (idle), then the verified
         // hooks.json events (working/lifecycle).
@@ -689,7 +796,13 @@ impl AgentAdapter for CodexAdapter {
         }
     }
 
-    fn classify(&self, lm: &LoadedManifest, paths: &ConfigPaths, wrapper: &Path) -> HookWiring {
+    fn classify(
+        &self,
+        lm: &LoadedManifest,
+        paths: &ConfigPaths,
+        wrapper: &Path,
+        _statusline: Statusline,
+    ) -> HookWiring {
         // Both channels diagnosed together (notify + hooks.json). Only wiring is observable: whether
         // the user has trusted the hooks.json entries lives in codex's internal store, not here.
         let text = match read_codex_config(&paths.codex_config) {
@@ -837,24 +950,70 @@ mod tests {
         );
     }
 
-    /// The statusline channel's three verdicts, including the file the missing-shim line names.
+    /// The statusline channel under `--statusline`: the three verdicts of a run that wants the shim,
+    /// including the file the missing-shim line names.
     #[test]
     fn statusline_channel_carries_each_verdict() {
         let settings = PathBuf::from("/home/u/.claude/settings.json");
-        let wired = statusline_channel("claude", StatuslineWiring::Wired, &settings);
+        let wired = statusline_channel(
+            "claude",
+            StatuslineWiring::Wired,
+            &settings,
+            Statusline::Install,
+        );
         assert!(wired.present && wired.current && wired.reasons.is_empty());
 
         let drift = statusline_channel(
             "claude",
-            StatuslineWiring::Drift("shim clobbered".to_string()),
+            StatuslineWiring::Stale("shim references a different binary".to_string()),
             &settings,
+            Statusline::Install,
         );
         assert!(drift.present && !drift.current);
-        assert_eq!(drift.reasons, vec!["shim clobbered".to_string()]);
+        assert_eq!(
+            drift.reasons,
+            vec!["shim references a different binary".to_string()]
+        );
 
-        let absent = statusline_channel("claude", StatuslineWiring::NotInstalled, &settings);
+        let absent = statusline_channel(
+            "claude",
+            StatuslineWiring::NotInstalled,
+            &settings,
+            Statusline::Install,
+        );
         assert!(!absent.present && !absent.current);
         assert!(absent.reasons[0].contains("/home/u/.claude/settings.json"));
+    }
+
+    /// The shim is opt-in, so the same on-disk state reads differently per intent: absent is only a
+    /// problem when asked for, present is a problem when asked to remove — and, with neither flag,
+    /// present is reported too, so a shim nobody requested does not sit in a user's settings unseen.
+    #[test]
+    fn statusline_channel_reads_the_same_state_against_what_was_asked_for() {
+        let settings = PathBuf::from("/home/u/.claude/settings.json");
+        let ch = |sl, want| statusline_channel("claude", sl, &settings, want);
+
+        let absent_unasked = ch(StatuslineWiring::NotInstalled, Statusline::Keep);
+        assert!(
+            absent_unasked.current && absent_unasked.reasons.is_empty(),
+            "no shim and none asked for is not drift"
+        );
+        assert!(
+            ch(StatuslineWiring::NotInstalled, Statusline::Remove).current,
+            "--no-statusline is satisfied by an absent shim"
+        );
+
+        let present_unasked = ch(StatuslineWiring::Wired, Statusline::Keep);
+        assert!(!present_unasked.current, "an unrequested shim is reported");
+        assert!(
+            present_unasked.reasons[0].contains("--no-statusline"),
+            "and names how to remove it: {:?}",
+            present_unasked.reasons
+        );
+
+        let present_removing = ch(StatuslineWiring::Wired, Statusline::Remove);
+        assert!(!present_removing.current);
+        assert!(present_removing.reasons[0].contains("--no-statusline"));
     }
 
     /// The one doc-drift scanner: the deduped backtick tokens in agent-coverage.md's "### `<heading>`"

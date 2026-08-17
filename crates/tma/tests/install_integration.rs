@@ -1071,7 +1071,9 @@ fn cursor_install_uninstall_round_trip_and_scoped_check() {
     std::fs::write(s.cursor_cli_config(), cli_original).unwrap();
 
     // --- install ---
-    let out = s.install_hooks(&["cursor", "--yes"]);
+    // `--statusline` because the shim is opt-in: this suite covers the round trip of BOTH cursor
+    // channels, so it asks for the one a plain install now leaves alone.
+    let out = s.install_hooks(&["cursor", "--yes", "--statusline"]);
     assert!(
         out.status.success(),
         "cursor install failed: {}",
@@ -1116,19 +1118,33 @@ fn cursor_install_uninstall_round_trip_and_scoped_check() {
     );
 
     // --- cursor --check passes (both hooks.json and the cli-config.json shim) ---
+    // `--check --statusline` mirrors the install: a check has to state the same intent, since a bare
+    // one reports a shim it was not told to expect.
     assert!(
-        s.install_hooks(&["cursor", "--check"]).status.success(),
+        s.install_hooks(&["cursor", "--check", "--statusline"])
+            .status
+            .success(),
         "cursor --check should pass right after install"
     );
 
-    // A clobbered statusLine (forward overwritten) must fail --check.
+    // A clobbered statusLine (the forward overwritten) fails a check that asked for the shim. Bare,
+    // the same file is simply a statusline of the user's own, which is not drift.
     std::fs::write(s.cursor_cli_config(), cli_original).unwrap();
     assert!(
-        !s.install_hooks(&["cursor", "--check"]).status.success(),
-        "a clobbered statusLine shim must fail --check"
+        !s.install_hooks(&["cursor", "--check", "--statusline"])
+            .status
+            .success(),
+        "a clobbered statusLine shim must fail `--check --statusline`"
+    );
+    assert!(
+        s.install_hooks(&["cursor", "--check"]).status.success(),
+        "with no shim asked for, the user's own statusLine is not drift"
     );
     // Reinstall to restore the shim before uninstall.
-    assert!(s.install_hooks(&["cursor", "--yes"]).status.success());
+    assert!(s
+        .install_hooks(&["cursor", "--yes", "--statusline"])
+        .status
+        .success());
 
     // --- uninstall: both files byte-identical to their originals ---
     let out = s.install_hooks(&["cursor", "--uninstall", "--yes"]);

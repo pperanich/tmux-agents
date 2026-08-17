@@ -189,6 +189,9 @@ fn report_status_line(tmux: &Tmux, conf: &Path) {
 /// `tma install-hooks <agent>` resolves them.
 fn install_opts(opts: &InitOpts, agent: &str) -> install::InstallOpts {
     install::InstallOpts {
+        // The wizard never touches a statusline: the context shim composes into a command the user
+        // owns, so it stays an explicit `install-hooks <agent> --statusline`.
+        statusline: install::Statusline::Keep,
         agent: Some(agent.to_string()),
         uninstall: false,
         check: false,

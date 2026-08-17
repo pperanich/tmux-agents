@@ -31,6 +31,7 @@ pub(crate) use paths::{resolve_config_dir, resolve_tmux_conf};
 
 use adapters::{adapter_for, resolve_adapter};
 use paths::{resolve_wrapper, tma_bin, ConfigPaths, PathOverrides};
+pub(crate) use statusline::Statusline;
 
 /// The wrapper script shipped in the crate, embedded so `install-hooks` can write it out
 /// alongside the binary at install time.
@@ -69,6 +70,9 @@ pub(crate) struct InstallOpts {
     pub agent: Option<String>,
     pub uninstall: bool,
     pub check: bool,
+    /// What to do about the statusline context shim (`--statusline` / `--no-statusline`); see
+    /// [`Statusline`]. Only Claude and cursor have one.
+    pub statusline: Statusline,
     /// Skip the interactive diff confirmation (tests, scripted installs).
     pub assume_yes: bool,
     pub server: tma_tmux::tmux::Server,
@@ -167,6 +171,7 @@ pub(crate) fn run(opts: InstallOpts) -> ExitCode {
             &tmux,
             opts.focus_events,
             opts.agent.as_deref(),
+            opts.statusline,
         );
     }
 
@@ -198,6 +203,7 @@ pub(crate) fn run(opts: InstallOpts) -> ExitCode {
             &tmux,
             opts.assume_yes,
             opts.focus_events,
+            opts.statusline,
         )
     }
 }
@@ -213,6 +219,7 @@ fn install(
     tmux: &Tmux,
     assume_yes: bool,
     focus_events: bool,
+    statusline: Statusline,
 ) -> ExitCode {
     // Refuse an un-installable agent before writing anything: a hookless or adapter-less
     // agent must never fall back to Claude's JSON and contaminate its config.
@@ -231,7 +238,7 @@ fn install(
     }
 
     // 2. Agent config: wire the wrapper via the agent's own mechanism (the honest split).
-    if !adapter.install(lm, paths, wrapper, assume_yes) {
+    if !adapter.install(lm, paths, wrapper, assume_yes, statusline) {
         return ExitCode::FAILURE;
     }
 
@@ -324,7 +331,7 @@ fn any_agent_still_wired(
 ) -> bool {
     manifests.iter().filter(|lm| lm.name != except).any(|lm| {
         matches!(
-            classify_agent(lm, paths, wrapper),
+            classify_agent(lm, paths, wrapper, Statusline::Keep),
             HookWiring::Wired | HookWiring::Incomplete(_)
         )
     })
@@ -561,15 +568,25 @@ pub(crate) fn diagnose_hooks(
     manifests: &[LoadedManifest],
     tmux: &Tmux,
     focus_events: bool,
+    statusline: Statusline,
 ) -> HookDiagnosis {
     let paths = ConfigPaths::resolve(PathOverrides::default());
     let config_dir = resolve_config_dir(None);
     let wrapper = resolve_wrapper(None);
-    build_diagnosis(manifests, &paths, &config_dir, &wrapper, tmux, focus_events)
+    build_diagnosis(
+        manifests,
+        &paths,
+        &config_dir,
+        &wrapper,
+        tmux,
+        focus_events,
+        statusline,
+    )
 }
 
 /// The shared read-only core behind both `--check` and [`diagnose_hooks`]. Reads the agent
 /// config files, the wrapper path, and the tmux server hooks; writes nothing.
+#[allow(clippy::too_many_arguments)]
 fn build_diagnosis(
     manifests: &[LoadedManifest],
     paths: &ConfigPaths,
@@ -577,6 +594,7 @@ fn build_diagnosis(
     wrapper: &Path,
     tmux: &Tmux,
     focus_events: bool,
+    statusline: Statusline,
 ) -> HookDiagnosis {
     // The config entries invoke the wrapper by path and its death is silent, so its on-disk
     // presence is part of the diagnosis (a moved/deleted wrapper breaks every wired hook).
@@ -586,7 +604,7 @@ fn build_diagnosis(
         .iter()
         .map(|lm| AgentHooks {
             agent: lm.name.clone(),
-            wiring: classify_agent(lm, paths, wrapper),
+            wiring: classify_agent(lm, paths, wrapper, statusline),
         })
         .collect();
 
@@ -618,18 +636,24 @@ pub(crate) fn is_installable(lm: &LoadedManifest) -> bool {
 
 /// Classify one agent's config wiring (read-only). A hookless or adapter-less manifest is reported
 /// as such; otherwise [`adapters::AgentAdapter::classify`] inspects its own config.
-fn classify_agent(lm: &LoadedManifest, paths: &ConfigPaths, wrapper: &Path) -> HookWiring {
+fn classify_agent(
+    lm: &LoadedManifest,
+    paths: &ConfigPaths,
+    wrapper: &Path,
+    statusline: Statusline,
+) -> HookWiring {
     if lm.manifest.hooks.is_none() {
         return HookWiring::Hookless;
     }
     let Some(adapter) = adapter_for(&lm.name) else {
         return HookWiring::NoAdapter;
     };
-    adapter.classify(lm, paths, wrapper)
+    adapter.classify(lm, paths, wrapper, statusline)
 }
 
 // --- --check ---------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 fn run_check(
     manifests: &[LoadedManifest],
     paths: &ConfigPaths,
@@ -638,8 +662,17 @@ fn run_check(
     tmux: &Tmux,
     focus_events: bool,
     agent_filter: Option<&str>,
+    statusline: Statusline,
 ) -> ExitCode {
-    let diag = build_diagnosis(manifests, paths, config_dir, wrapper, tmux, focus_events);
+    let diag = build_diagnosis(
+        manifests,
+        paths,
+        config_dir,
+        wrapper,
+        tmux,
+        focus_events,
+        statusline,
+    );
     let mut missing = Vec::new();
 
     if !diag.wrapper_present {
