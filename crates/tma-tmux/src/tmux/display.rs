@@ -94,6 +94,20 @@ impl Tmux {
         self.run(&borrowed).map(|_| ())
     }
 
+    /// Move an existing pane beside `target`, in whatever window (or session) `target` lives in:
+    /// `join-pane -h -l <width> -d`, the counterpart of [`split_beside`](Self::split_beside) for a
+    /// pane that already exists. The moved pane keeps its process, its id, and its pane options, so
+    /// a sidebar that follows a jump is the same sidebar with the same state. `-d` leaves the focus
+    /// where it is (on the pane just jumped to, not on the arriving sidebar).
+    ///
+    /// Emptying a window this way destroys it, which is why the sidebar caller refuses to move a
+    /// pane that is alone in its window.
+    pub fn join_beside(&self, src_pane: &str, target: &str, width: u32) -> Result<(), TmuxError> {
+        let argv = join_beside_argv(src_pane, target, width);
+        let borrowed: Vec<&str> = argv.iter().map(String::as_str).collect();
+        self.run(&borrowed).map(|_| ())
+    }
+
     /// Kill one pane (`kill-pane -t`). The sidebar toggle's close half; killing the last pane of a
     /// session ends the session, which is why the toggle only ever names a pane it found a live
     /// sidebar advertisement on.
@@ -253,6 +267,23 @@ fn split_beside_argv(target: &str, width: u32, command: &str) -> Vec<String> {
     ]
 }
 
+/// Build the `join-pane` argv: horizontal split of `target`'s window, `width` columns, detached so
+/// the arriving pane does not steal focus. Mirrors [`split_beside_argv`] flag for flag, since the
+/// two produce the same layout by different means.
+fn join_beside_argv(src_pane: &str, target: &str, width: u32) -> Vec<String> {
+    vec![
+        "join-pane".to_string(),
+        "-d".to_string(),
+        "-h".to_string(),
+        "-l".to_string(),
+        width.to_string(),
+        "-s".to_string(),
+        src_pane.to_string(),
+        "-t".to_string(),
+        target.to_string(),
+    ]
+}
+
 /// Build the `switch-client` argv, optionally targeting a specific client (`-c <client>`).
 /// Split out so the client targeting is unit-testable without a live server.
 fn switch_client_argv(client: Option<&str>, session: &str) -> Vec<String> {
@@ -298,6 +329,15 @@ mod tests {
                 "%3",
                 "'/usr/local/bin/tma' watch"
             ]
+        );
+    }
+
+    /// The moving counterpart of the split: same geometry flags, `-s` naming the pane that moves.
+    #[test]
+    fn join_beside_argv_moves_a_pane_at_the_same_geometry() {
+        assert_eq!(
+            join_beside_argv("%3", "%9", 40),
+            vec!["join-pane", "-d", "-h", "-l", "40", "-s", "%3", "-t", "%9"]
         );
     }
 

@@ -90,13 +90,24 @@ set -g mouse on
 ```
 
 With both in place, the [mouse table](../reference/keybindings.md#mouse-bindings)
-applies. The `☰` icon is the one segment that is always there, so the sidebar is
-reachable even on a status line showing no counts. Clicking it splits `tma watch`
-beside the pane you are in, 40 columns wide, without moving your focus; clicking
-it again kills that pane. It finds the running sidebar by the pid a `tma watch`
+applies. The `☰` icon is the one segment that is always there (wherever a click
+can reach it), so the sidebar is reachable even on a status line showing no
+counts. A click resolves to one of three things:
+
+| where the sidebar is | the click |
+|---|---|
+| in the window you are looking at | kills that pane |
+| in another window of the session | moves it here, beside the pane you are in |
+| nowhere | splits `tma watch` beside you, 40 columns wide |
+
+Never a second sidebar, in other words — jump away and click again and the one
+you had comes to you. It finds the running sidebar by the pid a `tma watch`
 advertises on its own pane, so a sidebar you opened by hand (`prefix W`) is the
-one the next click closes, and only sidebars in the clicking client's session are
-touched.
+one the next click acts on, and only sidebars in the clicking client's session
+are touched. A watcher that has its window to itself (`prefix G`'s full-width
+table) is left alone: moving the last pane out of a window destroys it.
+
+None of it moves your focus.
 
 Restyle the icon, or drop it entirely, with a `sidebar` entry under `[status]`:
 

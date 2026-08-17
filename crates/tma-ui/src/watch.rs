@@ -74,7 +74,7 @@ pub fn run_watch(
     // back to the 1 s self-refresh. The guard unsets the pid and restores the terminal on every exit.
     nudge::install_nudge_handler();
     let watch_pane = std::env::var("TMUX_PANE").ok().filter(|p| !p.is_empty());
-    let guard = crate::term::TerminalGuard::enter(tmux, watch_pane, Some(process::id()))?;
+    let guard = crate::term::TerminalGuard::enter(tmux, watch_pane.clone(), Some(process::id()))?;
 
     runner::run_surface(
         model,
@@ -89,6 +89,9 @@ pub fn run_watch(
             manifest_dir,
             acting_client,
             filter: runner::RowFilter::from_selector(selector),
+            // The sidebar follows its own jumps into the window it sends the client to; the same
+            // pane the guard advertises the nudge pid on.
+            follow_pane: watch_pane,
         },
     )
 }

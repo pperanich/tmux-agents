@@ -80,6 +80,8 @@ pub fn run_picker(
             manifest_dir,
             acting_client,
             filter,
+            // The picker closes on its jump, so there is nothing left to move.
+            follow_pane: None,
         },
     )
 }

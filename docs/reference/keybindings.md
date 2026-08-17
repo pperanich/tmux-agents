@@ -94,7 +94,7 @@ captured.
 
 | key | does |
 |---|---|
-| `enter` | Jump to the highlighted agent and clear its attention flag; the sidebar stays open. |
+| `enter` | Jump to the highlighted agent and clear its attention flag; the sidebar stays open and follows you (below). |
 | `a` | Open the tmux action menu for the highlighted agent. |
 | `p` | Swap the live preview for the full-width status table, and back. Wide body only. |
 | `g` | Flatten the repo grouping, and regroup. Wide body only. |
@@ -112,6 +112,15 @@ The sidebar takes the same mouse gestures as the picker (hover underlines, click
 selects, click again jumps — the sidebar stays open, exactly as `enter` does;
 wheel moves three rows, and any key drops the hover). Group headers are not
 selectable, so hovering or clicking a `▸ repo` line does nothing.
+
+When a jump lands you in a different window, the sidebar pane moves there with
+you — same process, same selection, same scroll position — so the list you were
+triaging from is still on screen for the next jump. It refuses in three cases,
+each of which would cost you something: the jump stayed in this window (nothing
+to do), the sidebar has its window to itself (`prefix G`'s table window, which
+moving would destroy), or another client is attached to the session it would
+leave (the pane would vanish off their screen). The jump itself always happens
+regardless.
 
 While `tma watch` is running, that pane's mouse belongs to tma: tmux's own
 drag-to-select and scroll-into-copy-mode do not apply inside it (hold `shift` for

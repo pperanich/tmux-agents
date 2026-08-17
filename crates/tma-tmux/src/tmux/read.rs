@@ -176,6 +176,18 @@ impl Tmux {
             .collect())
     }
 
+    /// Enumerate the clients attached to one session (`list-clients -t`), empty when none. The
+    /// sidebar's follow reads it: a pane must not be moved out from under a second client that is
+    /// looking at the session it currently lives in.
+    pub fn list_session_clients(&self, session: &str) -> Result<Vec<String>, TmuxError> {
+        let out = self.run(&["list-clients", "-t", session, "-F", "#{client_name}"])?;
+        Ok(out
+            .lines()
+            .filter(|l| !l.is_empty())
+            .map(String::from)
+            .collect())
+    }
+
     /// Capture the live-viewport tail with escapes. `-S -50` reaches up to 50 lines ABOVE the
     /// viewport into scrollback: on a pane shorter than ~50 rows (a split) that carries prior-turn
     /// scrollback above the visible screen, so whole-screen rules scope to `Region::Visible` (clamped

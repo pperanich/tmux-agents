@@ -627,7 +627,7 @@ Usage: tma watch [OPTIONS]
 | option | meaning |
 |---|---|
 | `--table` | Open directly in the full-width status table when the pane is wide enough (`p` toggles back to the preview). A pane below 76 columns still falls back to the single list. |
-| `--toggle` | Open a sidebar in the acting client's session, or close the one already running there, then exit. Draws nothing itself. Combining it with `--table` or a selector flag is a usage error (exit 2); no client to act for is exit 2 too. |
+| `--toggle` | Close the sidebar if it is in the window being looked at, move it here if it is in another window of the session, else open one — then exit. Draws nothing itself. Combining it with `--table` or a selector flag is a usage error (exit 2); no client to act for is exit 2 too. |
 | [selector flags](#selector-flags) | Show only the agents in scope, e.g. a `tma watch --repo app` sidebar per repo. |
 
 `--toggle` is what the status line's `☰` segment and the `MouseDown1Status`

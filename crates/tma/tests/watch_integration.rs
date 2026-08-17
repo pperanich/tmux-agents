@@ -692,3 +692,119 @@ fn watch_toggle_rejects_the_running_sidebar_flags() {
         );
     }
 }
+
+/// A sidebar that shares its window follows the jump it just made: the pane moves into the window
+/// the client landed in, so the list it was used from is still on screen for the next jump. Before
+/// this, the first Enter left the sidebar behind in the window (or session) you came from.
+#[test]
+fn watch_sidebar_follows_its_own_jump() {
+    let Some(s) = setup_blocked_agent("watch-follow") else {
+        return;
+    };
+    let home_pane = s.display("home", "#{pane_id}");
+    let home_window = s.display("home", "#{window_id}");
+    let work_pane = s.display("work", "#{pane_id}");
+    let work_window = s.display("work", "#{window_id}");
+
+    // The sidebar as a real sidebar: a split beside the home shell, not the whole window.
+    let launch = format!(
+        "'{}' watch --socket-name '{}' --manifest-dir '{}'",
+        s.bin(),
+        s.socket,
+        s.workdir.display()
+    );
+    assert!(s
+        .tmux(&[
+            "split-window",
+            "-d",
+            "-h",
+            "-l",
+            "40",
+            "-t",
+            "home",
+            &launch
+        ])
+        .status
+        .success());
+    poll_until("the split sidebar to render its first frame", || {
+        session_panes(&s, "home").len() == 2
+            && session_panes(&s, "home")
+                .iter()
+                .any(|p| *p != home_pane && !s.pane_option(p, "@tma_watch_pid").is_empty())
+    });
+    let sidebar = session_panes(&s, "home")
+        .into_iter()
+        .find(|p| *p != home_pane)
+        .expect("the split pane is the sidebar");
+    assert_eq!(s.display(&sidebar, "#{window_id}"), home_window);
+
+    // Enter jumps the client to the blocked agent in the other session.
+    s.tmux(&["send-keys", "-t", &sidebar, "Enter"]);
+    poll_until("the client to land on the blocked agent", || {
+        s.display("", "#{pane_id}") == work_pane
+    });
+
+    // ... and the sidebar comes along: same pane, same process, new window.
+    poll_until(
+        "the sidebar to follow the jump into the work window",
+        || s.display(&sidebar, "#{window_id}") == work_window,
+    );
+    assert!(
+        !s.pane_option(&sidebar, "@tma_watch_pid").is_empty(),
+        "the moved pane is the same running sidebar, not a fresh one"
+    );
+    assert_eq!(
+        s.display("", "#{pane_id}"),
+        work_pane,
+        "the arriving sidebar must not steal the focus from the agent just jumped to"
+    );
+    assert_eq!(
+        session_panes(&s, "home"),
+        vec![home_pane],
+        "the window it left keeps its own pane"
+    );
+}
+
+/// A sidebar in a window the client is not looking at is brought here rather than duplicated: the
+/// click always ends with a sidebar on screen, and never with a second watcher running unseen.
+#[test]
+fn watch_toggle_brings_an_offscreen_sidebar_here() {
+    let Some(s) = setup_toggle_client("watch-toggle-move") else {
+        return;
+    };
+    let home_pane = s.display("home", "#{pane_id}");
+
+    assert!(s.tma(&["watch", "--toggle"]).status.success());
+    poll_until("the toggled sidebar to advertise its pid", || {
+        session_panes(&s, "home")
+            .iter()
+            .any(|p| *p != home_pane && !s.pane_option(p, "@tma_watch_pid").is_empty())
+    });
+    let sidebar = session_panes(&s, "home")
+        .into_iter()
+        .find(|p| *p != home_pane)
+        .expect("the toggle split a sidebar");
+
+    // A second window in the same session, which the client switches to: the sidebar is now
+    // off-screen, exactly as it is after a jump.
+    assert!(s.tmux(&["new-window", "-t", "home"]).status.success());
+    let second = s.display("", "#{window_id}");
+    assert_ne!(second, s.display(&sidebar, "#{window_id}"));
+
+    assert!(s.tma(&["watch", "--toggle"]).status.success());
+    poll_until("the toggle to bring the sidebar into this window", || {
+        s.display(&sidebar, "#{window_id}") == second
+    });
+    assert_eq!(
+        session_panes(&s, "home").len(),
+        3,
+        "moved, not duplicated: the shell, the new window's pane, and the one sidebar"
+    );
+
+    // Now that it is here, the same click closes it — the toggle's original meaning.
+    assert!(s.tma(&["watch", "--toggle"]).status.success());
+    poll_until(
+        "the toggle to close the sidebar now that it is here",
+        || session_panes(&s, "home").len() == 2,
+    );
+}
