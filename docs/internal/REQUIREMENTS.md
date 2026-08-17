@@ -159,7 +159,7 @@ captured evidence (see D10, X3).
   `#[fg=]` styling; prints empty string when no agents (so the status line collapses);
   never blocks the status line (see N2).
 - **F21** Watch (`tma watch`): persistent live dashboard designed to run in a normal
-  pane (sidebar via `split-window`); non-modal by requirement — popups are modal.
+  pane, wherever the user puts it; non-modal by requirement — popups are modal.
   Deferred to phase 3 (SHOULD, not v1): tmux-agent-sidebar already serves this need
   maturely, and picker + status + jump deliver the core loop; descoped per
   adversarial review with user approval 2026-07-20. *(Shipped H6a `ec37512` + H6b
@@ -171,8 +171,15 @@ captured evidence (see D10, X3).
   focus-change latency, ~200 ms worst case. H9 `7acb753`, 2026-07-25: on a
   wide-enough pane (>=76 columns) the body splits to carry a live ANSI preview of
   the highlighted agent's pane beside the list, re-captured on selection change and
-  every refresh tick; below the threshold the single-list sidebar is unchanged, and
-  a narrow pane adds zero tmux calls. Width-driven, no toggle key, no config knob.)*
+  every refresh tick; below the threshold the single-list body is unchanged, and
+  a narrow pane adds zero tmux calls. Width-driven, no toggle key, no config knob.
+  2026-08-17: the sidebar framing is withdrawn. `tma watch --toggle` (which
+  split/moved/killed a managed pane), the follow-the-jump pane move, and the `☰`
+  status segment that drove them are removed; tma places no pane and moves none.
+  What remains is the surface itself, run wherever the user wants it — `prefix G`'s
+  own window, a hand-written split, or a terminal outside tmux. Rationale: a
+  managed pane is a second layout owner competing with the user's, and the popup
+  picker already covers the modal half of the loop.)*
 - **F22** Notifications on transition into `blocked` (daemon phase): tmux
   `display-message` as baseline; user-configurable hook command receiving structured
   env/JSON (enables desktop notifications, ntfy, etc.); MUST respect hysteresis (F12)

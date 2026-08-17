@@ -44,15 +44,9 @@ const BINDINGS: &[Binding] = &[
         command: "display-popup -E -w 80% -h 60% 'tma'",
     },
     Binding {
-        // `W` (not `w`): stock tmux binds `prefix w` to `choose-tree -Zw`. `W` is free in the
-        // stock 3.x prefix table and reads as "watch".
-        key: "W",
-        command: "split-window -h -l 32 'tma watch'",
-    },
-    Binding {
-        // `G` (uppercase): the full-screen status table, the `prefix+g`-style analog (`g` is taken by
-        // `jump --blocked`; `G` is free in the stock prefix table). A new window, not a 32-col split,
-        // so the table gets the full terminal width; `split-window` does not format-expand, so no
+        // `G` (uppercase): the persistent watcher, in a window of its own (`g` is taken by
+        // `jump --blocked`; `G` is free in the stock prefix table). A new window rather than a split,
+        // so the table gets the full terminal width; `new-window` does not format-expand, so no
         // `--client`.
         key: "G",
         command: "new-window 'tma watch --table'",
@@ -85,9 +79,7 @@ const BINDINGS: &[Binding] = &[
 /// Both the `Status` and `StatusRight` key of each button are bound: a `#[range=user|…]` in
 /// status-right resolves to the `Status` key, and the `StatusRight` one covers the rest of that area.
 /// The dispatch is `if-shell -F`, a FORMAT conditional (no shell runs); `#{mouse_status_range}` holds
-/// the clicked range's name, which `tma status` writes as `tma:<class>` (plus the trailing
-/// `tma:sidebar` icon, matched before the generic `tma:*` arm so it toggles instead of opening the
-/// picker).
+/// the clicked range's name, which `tma status` writes as `tma:<class>`.
 ///
 /// Fall-through: tmux has no "now do what you would have done" command, so a bound key owns the
 /// click. The left chain therefore ends with `switch-client -t=`, tmux's own stock
@@ -100,19 +92,15 @@ const MOUSE_BINDINGS: &[Binding] = &[
         key: "MouseDown1Status",
         command: "if-shell -F '#{==:#{mouse_status_range},tma:blocked}' \
                   { run-shell 'tma jump --blocked --client \"#{client_name}\"' } \
-                  { if-shell -F '#{==:#{mouse_status_range},tma:sidebar}' \
-                  { run-shell 'tma watch --toggle --client \"#{client_name}\"' } \
                   { if-shell -F '#{m:tma:*,#{mouse_status_range}}' \
-                  { display-popup -E -w 80% -h 60% 'tma' } { switch-client -t= } } }",
+                  { display-popup -E -w 80% -h 60% 'tma' } { switch-client -t= } }",
     },
     Binding {
         key: "MouseDown1StatusRight",
         command: "if-shell -F '#{==:#{mouse_status_range},tma:blocked}' \
                   { run-shell 'tma jump --blocked --client \"#{client_name}\"' } \
-                  { if-shell -F '#{==:#{mouse_status_range},tma:sidebar}' \
-                  { run-shell 'tma watch --toggle --client \"#{client_name}\"' } \
                   { if-shell -F '#{m:tma:*,#{mouse_status_range}}' \
-                  { display-popup -E -w 80% -h 60% 'tma' } } }",
+                  { display-popup -E -w 80% -h 60% 'tma' } }",
     },
     Binding {
         key: "MouseDown3Status",
@@ -477,7 +465,6 @@ mod tests {
 # tma keybindings, managed by `tma install-keys`. Do not hand-edit; re-run to update,
 # or `tma install-keys --uninstall` to remove.
 bind-key a display-popup -E -w 80% -h 60% 'tma'
-bind-key W split-window -h -l 32 'tma watch'
 bind-key G new-window 'tma watch --table'
 bind-key j run-shell 'tma jump --attention --client \"#{client_name}\"'
 bind-key g run-shell 'tma jump --blocked --client \"#{client_name}\"'
@@ -526,8 +513,8 @@ bind-key A run-shell 'tma act --menu --pane \"#{pane_id}\"'
         );
         let want = "\
 # Clickable status segments (--mouse). Needs `set -g mouse on`, which tma leaves to you.
-bind-key -n MouseDown1Status if-shell -F '#{==:#{mouse_status_range},tma:blocked}' { run-shell 'tma jump --blocked --client \"#{client_name}\"' } { if-shell -F '#{==:#{mouse_status_range},tma:sidebar}' { run-shell 'tma watch --toggle --client \"#{client_name}\"' } { if-shell -F '#{m:tma:*,#{mouse_status_range}}' { display-popup -E -w 80% -h 60% 'tma' } { switch-client -t= } } }
-bind-key -n MouseDown1StatusRight if-shell -F '#{==:#{mouse_status_range},tma:blocked}' { run-shell 'tma jump --blocked --client \"#{client_name}\"' } { if-shell -F '#{==:#{mouse_status_range},tma:sidebar}' { run-shell 'tma watch --toggle --client \"#{client_name}\"' } { if-shell -F '#{m:tma:*,#{mouse_status_range}}' { display-popup -E -w 80% -h 60% 'tma' } } }
+bind-key -n MouseDown1Status if-shell -F '#{==:#{mouse_status_range},tma:blocked}' { run-shell 'tma jump --blocked --client \"#{client_name}\"' } { if-shell -F '#{m:tma:*,#{mouse_status_range}}' { display-popup -E -w 80% -h 60% 'tma' } { switch-client -t= } }
+bind-key -n MouseDown1StatusRight if-shell -F '#{==:#{mouse_status_range},tma:blocked}' { run-shell 'tma jump --blocked --client \"#{client_name}\"' } { if-shell -F '#{m:tma:*,#{mouse_status_range}}' { display-popup -E -w 80% -h 60% 'tma' } }
 bind-key -n MouseDown3Status if-shell -F '#{m:tma:*,#{mouse_status_range}}' { run-shell 'tma jump --menu --client \"#{client_name}\"' }
 bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}' { run-shell 'tma jump --menu --client \"#{client_name}\"' }
 ";

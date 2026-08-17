@@ -1,5 +1,5 @@
 //! Shared dashboard scaffolding for the two live agent surfaces: the fuzzy picker and
-//! the `watch` sidebar. Both paint a first frame from stamps, own a 1 s guarded-poll
+//! the `watch` dashboard. Both paint a first frame from stamps, own a 1 s guarded-poll
 //! refresh with config + manifest hot-reload, and render a state-sorted, bordered "agents (N)"
 //! list with a REVERSED highlight and a one-line footer. The pieces that differ (the picker's
 //! preview pane and fuzzy filter, each surface's per-row span layout and footer text) stay in

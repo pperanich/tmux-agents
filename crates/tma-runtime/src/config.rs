@@ -136,10 +136,6 @@ pub struct StatusStyles {
     /// token stays `idle`.
     #[serde(default)]
     pub done: StateStyle,
-    /// The trailing sidebar-toggle icon (not a state class): clicking it opens or closes a
-    /// `tma watch` split. `glyph = ""` drops the segment entirely.
-    #[serde(default)]
-    pub sidebar: StateStyle,
 }
 
 impl StatusStyles {
@@ -157,12 +153,6 @@ impl StatusStyles {
     /// The resolved `(glyph, color-string)` for the "done" surface (idle + attention).
     pub fn resolved_done(&self) -> (&str, &str) {
         pick(&self.done, "✓", "magenta")
-    }
-
-    /// The resolved `(glyph, color-string)` for the sidebar-toggle icon. `colour244` is the same
-    /// dim the `unknown` class uses: the icon is chrome, not a count. An empty glyph disables it.
-    pub fn resolved_sidebar(&self) -> (&str, &str) {
-        pick(&self.sidebar, "☰", "colour244")
     }
 }
 
@@ -828,21 +818,6 @@ mod tests {
         assert_eq!(c.status.resolved(AgentState::Blocked), ("!", "red"));
     }
 
-    /// The sidebar icon takes the same `{ glyph, color }` entry as a class, with its own dim
-    /// default; an explicit empty glyph is what disables the segment, so it must survive parsing
-    /// as `Some("")` rather than falling back to the default.
-    #[test]
-    fn status_sidebar_entry_parses_and_can_be_emptied() {
-        let c: Config = toml::from_str("").unwrap();
-        assert_eq!(c.status.resolved_sidebar(), ("☰", "colour244"));
-
-        let c: Config = toml::from_str("[status]\nsidebar = { color = \"blue\" }\n").unwrap();
-        assert_eq!(c.status.resolved_sidebar(), ("☰", "blue"));
-
-        let c: Config = toml::from_str("[status]\nsidebar = { glyph = \"\" }\n").unwrap();
-        assert_eq!(c.status.resolved_sidebar().0, "");
-    }
-
     /// An unknown key is a loud error (never silently ignored).
     #[test]
     fn unknown_key_is_rejected() {
@@ -1176,7 +1151,6 @@ mod tests {
             style("picker", key, c.picker.resolved_str(state));
         }
         style("status", "done", c.status.resolved_done());
-        style("status", "sidebar", c.status.resolved_sidebar());
         style("picker", "done", c.picker.resolved_done_str());
         out
     }

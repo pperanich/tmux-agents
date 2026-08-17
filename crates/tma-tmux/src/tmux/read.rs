@@ -127,31 +127,8 @@ impl Tmux {
     /// Read one user option across every pane (`list-panes -a`), returning `(pane_id, value)` where
     /// set. The nudge sender walks this for `@tma_watch_pid` (present only where `tma watch` set it).
     pub fn list_pane_option(&self, key: &str) -> Result<Vec<(String, String)>, TmuxError> {
-        self.pane_option_scan(&["list-panes", "-a", "-F"], key)
-    }
-
-    /// The same read narrowed to one session's panes (`list-panes -s -t <session>`). The sidebar
-    /// toggle scans only the acting client's session, so a sidebar in another session is neither
-    /// found nor killed.
-    pub fn list_session_pane_option(
-        &self,
-        session: &str,
-        key: &str,
-    ) -> Result<Vec<(String, String)>, TmuxError> {
-        self.pane_option_scan(&["list-panes", "-s", "-t", session, "-F"], key)
-    }
-
-    /// Run a `list-panes … -F` scan whose format is `#{pane_id}<SEP>#{<key>}`, keeping the panes
-    /// where the option is set. `prefix` carries everything up to and including `-F`.
-    fn pane_option_scan(
-        &self,
-        prefix: &[&str],
-        key: &str,
-    ) -> Result<Vec<(String, String)>, TmuxError> {
         let format = format!("#{{pane_id}}{SEP}#{{{key}}}");
-        let mut argv: Vec<&str> = prefix.to_vec();
-        argv.push(&format);
-        let out = self.run(&argv)?;
+        let out = self.run(&["list-panes", "-a", "-F", &format])?;
         let mut found = Vec::new();
         for line in out.lines() {
             let Some((pane, value)) = line.split_once(SEP) else {
@@ -169,18 +146,6 @@ impl Tmux {
     /// client has no ambient polling floor.
     pub fn list_clients(&self) -> Result<Vec<String>, TmuxError> {
         let out = self.run(&["list-clients", "-F", "#{client_name}"])?;
-        Ok(out
-            .lines()
-            .filter(|l| !l.is_empty())
-            .map(String::from)
-            .collect())
-    }
-
-    /// Enumerate the clients attached to one session (`list-clients -t`), empty when none. The
-    /// sidebar's follow reads it: a pane must not be moved out from under a second client that is
-    /// looking at the session it currently lives in.
-    pub fn list_session_clients(&self, session: &str) -> Result<Vec<String>, TmuxError> {
-        let out = self.run(&["list-clients", "-t", session, "-F", "#{client_name}"])?;
         Ok(out
             .lines()
             .filter(|l| !l.is_empty())

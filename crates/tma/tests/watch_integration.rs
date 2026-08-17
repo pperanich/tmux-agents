@@ -1,4 +1,4 @@
-//! Acceptance: the `tma watch` sidebar jumps to the highlighted agent on Enter, plus the width-driven
+//! Acceptance: `tma watch` jumps to the highlighted agent on Enter, plus the width-driven
 //! preview (present when wide, absent when narrow). Like the picker, `watch` runs an alt-screen TUI in
 //! a `home` pane needing an attached PTY client (via a Python pty-fork helper; skips without python3).
 //! Unlike the picker, `watch` is persistent (no close on Enter), so this asserts the jump landed and
@@ -45,7 +45,7 @@ fn setup_blocked_agent(label: &str) -> Option<Scratch> {
     }
     let mut s = Scratch::new(label);
 
-    // `home`: a shell where the sidebar will run (attached). `work`: a detached blocked agent.
+    // `home`: a shell where the watcher will run (attached). `work`: a detached blocked agent.
     assert!(s
         .tmux(&["new-session", "-d", "-s", "home", "-x", "100", "-y", "30"])
         .status
@@ -95,7 +95,7 @@ fn setup_blocked_agent(label: &str) -> Option<Scratch> {
     )
     .unwrap();
 
-    // Populate stamps so the sidebar's first frame already lists the blocked agent.
+    // Populate stamps so the watcher's first frame already lists the blocked agent.
     assert!(s.tma(&["ls"]).status.success());
     assert_eq!(s.display("work", "#{@agent_state}"), "blocked");
 
@@ -112,7 +112,7 @@ fn setup_blocked_agent(label: &str) -> Option<Scratch> {
     Some(s)
 }
 
-/// Launch the sidebar in the `home` pane and hard-fail if the first frame never renders (a startup
+/// Launch the watcher in the `home` pane and hard-fail if the first frame never renders (a startup
 /// regression, not an environment gap — the only genuine skips are in [`setup_blocked_agent`]).
 fn launch_watch(s: &Scratch) {
     let launch = format!(
@@ -140,7 +140,7 @@ fn watch_enter_jumps_to_highlighted_agent() {
     }
     let mut s = Scratch::new("watch");
 
-    // `home`: a shell where the sidebar will run (attached). `work`: a detached blocked agent.
+    // `home`: a shell where the watcher will run (attached). `work`: a detached blocked agent.
     assert!(s
         .tmux(&["new-session", "-d", "-s", "home", "-x", "100", "-y", "30"])
         .status
@@ -191,7 +191,7 @@ fn watch_enter_jumps_to_highlighted_agent() {
     )
     .unwrap();
 
-    // Populate stamps so the sidebar's first frame already lists the blocked agent.
+    // Populate stamps so the watcher's first frame already lists the blocked agent.
     assert!(s.tma(&["ls"]).status.success());
     assert_eq!(s.display("work", "#{@agent_state}"), "blocked");
 
@@ -208,7 +208,7 @@ fn watch_enter_jumps_to_highlighted_agent() {
 
     let home_pane = s.display("home", "#{pane_id}");
 
-    // Launch the sidebar in the home pane.
+    // Launch the watcher in the home pane.
     let launch = format!(
         "'{}' watch --socket-name '{}' --manifest-dir '{}'",
         s.bin(),
@@ -224,14 +224,14 @@ fn watch_enter_jumps_to_highlighted_agent() {
         String::from_utf8_lossy(&content.stdout).contains("agents (")
     });
 
-    // The running sidebar advertises its pid in `@tma_watch_pid` on its own pane.
+    // The running watcher advertises its pid in `@tma_watch_pid` on its own pane.
     let advertised = s.display(&home_pane, "#{@tma_watch_pid}");
     assert!(
         advertised.parse::<i32>().map(|p| p > 0).unwrap_or(false),
         "watch must advertise a positive pid in @tma_watch_pid, got {advertised:?}"
     );
 
-    // Enter jumps to the highlighted (sorted-first, blocked) agent; the sidebar stays open.
+    // Enter jumps to the highlighted (sorted-first, blocked) agent; the watcher stays open.
     s.tmux(&["send-keys", "-t", "home", "Enter"]);
 
     poll_until(
@@ -244,7 +244,7 @@ fn watch_enter_jumps_to_highlighted_agent() {
         s.display("work", "#{@agent_attention}").is_empty()
     });
 
-    // Quitting the sidebar unsets its `@tma_watch_pid` advertisement eagerly. Re-focus home first —
+    // Quitting the watcher unsets its `@tma_watch_pid` advertisement eagerly. Re-focus home first —
     // the jump above moved the client onto the work pane.
     s.tmux(&["send-keys", "-t", "home", "q"]);
     poll_until("quitting watch to unset @tma_watch_pid on its pane", || {
@@ -343,7 +343,7 @@ fn watch_wide_groups_by_repo_and_g_flattens() {
     assert!(git(&repo, &["config", "user.name", "t"]));
     assert!(git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]));
 
-    // `home`: the wide attached pane the sidebar runs in. `work`: a detached blocked agent in the repo.
+    // `home`: the wide attached pane the watcher runs in. `work`: a detached blocked agent in the repo.
     assert!(s
         .tmux(&["new-session", "-d", "-s", "home", "-x", "100", "-y", "30"])
         .status
@@ -429,7 +429,7 @@ fn watch_wide_groups_by_repo_and_g_flattens() {
         }
     }
 
-    // Launch the sidebar straight into the table (a wide arm that groups).
+    // Launch the watcher straight into the table (a wide arm that groups).
     let launch = format!(
         "'{}' watch --table --socket-name '{}' --manifest-dir '{}'",
         s.bin(),
@@ -481,7 +481,7 @@ fn clear_attention_nudges_advertised_watch_pid() {
         .success());
     let pane = s.display("home", "#{pane_id}");
 
-    // A stand-in "sidebar" process: a plain sleep, SIGUSR1 terminates it by default.
+    // A stand-in watcher process: a plain sleep, SIGUSR1 terminates it by default.
     let mut child = Command::new("sleep")
         .arg("120")
         .spawn()
@@ -528,283 +528,4 @@ fn clear_attention_nudges_advertised_watch_pid() {
             panic!("clear-attention did not signal the advertised @tma_watch_pid");
         }
     }
-}
-
-// ---- `tma watch --toggle` -------------------------------------------------------------------
-
-/// The pane ids of a session, in list order.
-fn session_panes(s: &Scratch, session: &str) -> Vec<String> {
-    let out = s.tmux(&["list-panes", "-s", "-t", session, "-F", "#{pane_id}"]);
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(str::to_string)
-        .collect()
-}
-
-/// A scratch server with an attached PTY client on a single-pane `home` session, the setup both
-/// toggle tests want. `None` on an environment gap (no tmux/python3), panicking on a real attach
-/// failure the way the other watch tests do.
-fn setup_toggle_client(label: &str) -> Option<Scratch> {
-    if !tma_test_support::tmux_available() {
-        eprintln!("skipping: tmux not installed");
-        return None;
-    }
-    if !tma_test_support::python3_available() {
-        eprintln!("skipping: python3 unavailable for the PTY attach");
-        return None;
-    }
-    let mut s = Scratch::new(label);
-    assert!(s
-        .tmux(&["new-session", "-d", "-s", "home", "-x", "120", "-y", "30"])
-        .status
-        .success());
-    // The pane the toggle opens is a child of the tmux server, so it never sees the harness's own
-    // `TMA_CONFIG`; pin it in the server environment so the sidebar cannot read a real user config.
-    assert!(s
-        .tmux(&[
-            "set-environment",
-            "-g",
-            "TMA_CONFIG",
-            tma_test_support::empty_config_path().to_str().unwrap(),
-        ])
-        .status
-        .success());
-    match s.attach_client("home") {
-        AttachOutcome::Attached => Some(s),
-        AttachOutcome::NoPython => {
-            eprintln!("skipping: python3 unavailable for the PTY attach");
-            None
-        }
-        AttachOutcome::Failed => {
-            panic!("PTY client failed to attach after python3 ran (regression, not env)")
-        }
-    }
-}
-
-/// End to end: the first `--toggle` splits a sidebar beside the client's pane without taking the
-/// focus, and the second (addressed by `--client`, the form the mouse binding installs) kills it.
-#[test]
-fn watch_toggle_opens_then_closes_the_sidebar() {
-    let Some(s) = setup_toggle_client("watch-toggle") else {
-        return;
-    };
-    let home_pane = s.display("home", "#{pane_id}");
-    assert_eq!(session_panes(&s, "home"), vec![home_pane.clone()]);
-
-    // Open. Targetless: no `--client`, so the acting client resolves the way a command line does.
-    let out = s.tma(&["watch", "--toggle"]);
-    assert!(
-        out.status.success(),
-        "toggle failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let panes = session_panes(&s, "home");
-    assert_eq!(panes.len(), 2, "the toggle splits one sidebar pane");
-    let sidebar = panes
-        .into_iter()
-        .find(|p| *p != home_pane)
-        .expect("the new pane is not the home pane");
-    assert_eq!(
-        s.display("", "#{pane_id}"),
-        home_pane,
-        "the split must not steal the focus from the pane the user was in"
-    );
-    // The pane really is a `tma watch`: it advertises its pid once its terminal is up.
-    poll_until("the toggled sidebar to advertise its pid", || {
-        s.pane_option(&sidebar, "@tma_watch_pid")
-            .parse::<i32>()
-            .map(|p| p > 0)
-            .unwrap_or(false)
-    });
-
-    // Close, addressed by client name the way the installed `MouseDown1Status` binding does.
-    let client = String::from_utf8_lossy(&s.tmux(&["list-clients", "-F", "#{client_name}"]).stdout)
-        .trim()
-        .to_string();
-    assert!(!client.is_empty(), "the PTY client is attached");
-    let out = s.tma(&["watch", "--toggle", "--client", &client]);
-    assert!(
-        out.status.success(),
-        "second toggle failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    poll_until("the second toggle to kill the sidebar pane", || {
-        session_panes(&s, "home") == vec![home_pane.clone()]
-    });
-}
-
-/// A pane advertising a pid that is gone (a sidebar killed without unsetting the option) is not a
-/// sidebar: the toggle clears the residue and opens a real one instead of "closing" the user's pane.
-#[test]
-fn watch_toggle_treats_a_dead_advertisement_as_no_sidebar() {
-    let Some(s) = setup_toggle_client("watch-toggle-stale") else {
-        return;
-    };
-    let home_pane = s.display("home", "#{pane_id}");
-    // Above the pid ceiling on both Linux and macOS, so it can never name a live process.
-    s.set_opt(&home_pane, "@tma_watch_pid", "2147483632");
-
-    let out = s.tma(&["watch", "--toggle"]);
-    assert!(
-        out.status.success(),
-        "toggle failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-
-    let panes = session_panes(&s, "home");
-    assert_eq!(
-        panes.len(),
-        2,
-        "a dead advertisement must open a sidebar, not kill the advertising pane"
-    );
-    assert!(panes.contains(&home_pane), "the user's pane survived");
-    assert_eq!(
-        s.pane_option(&home_pane, "@tma_watch_pid"),
-        "",
-        "the stale advertisement is cleaned as it is passed"
-    );
-}
-
-/// `--toggle` is the one-shot half of the subcommand, so the flags that shape a running sidebar are
-/// a usage error (exit 2) rather than a silently ignored promise.
-#[test]
-fn watch_toggle_rejects_the_running_sidebar_flags() {
-    for extra in [
-        vec!["--table"],
-        vec!["--repo", "app"],
-        vec!["--state", "idle"],
-    ] {
-        let mut args = vec!["watch", "--toggle"];
-        args.extend(extra);
-        let out = Command::new(env!("CARGO_BIN_EXE_tma"))
-            .args(&args)
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env("TMA_CONFIG", tma_test_support::empty_config_path())
-            .output()
-            .expect("spawn tma");
-        assert_eq!(
-            out.status.code(),
-            Some(2),
-            "`{args:?}` must be a usage error: {}",
-            String::from_utf8_lossy(&out.stderr)
-        );
-    }
-}
-
-/// A sidebar that shares its window follows the jump it just made: the pane moves into the window
-/// the client landed in, so the list it was used from is still on screen for the next jump. Before
-/// this, the first Enter left the sidebar behind in the window (or session) you came from.
-#[test]
-fn watch_sidebar_follows_its_own_jump() {
-    let Some(s) = setup_blocked_agent("watch-follow") else {
-        return;
-    };
-    let home_pane = s.display("home", "#{pane_id}");
-    let home_window = s.display("home", "#{window_id}");
-    let work_pane = s.display("work", "#{pane_id}");
-    let work_window = s.display("work", "#{window_id}");
-
-    // The sidebar as a real sidebar: a split beside the home shell, not the whole window.
-    let launch = format!(
-        "'{}' watch --socket-name '{}' --manifest-dir '{}'",
-        s.bin(),
-        s.socket,
-        s.workdir.display()
-    );
-    assert!(s
-        .tmux(&[
-            "split-window",
-            "-d",
-            "-h",
-            "-l",
-            "40",
-            "-t",
-            "home",
-            &launch
-        ])
-        .status
-        .success());
-    poll_until("the split sidebar to render its first frame", || {
-        session_panes(&s, "home").len() == 2
-            && session_panes(&s, "home")
-                .iter()
-                .any(|p| *p != home_pane && !s.pane_option(p, "@tma_watch_pid").is_empty())
-    });
-    let sidebar = session_panes(&s, "home")
-        .into_iter()
-        .find(|p| *p != home_pane)
-        .expect("the split pane is the sidebar");
-    assert_eq!(s.display(&sidebar, "#{window_id}"), home_window);
-
-    // Enter jumps the client to the blocked agent in the other session.
-    s.tmux(&["send-keys", "-t", &sidebar, "Enter"]);
-    poll_until("the client to land on the blocked agent", || {
-        s.display("", "#{pane_id}") == work_pane
-    });
-
-    // ... and the sidebar comes along: same pane, same process, new window.
-    poll_until(
-        "the sidebar to follow the jump into the work window",
-        || s.display(&sidebar, "#{window_id}") == work_window,
-    );
-    assert!(
-        !s.pane_option(&sidebar, "@tma_watch_pid").is_empty(),
-        "the moved pane is the same running sidebar, not a fresh one"
-    );
-    assert_eq!(
-        s.display("", "#{pane_id}"),
-        work_pane,
-        "the arriving sidebar must not steal the focus from the agent just jumped to"
-    );
-    assert_eq!(
-        session_panes(&s, "home"),
-        vec![home_pane],
-        "the window it left keeps its own pane"
-    );
-}
-
-/// A sidebar in a window the client is not looking at is brought here rather than duplicated: the
-/// click always ends with a sidebar on screen, and never with a second watcher running unseen.
-#[test]
-fn watch_toggle_brings_an_offscreen_sidebar_here() {
-    let Some(s) = setup_toggle_client("watch-toggle-move") else {
-        return;
-    };
-    let home_pane = s.display("home", "#{pane_id}");
-
-    assert!(s.tma(&["watch", "--toggle"]).status.success());
-    poll_until("the toggled sidebar to advertise its pid", || {
-        session_panes(&s, "home")
-            .iter()
-            .any(|p| *p != home_pane && !s.pane_option(p, "@tma_watch_pid").is_empty())
-    });
-    let sidebar = session_panes(&s, "home")
-        .into_iter()
-        .find(|p| *p != home_pane)
-        .expect("the toggle split a sidebar");
-
-    // A second window in the same session, which the client switches to: the sidebar is now
-    // off-screen, exactly as it is after a jump.
-    assert!(s.tmux(&["new-window", "-t", "home"]).status.success());
-    let second = s.display("", "#{window_id}");
-    assert_ne!(second, s.display(&sidebar, "#{window_id}"));
-
-    assert!(s.tma(&["watch", "--toggle"]).status.success());
-    poll_until("the toggle to bring the sidebar into this window", || {
-        s.display(&sidebar, "#{window_id}") == second
-    });
-    assert_eq!(
-        session_panes(&s, "home").len(),
-        3,
-        "moved, not duplicated: the shell, the new window's pane, and the one sidebar"
-    );
-
-    // Now that it is here, the same click closes it — the toggle's original meaning.
-    assert!(s.tma(&["watch", "--toggle"]).status.success());
-    poll_until(
-        "the toggle to close the sidebar now that it is here",
-        || session_panes(&s, "home").len() == 2,
-    );
 }

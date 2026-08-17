@@ -18,9 +18,8 @@ fn server_opt(s: &Scratch, key: &str) -> String {
 
 /// Run `tma <args>` against the scratch server + this suite's manifest dir, via `CARGO_BIN_EXE_tma`
 /// (tests inside the `tma` package); behavior matches the shared `Scratch::tma`. The config dir is
-/// pinned into the scratch (SAFETY, and hermeticity): `tma status` reads the managed keybindings
-/// file there to decide whether the sidebar icon is clickable, and the developer's own install must
-/// not decide what these assertions see.
+/// pinned into the scratch (SAFETY, and hermeticity): the developer's own `~/.config/tma` must
+/// never be read, still less written, by a test run.
 fn tma(s: &Scratch, args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_tma"))
         .args(args)
@@ -356,8 +355,10 @@ fn idle_with_attention_renders_as_done() {
     );
 }
 
+/// A server with no agent panes draws nothing at all, in either bar format: tma adds to a status
+/// line only what it has something to say about.
 #[test]
-fn status_draws_the_sidebar_icon_only_where_the_click_can_land() {
+fn status_is_empty_on_a_server_with_no_agents() {
     if !tma_test_support::tmux_available() {
         return;
     }
@@ -384,60 +385,10 @@ fn status_draws_the_sidebar_icon_only_where_the_click_can_land() {
         "agent pane did not exec into `sleep`"
     );
 
-    // No mouse bindings installed and `mouse` off: the icon is a click target nothing can reach,
-    // so the line is empty rather than carrying a toggle the user cannot use.
     let out = tma(&s, &["status"]);
     assert!(out.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "",
-        "every count is omitted and the icon is unclickable, so nothing is drawn"
-    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
 
-    // Install the mouse group and turn `mouse` on: the icon appears, alone, on the same server.
-    let installed = tma(
-        &s,
-        &[
-            "install-keys",
-            "--mouse",
-            "--yes",
-            "--conf",
-            &s.workdir.join(".tmux.conf").display().to_string(),
-        ],
-    );
-    assert!(
-        installed.status.success(),
-        "install-keys failed: {}",
-        String::from_utf8_lossy(&installed.stderr)
-    );
-    assert!(s
-        .tmux(&["set-option", "-g", "mouse", "on"])
-        .status
-        .success());
-    let out = tma(&s, &["status"]);
-    assert!(out.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&out.stdout),
-        "#[range=user|tma:sidebar]#[fg=colour244]☰#[norange]",
-        "with the click wired up, the toggle is all that is left to show"
-    );
-
-    // Half the pairing is not enough: `mouse off` takes the icon away again.
-    assert!(s
-        .tmux(&["set-option", "-g", "mouse", "off"])
-        .status
-        .success());
-    assert_eq!(
-        String::from_utf8_lossy(&tma(&s, &["status"]).stdout),
-        "",
-        "bindings installed but `mouse` off: no click can land, so no icon"
-    );
-    assert!(s
-        .tmux(&["set-option", "-g", "mouse", "on"])
-        .status
-        .success());
-
-    // `plain` is the external-bar form and carries no icon, so it is still empty here.
     let plain = tma(&s, &["status", "--format", "plain"]);
     assert!(plain.status.success());
     assert_eq!(String::from_utf8_lossy(&plain.stdout), "");
@@ -701,7 +652,7 @@ fn scoped_status_counts_one_session_and_still_stamps_the_others() {
     assert_eq!(
         String::from_utf8_lossy(&all.stdout),
         "#[range=user|tma:idle]#[fg=green]○2#[norange]",
-        "the unscoped status counts both sessions (no mouse here, so no sidebar icon)"
+        "the unscoped status counts both sessions"
     );
 
     // Clear the stamps so the scoped run has to produce them again for BOTH panes.

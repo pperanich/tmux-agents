@@ -81,8 +81,8 @@ pub(crate) enum Command {
     /// pushes when present and degrading to an `--interval` poll otherwise (contract-identical). A
     /// plugin spawns this instead of a polling timer; it exits on a signal or when its stdout closes.
     Subscribe(SubscribeArgs),
-    /// Persistent live sidebar dashboard for a normal pane:
-    /// `split-window -h -l 32 "tma watch"`. Enter jumps (stays open); `q`/Esc quits.
+    /// Persistent live dashboard for a normal pane, window, or terminal of its own:
+    /// `new-window "tma watch"`. Enter jumps (stays open); `q`/Esc quits.
     Watch(WatchArgs),
     /// INTERNAL, UNSTABLE: bridge one agent hook event to a stamp. Agent configs reference the
     /// `tma-hook` wrapper, never this subcommand directly (see DAEMON.md).
@@ -504,7 +504,7 @@ pub(crate) struct ActArgs {
     pub(crate) menu: bool,
 }
 
-/// Args for `tma watch` (the sidebar). The invoking tmux client comes from the global `--client`
+/// Args for `tma watch`. The invoking tmux client comes from the global `--client`
 /// flag (bindings pass `--client "#{client_name}"`); absent falls back to targetless best-effort.
 #[derive(clap::Args)]
 pub(crate) struct WatchArgs {
@@ -512,11 +512,7 @@ pub(crate) struct WatchArgs {
     /// `p` toggles back to the preview at runtime. A narrow pane still falls back to the list.
     #[arg(long)]
     pub(crate) table: bool,
-    /// Open the sidebar in the acting client's session, or close the one already running there,
-    /// then exit. The status line's `☰` segment and any binding can call it; takes no other flag.
-    #[arg(long)]
-    pub(crate) toggle: bool,
-    /// Show only the agents in scope. The sidebar's own poll cycle still refreshes every pane.
+    /// Show only the agents in scope. The watcher's own poll cycle still refreshes every pane.
     #[command(flatten)]
     pub(crate) selector: SelectorArgs,
 }

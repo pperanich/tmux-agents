@@ -13,7 +13,6 @@ prefix.
 | key | tmux command | does |
 |---|---|---|
 | `a` | `display-popup -E -w 80% -h 60% 'tma'` | Open the picker in a popup. |
-| `W` | `split-window -h -l 32 'tma watch'` | Split a `tma watch` sidebar, 32 columns wide. |
 | `G` | `new-window 'tma watch --table'` | Open the full-width status table in a new window. |
 | `j` | `run-shell 'tma jump --attention --client "#{client_name}"'` | Jump to whoever wants you: blocked first, then finished-unreviewed. |
 | `g` | `run-shell 'tma jump --blocked --client "#{client_name}"'` | Jump to the longest-blocked agent. |
@@ -21,8 +20,7 @@ prefix.
 | `h` | `run-shell 'tma jump --home --client "#{client_name}"'` | Return to the trail's oldest origin. |
 | `A` | `run-shell 'tma act --menu --pane "#{pane_id}"'` | Open the action menu for the active pane. |
 
-`W` rather than `w`, and `G` rather than `g`: stock tmux binds `prefix w` to
-`choose-tree -Zw`, and `g` here is already `jump --blocked`. `install-keys` claims
+`G` rather than `g`: `g` here is already `jump --blocked`. `install-keys` claims
 only keys that are unbound in stock tmux.
 
 Only the `run-shell` bindings carry `--client "#{client_name}"`, because only
@@ -39,7 +37,6 @@ prefix, and inert without `set -g mouse on`. Each row is a click on one of the
 | click | does |
 |---|---|
 | left-click the blocked count | `tma jump --blocked`: go to the longest-blocked agent. |
-| left-click the `☰` icon | `tma watch --toggle`: open a sidebar in this session, or close the one already there. |
 | left-click any other tma count | Open the picker popup, the same one `prefix a` opens. |
 | right-click any tma segment | `tma jump --menu`: a tmux menu of every agent. |
 | left-click outside a tma segment | tmux's own `switch-client -t=`, so clicking a window name still switches to it. |
@@ -48,6 +45,10 @@ prefix, and inert without `set -g mouse on`. Each row is a click on one of the
 Four bindings carry all of that: `MouseDown1Status`, `MouseDown1StatusRight`,
 `MouseDown3Status`, and `MouseDown3StatusRight`. The left-click chain matches in
 the order listed above, first match wins.
+
+There is no click that dismisses the popup the counts open. tmux drops every
+mouse event that lands outside an open `display-popup`, so a second click on the
+status line never reaches a binding — `Esc` closes it.
 
 ## Keys inside the picker
 
@@ -93,7 +94,7 @@ captured.
 
 | key | does |
 |---|---|
-| `enter` | Jump to the highlighted agent and clear its attention flag; the sidebar stays open and follows you (below). |
+| `enter` | Jump to the highlighted agent and clear its attention flag; the watcher stays open where it is. |
 | `a`, `tab` | Open the tmux action menu for the highlighted agent. (`tab` is the picker's spelling; both work here.) |
 | `p` | Swap the live preview for the full-width status table, and back. Wide body only. |
 | `g` | Flatten the repo grouping, and regroup. Wide body only. |
@@ -103,23 +104,20 @@ captured.
 Both `p` and `g` change the wide body, which the pane gets at 76 columns or more.
 Below that the body is a single flat list and neither key changes what you see.
 
-Note that `a` targets the pane under the cursor, not the pane the sidebar lives
-in, which is what lets a screenful of blocked agents be answered from one place.
-See [Author a custom action](../how-to/custom-actions.md).
+Note that `a` targets the pane under the cursor, not the pane `tma watch` itself
+runs in, which is what lets a screenful of blocked agents be answered from one
+place. See [Author a custom action](../how-to/custom-actions.md).
 
-The sidebar takes the same mouse gestures as the picker (hover underlines, click
-selects, click again jumps — the sidebar stays open, exactly as `enter` does;
+`tma watch` takes the same mouse gestures as the picker (hover underlines, click
+selects, click again jumps — the list stays open, exactly as `enter` does;
 wheel moves three rows, and any key drops the hover). Group headers are not
 selectable, so hovering or clicking a `▸ repo` line does nothing.
 
-When a jump lands you in a different window, the sidebar pane moves there with
-you — same process, same selection, same scroll position — so the list you were
-triaging from is still on screen for the next jump. It refuses in three cases,
-each of which would cost you something: the jump stayed in this window (nothing
-to do), the sidebar has its window to itself (`prefix G`'s table window, which
-moving would destroy), or another client is attached to the session it would
-leave (the pane would vanish off their screen). The jump itself always happens
-regardless.
+A jump moves your client, never the watcher. Give it a window of its own
+(`prefix G`) or a second terminal and the list stays put and stays visible while
+you work in the window you landed in; run it in a split beside your work and a
+cross-window jump leaves it behind in the window you came from. That is the
+trade-off in placing it, and tma places nothing for you.
 
 While `tma watch` is running, that pane's mouse belongs to tma: tmux's own
 drag-to-select and scroll-into-copy-mode do not apply inside it (hold `shift` for

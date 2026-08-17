@@ -17,7 +17,7 @@ use ratatui::{Frame, Terminal};
 use tma_core::{AgentRow, AgentState, Selector};
 use tma_runtime::config;
 use tma_runtime::manifests::LoadedManifest;
-use tma_runtime::{nudge, sidebar, ui, Server, Tmux};
+use tma_runtime::{nudge, ui, Server, Tmux};
 use tma_ui_core::palette::{RowPalette, RowStyles};
 use tma_ui_core::{Effect, Event, Key, Mouse, MouseKind};
 
@@ -101,10 +101,6 @@ pub(crate) struct SurfaceEnv<'a> {
     pub(crate) acting_client: Option<&'a str>,
     /// The surface's row filter, applied to each refresh's rows on the way into the fold.
     pub(crate) filter: RowFilter,
-    /// The surface's own pane (`$TMUX_PANE`), and with it the intent to follow its jumps: the
-    /// sidebar moves into the window it just sent the client to, so the list it was being used
-    /// from is still on screen for the next jump. `None` for the picker, which closes on its jump.
-    pub(crate) follow_pane: Option<String>,
 }
 
 /// Run a surface to completion. The shell has already entered `guard` (raw mode + the alternate
@@ -367,23 +363,7 @@ impl ExecuteEffect for Executor<'_> {
             }
             Effect::Focus(row) => {
                 let r = jump::focus_agent(self.env.tmux, &row, self.env.acting_client);
-                let jumped = r.is_ok();
                 self.note_failure("jump", r);
-                // The sidebar follows the client it just moved (the picker sets no pane, so this is
-                // a no-op there). Only after a successful focus: following a jump that did not
-                // happen would leave the sidebar somewhere the user never went. Failure is
-                // reportable but not fatal — the jump already landed.
-                if jumped {
-                    if let Some(pane) = self.env.follow_pane.clone() {
-                        let r = sidebar::follow(
-                            self.env.tmux,
-                            self.env.acting_client,
-                            Some(&pane),
-                            &row.pane_id,
-                        );
-                        self.note_failure("moving the sidebar after the jump", r.map(|_| ()));
-                    }
-                }
                 None
             }
             Effect::ClearAttention { pane } => {
@@ -596,7 +576,6 @@ mod tests {
                 manifest_dir: None,
                 acting_client: None,
                 filter: RowFilter::excluding(None),
-                follow_pane: None,
             },
             notices: Vec::new(),
         };

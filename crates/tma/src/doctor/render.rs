@@ -138,13 +138,13 @@ pub(super) fn render_text(r: &Report) -> String {
         ));
     }
 
-    // Middle-tier sidebar nudge: resident `tma watch` panes signalled on focus change.
-    match r.watch_sidebars {
+    // Middle-tier watcher nudge: resident `tma watch` panes signalled on focus change.
+    match r.watch_panes {
         0 => out
-            .push_str("watch:   no sidebar running (`tma watch` advertises for SIGUSR1 nudges)\n"),
-        1 => out.push_str("watch:   1 sidebar running (nudged on focus change)\n"),
+            .push_str("watch:   no watcher running (`tma watch` advertises for SIGUSR1 nudges)\n"),
+        1 => out.push_str("watch:   1 watcher running (nudged on focus change)\n"),
         n => out.push_str(&format!(
-            "watch:   {n} sidebars running (nudged on focus change)\n"
+            "watch:   {n} watchers running (nudged on focus change)\n"
         )),
     }
 
@@ -408,11 +408,11 @@ pub(super) fn render_json(r: &Report) -> String {
     j.bool("enabled", r.mouse_enabled);
     j.end_object();
 
-    // Middle-tier sidebar nudge: resident `tma watch` panes advertising `@tma_watch_pid`.
+    // Middle-tier watcher nudge: resident `tma watch` panes advertising `@tma_watch_pid`.
     j.key("watch");
     j.begin_object();
-    j.bool("running", r.watch_sidebars > 0);
-    j.number("sidebars", r.watch_sidebars as i64);
+    j.bool("running", r.watch_panes > 0);
+    j.number("watchers", r.watch_panes as i64);
     j.end_object();
 
     j.key("wrapper");
@@ -755,7 +755,6 @@ mod tests {
                 "remote_panes",
                 "running",
                 "schema",
-                "sidebars",
                 "socket",
                 "source",
                 "stamp_issues",
@@ -770,6 +769,7 @@ mod tests {
                 "version",
                 "version_matches",
                 "watch",
+                "watchers",
                 "window_covered",
                 "wrapper",
             ]

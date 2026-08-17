@@ -1,5 +1,5 @@
 //! The display layer's complete tmux surface: every tmux read and write the `tma-ui` crate performs
-//! (the picker's preview, jump's focus/origin/trail, the `watch` sidebar's pid advertisement, and the
+//! (the picker's preview, jump's focus/origin/trail, the `watch` pid advertisement, and the
 //! `display-menu` action) is routed through these wrappers, so `tma-ui` depends on runtime and never
 //! on [`tma_tmux`]. Beyond these touchpoints the display layer only reads [`crate::cycle::CycleReport`]
 //! + config.
@@ -99,12 +99,12 @@ pub fn trail_write(tmux: &Tmux, key: &str, value: &str) -> Result<(), TmuxError>
 }
 
 /// Advertise `tma watch`'s pid in `@tma_watch_pid` on its own pane, so a `clear-attention` from
-/// another pane can SIGUSR1-nudge the sidebar. Best-effort at the call site (advertised post-setup).
+/// another pane can SIGUSR1-nudge the watcher. Best-effort at the call site (advertised post-setup).
 pub fn advertise_watch_pid(tmux: &Tmux, pane_id: &str, pid: u32) -> Result<(), TmuxError> {
     tmux.set_pane_option(pane_id, opt::WATCH_PID, &pid.to_string())
 }
 
-/// Clear the advertised `@tma_watch_pid` on the sidebar's pane (the guard's `Drop` path). Best-effort:
+/// Clear the advertised `@tma_watch_pid` on the watcher's pane (the guard's `Drop` path). Best-effort:
 /// a tmux-killed pane already destroyed the pane-scoped option with the pane.
 pub fn unadvertise_watch_pid(tmux: &Tmux, pane_id: &str) -> Result<(), TmuxError> {
     tmux.unset_pane_option(pane_id, opt::WATCH_PID)

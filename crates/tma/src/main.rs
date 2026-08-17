@@ -24,7 +24,7 @@ mod wait;
 use tma_tmux::{stamp, tmux};
 // Re-import the tier-2 pipeline modules the bin drives (`identity`/`capture` have no bin consumer);
 // the tier-3 `tma daemon` subcommand dispatches into the separate `tma_daemon` crate.
-use tma_runtime::{config, cycle, debug, event, json, manifests, sidebar};
+use tma_runtime::{config, cycle, debug, event, json, manifests};
 // The display layer (picker, jump, ls/status surfaces) lives in `tma-ui`; `ansi` is internal to it.
 use tma_ui::{jump, picker, surfaces, watch};
 
@@ -32,7 +32,7 @@ use cli::{Cli, Command};
 use debug_cmd::run_debug;
 use dispatch::{
     run_clear_attention, run_dashboard_cmd, run_jump_cmd, run_ls, run_reload, run_status,
-    run_supervise, run_watch_toggle,
+    run_supervise,
 };
 
 fn main() -> ExitCode {
@@ -144,7 +144,6 @@ fn main() -> ExitCode {
             manifest_dir,
             config,
         }),
-        Some(Command::Watch(args)) if args.toggle => run_watch_toggle(args, &server, client),
         Some(Command::Watch(args)) => {
             let start_table = args.table;
             let selector = args.selector.selector();

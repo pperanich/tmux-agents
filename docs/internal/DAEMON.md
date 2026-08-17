@@ -691,7 +691,7 @@ to a resident surface process whose pid is advertised in a tmux option. For tma,
 recycled every pane change signals — and by default kills — an arbitrary process;
 pane scope dies with the pane, sidebar's proven pattern) and handles `SIGUSR1` as
 "refresh now". Pane scope *narrows* the pid-recycle kill hazard rather than closing it:
-if the sidebar exits without unsetting the option while its pane lives on (e.g. a `kill
+if the watcher exits without unsetting the option while its pane lives on (e.g. a `kill
 -9` that skips the Drop cleanup), the stale pid lingers until the pane closes, so a pid
 recycled in that gap could receive a stray `SIGUSR1`. Local-user-only and low-stakes, and
 the `pid > 0` filter still blocks the process-group fan-out. `tma reload`'s SIGHUP sender
@@ -700,7 +700,7 @@ narrows its equivalent window by re-probing the socket immediately before the ki
 the `tma-ui` display crate deliberately lacks (RD4). The always-on
 `after-select-pane`/`after-select-window` hook already runs `tma clear-attention` on
 every focus change; that same handler now also walks panes for `@tma_watch_pid`
-(`pid > 0` only) and `SIGUSR1`s each advertiser, so every resident sidebar refreshes
+(`pid > 0` only) and `SIGUSR1`s each advertiser, so every resident watcher refreshes
 within one input-poll tick (~200 ms worst case) of a focus change. The hook walks
 panes for the option, as sidebar does.
 
@@ -711,7 +711,7 @@ self-refresh is its only and sufficient liveness mechanism; the docs must not cl
 nudge coverage for it.
 
 Combined with `tma event` direct-stamping, this gives hook-latency state and instant
-sidebar refresh with no daemon at all. The daemon remains the tier above for
+watcher refresh with no daemon at all. The daemon remains the tier above for
 fallback detection, reconciliation, history, and notifications.
 
 ## Daemonless operation

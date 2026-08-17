@@ -81,7 +81,7 @@ and forwarding widens what counts as your user account. Do it for hosts you
 control.
 
 What you get is the hook tier and nothing else: state, transitions, attention,
-notifications, `tma wait`, the picker, the sidebar. What you do not get is the
+notifications, `tma wait`, the picker, `tma watch`. What you do not get is the
 fallback, so an event the agent never fires stays unreported, where a local agent
 would have had its state read off the screen.
 

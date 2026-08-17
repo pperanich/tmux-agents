@@ -174,12 +174,12 @@ same stamped options.
   `#(tma status)` in `status-right` is that required ambient driver; without it,
   ambient surfaces render nothing.
 - **Hook tier.** `tma event` direct-stamps the moment a hook fires, with no
-  daemon involved. State is event-latency, and a resident `tma watch` sidebar
+  daemon involved. State is event-latency, and a resident `tma watch`
   refreshes within about a fifth of a second of a focus change: the
   `after-select-pane` / `after-select-window` hooks that already clear attention
-  also walk panes for a sidebar's advertised pid (`@tma_watch_pid`, set on the
-  sidebar's own pane so it dies with that pane) and send `SIGUSR1`, which the
-  sidebar treats as "refresh now". The picker popup is deliberately outside that
+  also walk panes for a watcher's advertised pid (`@tma_watch_pid`, set on the
+  watcher's own pane so it dies with that pane) and send `SIGUSR1`, which the
+  watcher treats as "refresh now". The picker popup is deliberately outside that
   scheme: `display-popup -E` runs in a hidden pane `list-panes -a` never
   enumerates, so no hook can find it, and its own one-second refresh is what
   keeps it current. This is the sweet spot for a single-user setup: hook-fresh

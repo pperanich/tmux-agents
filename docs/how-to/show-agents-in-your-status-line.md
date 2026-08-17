@@ -21,14 +21,12 @@ renders inline. One blocked and one working agent:
 
 ```
 $ tma status
-#[range=user|tma:blocked]#[fg=red]⚑1#[norange] #[range=user|tma:working]#[fg=yellow]●1#[norange] #[range=user|tma:sidebar]#[fg=colour244]☰#[norange]
+#[range=user|tma:blocked]#[fg=red]⚑1#[norange] #[range=user|tma:working]#[fg=yellow]●1#[norange]
 ```
 
 The order is fixed (`blocked working done idle unknown`), zero-count classes are
-omitted, and the trailing `☰` is the sidebar toggle, which has no count behind it
-and so renders even with no agents at all — as long as it is clickable, meaning
-`tma install-keys --mouse` and `set -g mouse on`. Without both, `tma status`
-leaves it out (the example above assumes them). The `#[range=…]` markers are what make
+omitted, and a server with no agents prints nothing at all, so tma adds nothing
+to your status line until it has something to say. The `#[range=…]` markers are what make
 each segment clickable; tmux draws nothing for them, and without the opt-in mouse
 bindings nothing acts on them ([Install the
 keybindings](install-the-keybindings.md#clickable-status-segments)). Glyphs and
@@ -76,7 +74,7 @@ Two things to know before scoping the `#()` driver:
   one scoped driver in one session keeps every other session fresh too.
 
 The same holds for the other scopes: `#(tma status --repo app)` counts one repo's
-agents, and `tma watch --repo app` opens a sidebar for it.
+agents, and `tma watch --repo app` opens a dashboard for it.
 
 ## Next
 

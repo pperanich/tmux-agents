@@ -41,7 +41,6 @@ working = { glyph = "●", color = "yellow" }
 idle    = { glyph = "○", color = "green" }
 done    = { glyph = "✓", color = "magenta" }   # idle pane still flagged for attention
 unknown = { glyph = "?", color = "colour244" }
-sidebar = { glyph = "☰", color = "colour244" }  # the sidebar-toggle icon; glyph = "" removes it
 
 [picker]                     # ratatui picker glyphs + colors; same shape as [status]
 unknown = { glyph = "?", color = "darkgray" }
@@ -106,15 +105,6 @@ keeps the other class defaults.
 The `done` class is an idle pane whose output is still unreviewed (it carries
 `@agent_attention`); its underlying `@agent_state` token stays `idle`, only the
 surface split changes.
-
-`[status]` takes one extra entry of the same shape, `sidebar`, which is not a
-state class: it is the trailing `☰` icon that toggles a `tma watch` sidebar when
-clicked (`tma watch --toggle`, see [Clickable status
-segments](../how-to/install-the-keybindings.md#clickable-status-segments)). It has
-no count behind it, so it renders even with no agents — but only where the click
-can land: `tma install-keys --mouse` installed *and* the server's `mouse` option
-on. Without both it is dropped, since unlike the counts it means nothing on its
-own. Setting `glyph = ""` drops it outright; `[picker]` has no such entry.
 
 ## `[notify]`: notifications
 

@@ -69,7 +69,7 @@ impl ListGeom {
     }
 }
 
-/// The `watch` sidebar's frame: the list, the preview beside it (wide arm only), the table's header
+/// The `watch` surface's frame: the list, the preview beside it (wide arm only), the table's header
 /// line (table arm only), and the footer. Mirrors `watch::draw` exactly — it is what `draw` lays
 /// out from.
 #[derive(Clone, Copy, Debug)]
@@ -82,11 +82,11 @@ pub struct WatchGeom {
     pub footer: Rect,
 }
 
-/// The list width the wide arm gives the sidebar: the compact row is designed for ~32 columns, so
+/// The list width the wide arm gives the list: the compact row is designed for ~32 columns, so
 /// it stays fixed and the preview takes whatever the terminal adds.
 const WIDE_LIST_W: u16 = 34;
 
-/// Lay out the sidebar for `area` under `layout`.
+/// Lay out the watcher for `area` under `layout`.
 pub fn watch_geom(area: Rect, layout: WatchLayout) -> WatchGeom {
     let (body, footer) = body_and_footer(area);
     match layout {

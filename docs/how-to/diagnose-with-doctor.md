@@ -9,7 +9,7 @@ $ tma doctor
 daemon:  not running (/tmp/tma/7f665a9304f7e8ed.sock) — tier 3 needs a running daemon (`tma daemon --ensure`)
 ambient: polling — `tma status` last ran 0.1s ago
 clients: none attached — `#()` status jobs only run while a client draws the status line, so nothing polls this server (run the daemon or attach a client)
-watch:   no sidebar running (`tma watch` advertises for SIGUSR1 nudges)
+watch:   no watcher running (`tma watch` advertises for SIGUSR1 nudges)
 hooks:   after-select-pane ✓  after-select-window ✓
 wrapper: /home/you/.local/bin/tma-hook ✓
 agents:  6 loaded, no issues
@@ -49,7 +49,7 @@ bar](drive-an-external-bar.md).
 when no daemon is covering for it, because `#()` status jobs run only while a
 client is drawing the status line.
 
-**`watch:`** how many `tma watch` sidebars are running, which is what receives the
+**`watch:`** how many `tma watch` instances are running, which is what receives the
 focus-change nudge.
 
 **`hooks:` and `wrapper:`** the tmux server hooks and the `tma-hook` wrapper. A
@@ -192,7 +192,7 @@ pane, incomplete hook wiring, a hook demotion, and a pending permission with no
 endpoint.
 
 Deliberately not counted: a daemon that is not running, a daemon version skew, no
-ambient poll, no watch sidebar, and the `nested`/`remote`/`ignored` sections. Those
+ambient poll, no watcher, and the `nested`/`remote`/`ignored` sections. Those
 are runtime choices, so a wired agent sitting at tier 2 gates green.
 
 The second number counts panes below the tier their manifest supports, which is 2

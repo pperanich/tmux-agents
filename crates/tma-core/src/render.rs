@@ -563,7 +563,7 @@ pub fn render_remove(pane_id: &str) -> Vec<StampCommand> {
 }
 
 /// The lanes [`REMOVABLE`] deliberately spares on a deregister but an uninstall must still clear:
-/// the single-flight action lock (a live action outlives its agent's exit), the sidebar's own pid
+/// the single-flight action lock (a live action outlives its agent's exit), the watcher's own pid
 /// marker (its owner is a `tma watch`, not the agent), and a `tma mute` deadline (tma wrote it, so
 /// tma cleans it up). `@agent_ignore` is spared even here: the user wrote that one.
 const PURGEABLE: &[&str] = &[opt::ACTION, opt::WATCH_PID, opt::MUTE_UNTIL];

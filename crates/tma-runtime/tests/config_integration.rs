@@ -26,8 +26,8 @@ fn tma(s: &Scratch, config: &Path, args: &[&str]) -> Output {
         .arg(s.manifest_dir())
         .arg("--config")
         .arg(config)
-        // Pinned into the scratch so `tma status`'s sidebar-icon gate reads this suite's (absent)
-        // keybindings file rather than the developer's own install.
+        // Pinned into the scratch: the developer's own `~/.config/tma` must never be read, still
+        // less written, by a test run.
         .env("TMA_CONFIG_DIR", s.workdir.join("cfg"))
         .output()
         .expect("spawn tma")
@@ -96,8 +96,7 @@ fn zero_config_status_matches_documented_defaults() {
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
         "#[range=user|tma:idle]#[fg=green]○1#[norange]",
-        "zero-config renders the default green ○ for an idle agent (and no sidebar icon: \
-         a scratch server has `mouse` off, so nothing could click it)"
+        "zero-config renders the default green ○ for an idle agent"
     );
 }
 

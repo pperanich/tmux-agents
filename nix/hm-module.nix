@@ -66,7 +66,7 @@ in
       description = ''
         Add tma's default tmux keybindings (the same prefix set `tma
         install-keys` writes) to {option}`programs.tmux.extraConfig`: prefix+a
-        picker popup, prefix+W watch sidebar, prefix+G status table, prefix+A
+        picker popup, prefix+G watch window, prefix+A
         action menu, prefix+j/g/b/h jumps. The opt-in mouse bindings are not
         written; run `tma install-keys --mouse` for those. Declarative
         alternative to running `tma install-keys`; do not use both, or the
@@ -103,7 +103,6 @@ in
     programs.tmux.extraConfig = lib.mkIf cfg.keybindings.enable ''
       # tma keybindings (programs.tma.keybindings.enable)
       bind-key a display-popup -E -w 80% -h 60% 'tma'
-      bind-key W split-window -h -l 32 'tma watch'
       bind-key G new-window 'tma watch --table'
       bind-key j run-shell 'tma jump --attention --client "#{client_name}"'
       bind-key g run-shell 'tma jump --blocked --client "#{client_name}"'

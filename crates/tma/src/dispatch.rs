@@ -1,19 +1,17 @@
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use crate::cli::{
-    ClearAttentionArgs, JumpArgs, LsArgs, StatusArgs, StatusFormat, SuperviseArgs, WatchArgs,
-};
-use crate::{cli_support, config, cycle, jump, manifests, sidebar, surfaces, tmux};
+use crate::cli::{ClearAttentionArgs, JumpArgs, LsArgs, StatusArgs, StatusFormat, SuperviseArgs};
+use crate::{cli_support, config, cycle, jump, manifests, surfaces, tmux};
 
-/// Clear a pane's `@agent_attention` flag AND nudge any resident `tma watch` sidebar. The
+/// Clear a pane's `@agent_attention` flag AND nudge any resident `tma watch`. The
 /// `after-select-*` hooks call this with `#{hook_pane}` on every focus change (as does the picker's
 /// Enter-jump): one binary call does both jobs — clear attention, then SIGUSR1 every pane advertising
 /// `@tma_watch_pid`. A focus hook must never error, so an empty pane and a gone server are clean no-ops.
 pub(crate) fn run_clear_attention(args: ClearAttentionArgs, server: &tmux::Server) -> ExitCode {
     let tmux = tmux::Tmux::connect(server);
     // The attention clear: skipped on an empty `#{hook_pane}` (nothing to target), but the
-    // focus change still happened, so the sidebar nudge below runs regardless.
+    // focus change still happened, so the watcher nudge below runs regardless.
     if !args.pane.is_empty() {
         let _ = tmux.unset_pane_option(&args.pane, tma_core::stamp::opt::ATTENTION);
     }
@@ -75,7 +73,7 @@ pub(crate) fn run_reload(server: &tmux::Server) -> ExitCode {
 }
 
 /// Launch a live agent surface that owns config + manifests so its refresh tick can hot-reload them.
-/// The picker (default) and `watch` sidebar share this shape, differing only in the surface fn and label.
+/// The picker (default) and `watch` share this shape, differing only in the surface fn and label.
 pub(crate) fn run_dashboard_cmd(
     server: &tmux::Server,
     manifest_dir: Option<PathBuf>,
@@ -112,41 +110,6 @@ pub(crate) fn run_dashboard_cmd(
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("tma: {label} error: {err}");
-            ExitCode::FAILURE
-        }
-    }
-}
-
-/// `tma watch --toggle`: open or close the acting client's sidebar and exit, never drawing anything
-/// itself. It is the one-shot half of the subcommand, so the flags that shape a *running* sidebar
-/// (`--table`, the selector) are a usage error rather than silently ignored — the opened pane runs
-/// a plain `tma watch`, and accepting them would promise a scoping it does not carry.
-pub(crate) fn run_watch_toggle(
-    args: WatchArgs,
-    server: &tmux::Server,
-    client: Option<String>,
-) -> ExitCode {
-    if args.table || !args.selector.selector().is_empty() {
-        eprintln!("tma: `watch --toggle` opens or closes the sidebar and takes no other flag");
-        return ExitCode::from(2);
-    }
-    let bin = std::env::current_exe()
-        .ok()
-        .and_then(|p| p.to_str().map(String::from))
-        .unwrap_or_else(|| "tma".to_string());
-    let tmux = tmux::Tmux::connect(server);
-    match sidebar::toggle(&tmux, server, client.as_deref(), &bin) {
-        Ok(sidebar::ToggleOutcome::NoClient) => {
-            eprintln!(
-                "tma: no tmux client to toggle the sidebar for (run it inside tmux, or pass \
-                 --client <name>)"
-            );
-            ExitCode::from(2)
-        }
-        Ok(_) => ExitCode::SUCCESS,
-        Err(tmux::TmuxError::ServerGone) => cli_support::no_server(),
-        Err(err) => {
-            eprintln!("tma: {err}");
             ExitCode::FAILURE
         }
     }
@@ -327,20 +290,6 @@ pub(crate) fn run_ls(
     }
 }
 
-/// Whether the status line's sidebar-toggle icon can actually be clicked: the `--mouse` binding
-/// group is installed AND the server's global `mouse` option is on. Both halves are needed for a
-/// click to reach the binding, and the icon is nothing but a click target — an unclickable one is
-/// an instruction the user cannot follow. Same pair `tma doctor` reports; a failed read reads as
-/// off, so the icon is dropped rather than promised.
-fn sidebar_clickable(tmux: &tmux::Tmux) -> bool {
-    crate::install_keys::mouse_bindings_installed(None)
-        && tmux
-            .get_global_option("mouse")
-            .ok()
-            .flatten()
-            .is_some_and(|v| v == "on")
-}
-
 pub(crate) fn run_status(
     args: StatusArgs,
     server: &tmux::Server,
@@ -349,9 +298,8 @@ pub(crate) fn run_status(
     config: &config::Config,
 ) -> ExitCode {
     match run_cycle_for(server, manifest_dir, debug_timing, config) {
-        // `status` never serializes rows, so it needs no server/host resolve. The handle is kept
-        // only for the sidebar-icon gate below, which reads the server's `mouse` option.
-        Ok((tmux, mut report)) => {
+        // `status` never serializes rows, so it needs no server/host resolve and no tmux handle.
+        Ok((_tmux, mut report)) => {
             // The counts are over the selected rows only; the cycle above still stamped every pane,
             // so a per-session status driver stays a full ambient driver. Repo labels are resolved
             // only when the selector needs them — an unscoped status stays the spawn-free hot path.
@@ -363,10 +311,9 @@ pub(crate) fn run_status(
             match args.format {
                 // A trailing newline would widen the status segment; print the bare string. `plain`
                 // shares that rule — it feeds the same kind of one-line bar segment.
-                StatusFormat::Tmux => print!(
-                    "{}",
-                    surfaces::render_status(&report, &config.status, sidebar_clickable(&tmux))
-                ),
+                StatusFormat::Tmux => {
+                    print!("{}", surfaces::render_status(&report, &config.status))
+                }
                 StatusFormat::Plain => {
                     print!("{}", surfaces::render_status_plain(&report, &config.status))
                 }

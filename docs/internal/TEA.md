@@ -239,7 +239,7 @@ them:
      restored terminal (`picker.rs:253-257` today: the guard drops, then the
      jump fires).
    - Watch Enter yields `[Focus, ClearAttention]` with no `Quit`, which runs
-     inline and the loop continues (`watch.rs:207-215`: jump keeps the sidebar
+     inline and the loop continues (`watch.rs:207-215`: jump keeps the watcher
      open, non-modal).
 
    The presence of `Quit` in the batch is the signal to defer; the runner does

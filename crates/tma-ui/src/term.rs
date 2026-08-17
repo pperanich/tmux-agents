@@ -1,4 +1,4 @@
-//! One RAII terminal guard shared by the picker and the `watch` sidebar.
+//! One RAII terminal guard shared by the picker and `tma watch`.
 //!
 //! Both enter raw mode + the alternate screen, run a draw/input loop, and must restore the terminal
 //! on *every* exit (quit, a `?` mid-loop, panic). Hand-rolled restore leaked three ways: a setup
@@ -16,11 +16,11 @@ use crossterm::terminal::{
 };
 use tma_runtime::{ui, Tmux};
 
-/// Owns the terminal's raw-mode + alternate-screen state (and, for the sidebar, the advertised
+/// Owns the terminal's raw-mode + alternate-screen state (and, for `tma watch`, the advertised
 /// `@tma_watch_pid`), restoring all of it in [`Drop`]. Keep it alive for the whole TUI session.
 pub(crate) struct TerminalGuard<'a> {
     tmux: &'a Tmux,
-    /// The pane whose `@tma_watch_pid` this guard advertised (sidebar only), unset in `Drop`.
+    /// The pane whose `@tma_watch_pid` this guard advertised (`tma watch` only), unset in `Drop`.
     watch_pane: Option<String>,
 }
 

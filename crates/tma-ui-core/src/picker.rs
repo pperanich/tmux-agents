@@ -16,7 +16,7 @@ use crate::layout::picker_geom;
 use crate::selection::Selection;
 use crate::view::{Click, View};
 
-/// Rows one wheel notch moves the selection, matching the sidebar's.
+/// Rows one wheel notch moves the selection, matching `tma watch`'s.
 const WHEEL_STEP: i32 = 3;
 
 /// The picker's model: rows, the fuzzy filter/scope, selection, the refresh gate, and the preview
@@ -350,7 +350,7 @@ impl PickerModel {
 }
 
 /// Sort rows by state priority: blocked → working → idle → unknown, then longest-in-state first
-/// (the smallest `@agent_since`). Shared with the `watch` sidebar (same order); crate-internal.
+/// (the smallest `@agent_since`). Shared with `tma watch` (same order); crate-internal.
 pub(crate) fn sorted(mut rows: Vec<AgentRow>) -> Vec<AgentRow> {
     rows.sort_by(|a, b| {
         sort_rank(a.state)

@@ -127,7 +127,7 @@ mod tests {
             act_menu_command("tma", &Server::default(), "%5"),
             "'tma' act --menu --pane %5"
         );
-        // A named server rides along, so a sidebar on a scratch socket menus on that socket.
+        // A named server rides along, so a watcher on a scratch socket menus on that socket.
         assert_eq!(
             act_menu_command(
                 "/opt/my tools/tma",

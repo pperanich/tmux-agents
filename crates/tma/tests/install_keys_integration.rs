@@ -105,19 +105,19 @@ fn install_keys_mouse_bindings_source_into_the_root_table() {
         root.contains("mouse_status_range"),
         "the range conditional was expanded away: {root}"
     );
-    // The sidebar arm parsed as its own branch and sits BEFORE the generic `tma:*` picker arm, so
-    // clicking the icon toggles instead of opening the picker.
+    // The blocked arm parsed as its own branch and sits BEFORE the generic `tma:*` picker arm, so
+    // clicking the blocked count jumps instead of opening the picker.
     let left = root
         .lines()
         .find(|l| l.contains("MouseDown1Status "))
         .expect("the left-click binding is listed");
     assert!(
-        left.contains("watch --toggle"),
-        "the sidebar arm did not survive sourcing: {left}"
+        left.find("tma:blocked") < left.find("m:tma:*"),
+        "the blocked arm must be matched before the generic tma:* arm: {left}"
     );
     assert!(
-        left.find("tma:sidebar") < left.find("m:tma:*"),
-        "the sidebar arm must be matched before the generic tma:* arm: {left}"
+        left.contains("switch-client"),
+        "the chain still ends in tmux's own window-name click: {left}"
     );
     // Without --mouse none of it is written, so a plain install cannot claim the mouse keys.
     let plain = Command::new(env!("CARGO_BIN_EXE_tma"))

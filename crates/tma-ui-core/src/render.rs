@@ -18,7 +18,7 @@ pub const LOCATOR_W: usize = 16;
 /// Sized to [`fmt_since`]'s widest realistic output (`999h`, `-`); right-aligned.
 pub const TIME_W: usize = 4;
 /// The branch-label column width for the watch table and the picker span. The tighter
-/// list arms (32-col sidebar) pass `10` to [`branch_span`] instead; the table cell reserves this.
+/// list arms (a narrow pane) pass `10` to [`branch_span`] instead; the table cell reserves this.
 pub const BRANCH_W: usize = 12;
 
 /// The `(glyph, color)` for an agent row: the "done" style for an idle pane still carrying

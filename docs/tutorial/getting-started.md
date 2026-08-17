@@ -122,10 +122,10 @@ is in [Pane options and JSON contracts](../reference/pane-options-and-json.md).
 
 ```
 $ tma status
-#[range=user|tma:blocked]#[fg=red]⚑1#[norange] #[range=user|tma:working]#[fg=yellow]●1#[norange] #[range=user|tma:sidebar]#[fg=colour244]☰#[norange]
+#[range=user|tma:blocked]#[fg=red]⚑1#[norange] #[range=user|tma:working]#[fg=yellow]●1#[norange]
 ```
 
-That is one blocked and one working agent, then the `☰` sidebar-toggle icon. tmux renders the `#[fg=...]` codes as
+That is one blocked and one working agent. tmux renders the `#[fg=...]` codes as
 color when this runs from `status-right`, and draws nothing for the `#[range=…]`
 markers, which only matter if you opt into [clickable
 segments](../how-to/install-the-keybindings.md#clickable-status-segments). Add it to
@@ -141,10 +141,10 @@ Reload tmux so it picks the line up, naming whichever file you just edited:
 $ tmux source-file ~/.config/tmux/tmux.conf
 ```
 
-The right-hand end of your status line should now read `⚑1 ●1 ☰`: a red flag
-for the agent still parked on its approval prompt, a yellow dot for the one
-working, and a dim `☰` toggle for the sidebar you meet below. tmux redraws it on
-its own `status-interval` (10 s by default), so give it a moment.
+The right-hand end of your status line should now read `⚑1 ●1`: a red flag for
+the agent still parked on its approval prompt, and a yellow dot for the one
+working. tmux redraws it on its own `status-interval` (10 s by default), so give
+it a moment.
 
 Keeping it in `status-right` does more than display counts; the tier check below
 and [run-the-daemon](../how-to/run-the-daemon.md) cover why.
@@ -166,20 +166,24 @@ to the highlighted agent, `tab` for that agent's action menu, `Esc` to cancel.
 Every printable key types, so any agent name is searchable from the first
 keystroke.
 
-## 6. Open the watch sidebar
+## 6. Open the watch dashboard
 
 The picker is modal: it closes when you jump. For an always-on view, `tma watch`
-is a persistent sidebar for a normal pane. Split one off from a shell inside
-tmux:
+is a persistent dashboard. Give it a tmux window of its own:
 
 ```
-$ tmux split-window -h -l 32 'tma watch'
+$ tmux new-window 'tma watch'
 ```
 
 It shows the same rows as the picker, refreshing every second and immediately
 when you change panes. `Enter` jumps the acting client to the highlighted agent
-but leaves the sidebar open; `q`, `Esc`, or `ctrl-c` quit. Step 7 puts the same
-split on a key.
+and leaves the dashboard running where it is; `q`, `Esc`, or `ctrl-c` quit. Step
+7 puts it on a key.
+
+A window is one placement, not the only one. A spare terminal outside tmux works
+(`tma watch` talks to the server over its socket), and so does a split beside
+your work — with the caveat that a split stays in the window you opened it in
+when you jump somewhere else. tma does not place it for you.
 
 ## 7. Jump to whoever needs you
 
@@ -191,11 +195,10 @@ across every session, no picker needed. Rather than hand-writing bindings, have
 ```
 $ tma install-keys
 tma: proposed change to ~/.config/tma/tmux.conf (tma keybindings):
-  @@ -0,0 +1,10 @@
+  @@ -0,0 +1,9 @@
   +# tma keybindings, managed by `tma install-keys`. Do not hand-edit; re-run to update,
   +# or `tma install-keys --uninstall` to remove.
   +bind-key a display-popup -E -w 80% -h 60% 'tma'
-  +bind-key W split-window -h -l 32 'tma watch'
   +bind-key G new-window 'tma watch --table'
   +bind-key j run-shell 'tma jump --attention --client "#{client_name}"'
   +bind-key g run-shell 'tma jump --blocked --client "#{client_name}"'
@@ -222,8 +225,8 @@ $ tmux source-file ~/.config/tmux/tmux.conf
 
 Press `prefix g` and you land on the blocked pane. `prefix j` goes to whoever
 wants you next (blocked first, then finished-but-unreviewed), `prefix b` returns
-to where you jumped from, `prefix a` opens the picker in a popup, and `prefix W`
-splits the sidebar from step 6. See
+to where you jumped from, `prefix a` opens the picker in a popup, and `prefix G`
+opens the step-6 dashboard in a window, straight into its full-width table. See
 the [keybindings reference](../reference/keybindings.md) for the rest of the set,
 and [Install the keybindings](../how-to/install-the-keybindings.md) for rebinding
 any of them.
@@ -246,7 +249,7 @@ $ tma doctor
 daemon:  not running (<tmpdir>/tma/<server>.sock) — tier 3 needs a running daemon (`tma daemon --ensure`)
 ambient: polling — `tma status` last ran 3.5s ago
 clients: 1 attached
-watch:   1 sidebar running (nudged on focus change)
+watch:   1 watcher running (nudged on focus change)
 hooks:   after-select-pane ✓  after-select-window ✓
 wrapper: ~/.cargo/bin/tma-hook ✓
 agents:  6 loaded, no issues

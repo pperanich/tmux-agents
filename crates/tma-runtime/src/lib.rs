@@ -3,8 +3,8 @@
 //! Everything above the tmux I/O choke point ([`tma_tmux`]) and below the binary's dispatch: config
 //! and manifest loading, pane identity, the poll cycle, on-demand capture, the hook-event bridge
 //! ([`event`]), the daemon wire protocol ([`ipc`]), the surface subscribe stream ([`subscribe`]),
-//! the notify primitive ([`notify`]), the SIGUSR1 sidebar nudge ([`nudge`]), the sidebar toggle
-//! ([`sidebar`]), and the debug surfaces.
+//! the notify primitive ([`notify`]), the SIGUSR1 watcher nudge ([`nudge`]), and the debug
+//! surfaces.
 //! Pure domain logic lives in [`tma_core`].
 //! Dep edges (acyclic): `tma-core ← tma-tmux ← tma-runtime ← tma-daemon`; `tma event` works with no
 //! daemon, and only [`ipc::DaemonSink`] speaks the wire protocol.
@@ -32,8 +32,8 @@ pub mod subscribe;
 pub mod transitions;
 
 // --- surfaces and helpers --------------------------------------------------------
-// What the bin and `tma-ui` call once state exists: acting on a pane, notifying, the sidebar
-// toggle, the debug tools, and the shared primitives (`http` is internal to the broker).
+// What the bin and `tma-ui` call once state exists: acting on a pane, notifying, the debug tools,
+// and the shared primitives (`http` is internal to the broker).
 pub mod actions;
 pub mod broker;
 pub mod debug;
@@ -41,7 +41,6 @@ mod http;
 pub mod json;
 pub mod notify;
 pub mod nudge;
-pub mod sidebar;
 pub mod ui;
 
 /// The tmux I/O handle and its error, re-exported so consumers can name the type runtime's public

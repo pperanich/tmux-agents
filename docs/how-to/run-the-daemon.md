@@ -134,7 +134,7 @@ $ tma doctor
 daemon:  running (<tmpdir>/tma/<server>.sock)
 ambient: NOT polling — nothing invokes `tma status`; add `#(tma status)` to status-right (required ambient driver)
 clients: 1 attached
-watch:   no sidebar running (`tma watch` advertises for SIGUSR1 nudges)
+watch:   no watcher running (`tma watch` advertises for SIGUSR1 nudges)
 hooks:   after-select-pane ✓  after-select-window ✓
 wrapper: ~/.cargo/bin/tma-hook ✓
 agents:  6 loaded, no issues

@@ -1,6 +1,6 @@
 # Install the keybindings
 
-Put the picker, the sidebar, and the jumps on your prefix key. What each key does
+Put the picker, the watch dashboard, and the jumps on your prefix key. What each key does
 is in [Keybindings](../reference/keybindings.md); this page is how the bindings
 get onto your tmux server and how to change them once they are.
 
@@ -63,8 +63,8 @@ so there is nothing of yours to corrupt.
 
 ## Rebind a key
 
-`install-keys` claims only keys that are unbound in stock tmux (that is why
-`watch` is on `W`: `w` is tmux's own window chooser). If one clashes with a
+`install-keys` claims only keys that are unbound in stock tmux (that is why the
+watch window is on `G`: `g` is already `jump --blocked`). If one clashes with a
 personal binding of yours, copy the line you want out of
 `~/.config/tma/tmux.conf` into your own tmux config with a new key and drop the
 managed file. Editing the managed file in place also works, but the edit survives
@@ -90,39 +90,12 @@ set -g mouse on
 ```
 
 With both in place, the [mouse table](../reference/keybindings.md#mouse-bindings)
-applies. The `☰` icon is the one segment that is always there (wherever a click
-can reach it), so the sidebar is reachable even on a status line showing no
-counts. A click resolves to one of three things:
+applies: the blocked count jumps to the longest-blocked agent, any other count
+opens the picker popup, and a right-click on either opens the agent menu.
 
-| where the sidebar is | the click |
-|---|---|
-| in the window you are looking at | kills that pane |
-| in another window of the session | moves it here, beside the pane you are in |
-| nowhere | splits `tma watch` beside you, 40 columns wide |
-
-Never a second sidebar, in other words — jump away and click again and the one
-you had comes to you. It finds the running sidebar by the pid a `tma watch`
-advertises on its own pane, so a sidebar you opened by hand (`prefix W`) is the
-one the next click acts on, and only sidebars in the clicking client's session
-are touched. A watcher that has its window to itself (`prefix G`'s full-width
-table) is left alone: moving the last pane out of a window destroys it.
-
-None of it moves your focus.
-
-Restyle the icon, or drop it entirely, with a `sidebar` entry under `[status]`:
-
-```toml
-[status]
-sidebar = { glyph = "S", color = "blue" }   # or glyph = "" to remove the segment
-```
-
-The toggle is not mouse-only. `tma watch --toggle` works from the command line
-and from a key binding, where `run-shell` format-expansion means it should be
-passed the clicking or pressing client:
-
-```tmux
-bind-key T run-shell 'tma watch --toggle --client "#{client_name}"'
-```
+One thing a click cannot do is close the popup it opened. tmux delivers mouse
+events to an open `display-popup` and drops everything outside it, so the second
+click on the status line never reaches a binding. `Esc` closes it.
 
 The range markers ship always. Without `--mouse`, or without `set -g mouse on`,
 they are inert: tmux draws the counts exactly as before, and nothing is
@@ -155,21 +128,25 @@ a client that does not exist).
 bind-key a display-popup -E -w 80% -h 60% 'tma'
 ```
 
-`tma watch` is a persistent sidebar for a normal pane. `split-window` does
-**not** format-expand either, so again no `--client`:
-
-```tmux
-bind-key W split-window -h -l 32 'tma watch'
-```
-
-The full-width status table wants the whole terminal, so bind it to a new window
-rather than a narrow split (a 32-column split would fall back to the single
-list). `--table` opens straight into the table; `p` inside `tma watch` toggles it
-against the preview:
+`tma watch` is a persistent dashboard for a normal pane, and the full-width table
+wants the whole terminal, so bind it to a new window. `new-window` does **not**
+format-expand, so again no `--client`. `--table` opens straight into the table;
+`p` inside `tma watch` toggles it against the preview:
 
 ```tmux
 bind-key G new-window 'tma watch --table'
 ```
+
+If you would rather have it beside your work than in a window of its own, bind a
+split instead — tma has no opinion about placement, and a narrow pane falls back
+to the single-column list:
+
+```tmux
+bind-key W split-window -h -l 40 'tma watch'
+```
+
+Mind that a split follows nothing: jump to an agent in another window and the
+pane stays behind in the window you left.
 
 Jump straight to whoever needs you, no picker. `run-shell` does format-expand, so
 pass the client: `tma` then switches the client that pressed the key and keys the
@@ -192,8 +169,8 @@ bind-key A run-shell 'tma act --menu --pane "#{pane_id}"'
 Should an old binding still pass an unexpanded `#{client_name}`, `tma` reads it
 as no client at all and falls back to resolving the acting client itself.
 
-The sidebar is a normal pane, so the same key toggles it off by killing the pane
-when you are in it (`q`, `Esc`, or `ctrl-c` also quit `tma watch`).
+`tma watch` runs in a normal pane, so `q`, `Esc`, or `ctrl-c` inside it quits and
+takes the pane (or window) with it.
 
 ## What a binding can reach
 

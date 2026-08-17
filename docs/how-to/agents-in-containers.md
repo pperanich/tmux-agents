@@ -95,7 +95,7 @@ hooks wired.
 ## What you get, and what you do not
 
 You get everything the hook tier carries: state and transitions, `@agent_since`,
-attention, notifications, `tma wait`, the picker, the sidebar, and actions that
+attention, notifications, `tma wait`, the picker, `tma watch`, and actions that
 send keys (tmux delivers those to the pane's tty, which the container process is
 reading, so the boundary does not matter). Context telemetry rides the same
 route: the statusline shim runs inside the container and pushes to `tma event

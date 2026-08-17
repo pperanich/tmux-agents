@@ -94,8 +94,8 @@ set -g status-right '#(tma status) %H:%M'
 `#(tma status)` is not just cosmetic: without a daemon it is also what keeps
 pane state fresh. The [getting-started tutorial](docs/tutorial/getting-started.md)
 walks the whole loop end to end, and [status line and
-keybindings](docs/how-to/install-the-keybindings.md) covers the picker, sidebar,
-and jump bindings.
+keybindings](docs/how-to/install-the-keybindings.md) covers the picker, the
+watch window, and the jump bindings.
 
 ## Configuration
 

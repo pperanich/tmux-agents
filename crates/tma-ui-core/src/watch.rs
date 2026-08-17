@@ -1,4 +1,4 @@
-//! The `watch` surface's pure fold: the sidebar's rows/selection/refresh/preview state plus the
+//! The `watch` surface's pure fold: rows/selection/refresh/preview state plus the
 //! width-driven layout and the full-width table builders, and the `update` that folds an `Event`
 //! into them. Width is model state (`width` + `last_layout`), seeded by the shell's initial
 //! Resize, so the threshold-cross cache drop is assertable without a terminal. `Res = ()`:
@@ -47,7 +47,7 @@ const CONTEXT_STALE_MS: u64 = 300_000;
 /// `Selection`; the draw fn and the capture gate both read it (only the preview arm captures).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum WatchLayout {
-    /// The 32-column sidebar MVP: one scrollable list, no preview, no capture.
+    /// The narrow MVP arm: one scrollable list, no preview, no capture.
     ListOnly,
     /// Wide enough to split the body and show a live ANSI preview beside the list.
     ListAndPreview,
@@ -101,7 +101,7 @@ pub enum DisplayItem<'a> {
     Row(&'a AgentRow),
 }
 
-/// The sidebar's fold: state-sorted rows, the highlighted index, the wide-mode preference, the
+/// The watcher's fold: state-sorted rows, the highlighted index, the wide-mode preference, the
 /// width-derived layout (model state, seeded by the shell's initial Resize), the refresh gate, and
 /// the preview cache. Derives `Debug` so an event-script test can assert a model projection.
 ///
@@ -206,7 +206,7 @@ impl WatchModel {
         match k {
             // q/Esc/Ctrl-C quit; a plain `Quit` batch, nothing to defer (no jump rides with it).
             Key::Char('q') | Key::Esc | Key::CtrlC => vec![Effect::Quit],
-            // Enter jumps but keeps the sidebar open (persistent, non-modal): `[Focus, ClearAttention]`
+            // Enter jumps but keeps the watcher open (persistent, non-modal): `[Focus, ClearAttention]`
             // with NO `Quit`, so the runner runs them inline and the loop continues (watch.rs:207-215).
             Key::Enter => match self.selected_row() {
                 Some(r) => vec![
@@ -217,9 +217,9 @@ impl WatchModel {
                 ],
                 None => vec![],
             },
-            // `a` opens the action menu on the HIGHLIGHTED pane, not the pane the sidebar lives in:
+            // `a` opens the action menu on the HIGHLIGHTED pane, not the pane the watcher lives in:
             // triaging N blocked agents from here is the point, and jumping to each first is not.
-            // The menu is tmux's own overlay, so the sidebar neither draws it nor closes for it.
+            // The menu is tmux's own overlay, so the watcher neither draws it nor closes for it.
             // `tab` does the same, so the key that acts is the same one in both surfaces (the
             // picker has only `tab`: there, every printable key belongs to the query).
             Key::Char('a') | Key::Tab => match self.selected_row() {
@@ -255,7 +255,7 @@ impl WatchModel {
     }
 
     /// Fold one mouse report. Hover just moves a highlight (no effects, so a pointer crossing the
-    /// sidebar costs nothing but a redraw); a press selects the row it landed on, and a second
+    /// a redraw costs nothing); a press selects the row it landed on, and a second
     /// press on that same row jumps, the mouse spelling of "highlight, then Enter". The wheel moves
     /// the selection rather than the window, so the highlight can never scroll out of sight.
     fn on_mouse(&mut self, m: Mouse, now: u64) -> Vec<Effect> {
@@ -276,7 +276,7 @@ impl WatchModel {
                 self.sel.index = row;
                 self.sync_view();
                 match click {
-                    // The sidebar is non-modal, so a jump keeps it open — exactly what Enter does.
+                    // The watcher is non-modal, so a jump keeps it open — exactly what Enter does.
                     Click::Double => match self.selected_row() {
                         Some(r) => vec![
                             Effect::Focus(Box::new(r.clone())),
@@ -741,7 +741,7 @@ mod tests {
         m.update(Event::Mouse(Mouse { kind, col, row }), now, &mut ())
     }
 
-    /// The narrow sidebar at 32x10: a bordered list whose first row is screen row 1.
+    /// The narrow arm at 32x10: a bordered list whose first row is screen row 1.
     fn narrow(rows: Vec<AgentRow>) -> WatchModel {
         let mut m = WatchModel::new(rows, WidePref::Preview, 0);
         m.update(
@@ -786,7 +786,7 @@ mod tests {
         );
         assert!(
             !fx.iter().any(|e| matches!(e, Effect::Quit)),
-            "the sidebar is non-modal: a jump leaves it open"
+            "the watcher is non-modal: a jump leaves it open"
         );
     }
 
@@ -1003,7 +1003,7 @@ mod tests {
         );
         assert!(
             !fx.iter().any(|e| matches!(e, Effect::Quit)),
-            "no Quit: the sidebar stays open (non-modal)"
+            "no Quit: the watcher stays open (non-modal)"
         );
     }
 
@@ -1019,7 +1019,7 @@ mod tests {
         );
         assert!(
             !fx.iter().any(|e| matches!(e, Effect::Quit)),
-            "the sidebar stays open behind the menu"
+            "the watcher stays open behind the menu"
         );
         // An empty list has nothing to act on: no effect, no panic.
         let mut empty = WatchModel::new(vec![], WidePref::Preview, 0);

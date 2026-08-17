@@ -64,7 +64,7 @@ options carry rollups and hints.
 | `@agent_summary` | window | rollup, a pure function of the sibling panes' options; space-separated `<state>:<count>` in the fixed order `blocked working idle unknown`, zero-count states omitted, empty or absent when the window has no agents (e.g. `blocked:1 working:2`) |
 | `@agent_session_summary` | session | the same rollup grammar over every agent pane in the session, written by the same writers under the same guards. A distinct key rather than `@agent_summary` at session scope because a pane-context format read falls back pane → window → session: one shared name would make an agentless window render its session's counts |
 | `@tma_last_poll` | server | hint only; the per-pane `@agent_stamped_at` is authoritative for freshness |
-| `@tma_watch_pid` | pane (on the sidebar's own pane) | the focus-nudge target; `tma watch` advertises its pid here on its own `$TMUX_PANE` at startup and unsets it on every quit path, so it dies with the pane |
+| `@tma_watch_pid` | pane (on the watcher's own pane) | the focus-nudge target; `tma watch` advertises its pid here on its own `$TMUX_PANE` at startup and unsets it on every quit path, so it dies with the pane |
 
 Values that depend on a previous value (the write-once `@agent_since`, the
 notification dedup, the hook-versus-capture arbitration) are governed by
@@ -288,7 +288,7 @@ guessing which prefix belongs to what. Top level:
 | `clients` | object | `attached` (number of attached clients) |
 | `status_option` | object | `enabled` (boolean: the server's global `status`) |
 | `mouse` | object | `bindings_installed` (boolean), `enabled` (boolean: the server's `mouse` option). Both true is the working state; installed-without-mouse is the warning |
-| `watch` | object | `running` (boolean), `sidebars` (number of panes advertising `@tma_watch_pid`) |
+| `watch` | object | `running` (boolean), `watchers` (number of panes advertising `@tma_watch_pid`) |
 | `wrapper` | object | `path` (string), `present` (boolean) for the `tma-hook` wrapper |
 | `notify` | object | `last_failure`: `null`, or an object of `at` (epoch ms), `reason`, `command` |
 | `tmux_hooks` | array | one object per checked hook: `hook` (name), `present` (boolean), `hook_state` (`present` / `drifted` / `wiped` / `missing`) |

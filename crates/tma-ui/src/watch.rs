@@ -36,10 +36,10 @@ use crate::dash;
 use crate::picker::unix_now;
 use crate::runner::{self, Surface};
 
-/// Run the watch sidebar to completion: first frame from stamps, a 1 s guarded-poll refresh (an
+/// Run the watch dashboard to completion: first frame from stamps, a 1 s guarded-poll refresh (an
 /// ambient producer), Enter jumps the acting client without closing. `config`/`manifests` owned for
-/// hot-reload. `selector` narrows the rows the fold ever sees — the sidebar's cycle still refreshes
-/// every pane, so a scoped sidebar remains a full ambient producer.
+/// hot-reload. `selector` narrows the rows the fold ever sees — the watcher's cycle still refreshes
+/// every pane, so a scoped watcher remains a full ambient producer.
 #[allow(clippy::too_many_arguments)]
 pub fn run_watch(
     tmux: &Tmux,
@@ -89,9 +89,6 @@ pub fn run_watch(
             manifest_dir,
             acting_client,
             filter: runner::RowFilter::from_selector(selector),
-            // The sidebar follows its own jumps into the window it sends the client to; the same
-            // pane the guard advertises the nudge pid on.
-            follow_pane: watch_pane,
         },
     )
 }
@@ -108,7 +105,7 @@ impl Surface for WatchModel {
     }
 }
 
-/// Render the sidebar: a sorted agent list plus a one-line footer, laid out per the model's
+/// Render the watcher: a sorted agent list plus a one-line footer, laid out per the model's
 /// [`layout`](WatchModel::layout). The two list arms paint the compact 32-column row (glyph+agent+locator, time/title
 /// clip) with (for the wide arm) a live preview beside it; the table arm reclaims the preview's width
 /// for the full-width status columns.

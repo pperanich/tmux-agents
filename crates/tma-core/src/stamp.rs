@@ -88,7 +88,7 @@ pub mod opt {
     /// rather than [`SUMMARY`] at another scope: a pane-context format read walks pane → window →
     /// session, so one shared name would make an agentless window inherit its session's rollup.
     pub const SESSION_SUMMARY: &str = "@agent_session_summary";
-    /// The pid a resident `tma watch` sidebar advertises for the SIGUSR1 nudge. Display infra — set
+    /// The pid a resident `tma watch` advertises for the SIGUSR1 nudge. Display infra — set
     /// on the surface's OWN pane so a recycled server-scoped pid can't turn a focus change into a stray kill.
     pub const WATCH_PID: &str = "@tma_watch_pid";
     /// Server-wide poll hint: epoch **ms** of the last producing cycle, a stampede guard that skips

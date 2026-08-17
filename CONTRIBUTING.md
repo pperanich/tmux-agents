@@ -33,7 +33,7 @@ boundaries below.
 | `tma-tmux` | The only crate that spawns `tmux`: read path, control-mode pool, guarded option writes. |
 | `tma-runtime` | Tier 2: config, manifest loading, the poll cycle, capture, `tma event`, the wire protocol, and the `ui` helper surface. |
 | `tma-daemon` | Tier 3 only: the serve loop and notification dispatch. |
-| `tma-ui-core` | The pure Elm-style folds behind the picker and the watch sidebar. No terminal, no tmux. |
+| `tma-ui-core` | the pure Elm-style folds behind the picker and `tma watch`. No terminal, no tmux. |
 | `tma-ui` | The display layer: the shell loop, drawing, jump, and the `ls`/`status` surfaces. |
 | `tma` | The binary: clap dispatch, hook installation, doctor. |
 | `tma-test-support` | The shared integration-test harness (scratch tmux socket, daemon lock gate). Dev-dependency only. |

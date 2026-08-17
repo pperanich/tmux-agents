@@ -103,7 +103,7 @@ your other sessions exactly as an unscoped one does.
 | `act` | Fire a guarded action into an agent pane (`--all` for every pane in scope), or enumerate/menu the fireable ones (`--list` / `--menu`). |
 | `mute` | Suppress notifications for the panes in scope, for `--for <DURATION>` or until `--clear`. |
 | `subscribe` | Stream the read path: one complete `ls --json` document per line, pushed when a daemon is present. |
-| `watch` | Persistent live sidebar dashboard for a normal pane. |
+| `watch` | Persistent live dashboard for a pane, window, or terminal of its own. |
 | `daemon` | Run the event-hub daemon in the foreground; `--ensure` spawns it if absent then exits. |
 | `reload` | Signal the running daemon to hot-reload its config and manifests (SIGHUP). |
 | `init` | First-run setup: detect your installed agents and wire their hooks, install the keybindings, print the `status-right` line, then report with `doctor`. |
@@ -112,7 +112,7 @@ your other sessions exactly as an unscoped one does.
 | `doctor` | Diagnose each agent pane's effective tier and why. |
 | `debug` | Manifest-authoring and inspection tools. |
 | `event` | Internal, unstable: bridge one agent hook event to a stamp. |
-| `clear-attention` | Internal: clear a pane's attention flag and nudge any watch sidebar; invoked by the auto-installed tmux focus hooks. |
+| `clear-attention` | Internal: clear a pane's attention flag and nudge any resident `tma watch`; invoked by the auto-installed tmux focus hooks. |
 | `supervise` | Internal: the detached-action supervisor. Spawned by the `act` broker's detach path to hold the single-flight lock for the child's lifetime, kill it at the deadline, then clear the lock and fire the completion notification. Never user-invoked. |
 
 `event` is invoked only through the `tma-hook` wrapper an agent's config
@@ -176,14 +176,6 @@ clickable ([Clickable status
 segments](../how-to/install-the-keybindings.md#clickable-status-segments)). The
 markers draw nothing and do nothing on their own; the other three formats carry
 no markup at all.
-
-That form ends with one more segment, `tma:sidebar`, holding the `☰` icon that
-toggles a `tma watch` sidebar. It carries no count, so it is present even when
-every class is zero — but only when a click can actually reach it: the `--mouse`
-binding group installed and the server's `mouse` option on. With either missing
-(or `[status] sidebar` set to an empty glyph) the icon is dropped, so an
-unclickable icon never advertises a toggle you cannot use. The other formats
-never carry it.
 
 The counts are over the selected rows, which is what makes a per-session status
 line possible: `#(tma status --session #{session_name})`. See
@@ -591,16 +583,17 @@ changes](../how-to/stream-state-changes.md#log-every-transition-to-jsonl).
 
 ## `tma watch`
 
-Persistent live sidebar dashboard for a normal pane (not a popup):
-`split-window -h -l 32 "tma watch"`. It shows the picker's rows in a
-live-updating list, refreshing every second and on a focus-change nudge. Enter
-jumps the acting client to the highlighted agent and clears its attention but
-keeps the sidebar open (non-modal); `q`, Esc, or `ctrl-c` quit.
+Persistent live dashboard for a normal pane, tmux window, or terminal of its own
+(not a popup): `new-window "tma watch"`, or just `tma watch` in a spare terminal.
+It shows the picker's rows in a live-updating list, refreshing every second and
+on a focus-change nudge. Enter jumps the acting client to the highlighted agent
+and clears its attention but keeps the dashboard open (non-modal); `q`, Esc, or
+`ctrl-c` quit.
 
 `a` opens the [action menu](#tma-act) for the highlighted agent — the same
 `display-menu` `tma act --menu` renders, but aimed at the pane under the cursor
 rather than the one you are standing in, so a row of blocked agents is answered
-without jumping to each. The menu is a tmux overlay: the sidebar keeps refreshing
+without jumping to each. The menu is a tmux overlay: the list keeps refreshing
 behind it, and nothing opens when no action is fireable on that pane.
 
 The body adapts to the pane width. Below 76 columns it is a single list. At or
@@ -627,21 +620,18 @@ Usage: tma watch [OPTIONS]
 | option | meaning |
 |---|---|
 | `--table` | Open directly in the full-width status table when the pane is wide enough (`p` toggles back to the preview). A pane below 76 columns still falls back to the single list. |
-| `--toggle` | Close the sidebar if it is in the window being looked at, move it here if it is in another window of the session, else open one — then exit. Draws nothing itself. Combining it with `--table` or a selector flag is a usage error (exit 2); no client to act for is exit 2 too. |
-| [selector flags](#selector-flags) | Show only the agents in scope, e.g. a `tma watch --repo app` sidebar per repo. |
+| [selector flags](#selector-flags) | Show only the agents in scope, e.g. a `tma watch --repo app` window per repo. |
 
-`--toggle` is what the status line's `☰` segment and the `MouseDown1Status`
-binding run. It finds the sidebar by the pid a running `tma watch` advertises in
-`@tma_watch_pid` on its own pane, so nothing is registered anywhere and a pane
-whose advertised pid is gone is cleaned up rather than mistaken for a sidebar.
-Opening splits the client's active pane, 40 columns wide and detached (`-d`), so
-your focus stays where it was; the opened pane runs a plain `tma watch` on the
-same server. Closing kills that pane. Only the acting client's session is
-searched, so two sessions can each hold their own sidebar.
+tma places nothing for you: run it where you want it. `prefix G` gives it a tmux
+window of its own, a `split-window -h -l 40 'tma watch'` gives it a pane beside
+your work, and a second terminal (or a second monitor) works just as well, since
+`tma watch` reaches the server over the socket like any other client. Every
+instance advertises its pid in `@tma_watch_pid` on its own pane, which is what
+the focus-change nudge signals; several at once are fine.
 
-A scoped sidebar still runs the unscoped poll cycle every second, so it remains a
+A scoped watcher still runs the unscoped poll cycle every second, so it remains a
 full ambient producer for every pane on the server. Its first frame is painted
-from stamps, which carry no repo label yet, so a `--repo`/`--branch` sidebar
+from stamps, which carry no repo label yet, so a `--repo`/`--branch` watcher
 starts empty and fills in on the first refresh.
 
 The invoking client comes from the global `--client`.
@@ -776,19 +766,19 @@ Usage: tma install-keys [OPTIONS]
 | `--conf <PATH>` | The tmux config to mark with the `source-file` line. Defaults to the first tmux config that exists, in tmux's own load order: `~/.tmux.conf`, `$XDG_CONFIG_HOME/tmux/tmux.conf`, `~/.config/tmux/tmux.conf`. With none of them present, tma creates `$XDG_CONFIG_HOME/tmux/tmux.conf` (or `~/.config/tmux/tmux.conf` when `~/.config` exists, else `~/.tmux.conf`); it only ever creates a config when you have none, so the new file cannot shadow one. |
 | `--config-dir <DIR>` | Override the tma config dir holding the managed `tmux.conf` (env `TMA_CONFIG_DIR`). Defaults to `~/.config/tma`. |
 
-The default bindings are prefix-key bindings: `a` opens the picker in a popup, `W`
-splits a `tma watch` sidebar (`w` is tmux's own window chooser), `G` opens `tma watch
---table` in a new window (the full-width status table; `g` is taken by `jump --blocked`),
-`A` opens `tma act --menu` on the active pane, and `j`/`g`/`b`/`h` run `tma jump` with
+The default bindings are prefix-key bindings: `a` opens the picker in a popup,
+`G` opens `tma watch --table` in a new window (the full-width status table; `g` is
+taken by `jump --blocked`), `A` opens `tma act --menu` on the active pane, and
+`j`/`g`/`b`/`h` run `tma jump` with
 `--attention`/`--blocked`/`--back`/`--home`. The status-line driver `#(tma status)`
 is not written; add it to `status-right` yourself. See
 [Install the keybindings](../how-to/install-the-keybindings.md) and the full
 [key tables](keybindings.md).
 
 `--mouse` adds four root-table bindings that dispatch on `#{mouse_status_range}`.
-A left-click walks a four-arm chain, first match wins: the blocked count jumps to
-the longest-blocked agent, the trailing `tma:sidebar` icon runs `tma watch
---toggle`, any other `tma:*` range opens the picker popup, and anything else falls
+A left-click walks a three-arm chain, first match wins: the blocked count jumps to
+the longest-blocked agent, any other `tma:*` range opens the picker popup, and
+anything else falls
 through to tmux's own `switch-client -t=`. A right-click on any tma range opens
 `tma jump --menu`. They need `set -g mouse on`, which tma never sets (it changes
 copy/paste in every pane), and they claim tmux's status-line mouse keys: a

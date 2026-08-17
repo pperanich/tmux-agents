@@ -5,7 +5,7 @@
 //! evidence source+age, and the effective tier with its reason ([`derive_tier`]). Plus the
 //! server-wide checks: the ambient driver (`@tma_last_poll` age, is anything running `tma status`?),
 //! what that driver depends on (an attached client to run the `#()` job, `status` left on), the
-//! middle-tier nudge (resident `tma watch` sidebars advertising `@tma_watch_pid`), and the two
+//! middle-tier nudge (resident `tma watch` panes advertising `@tma_watch_pid`), and the two
 //! halves of the clickable status segments (the `--mouse` bindings against the `mouse` option). `--json` emits the
 //! additive-only `"schema": 1` document, matching `tma ls --json`; `--exit-code` turns the warnings
 //! into a CI verdict ([`gate`]).
@@ -347,9 +347,9 @@ struct Report {
     mouse_bindings: bool,
     /// The global `mouse` option, which those bindings need for a click to reach tmux at all.
     mouse_enabled: bool,
-    /// Count of resident `tma watch` sidebars advertising `@tma_watch_pid` (the middle tier):
+    /// Count of resident `tma watch` panes advertising `@tma_watch_pid` (the middle tier):
     /// the panes the focus-change hook nudges. `0` when none are running.
-    watch_sidebars: usize,
+    watch_panes: usize,
     tmux_hooks: Vec<(String, TmuxHookState)>,
     wrapper_path: PathBuf,
     wrapper_present: bool,
@@ -467,9 +467,9 @@ fn gather(
     let mouse_bindings = crate::install_keys::mouse_bindings_installed(None);
     let mouse_enabled = tmux.get_global_option("mouse")?.is_some_and(|v| v == "on");
 
-    // Resident sidebars (the middle tier): panes advertising `@tma_watch_pid` are the SIGUSR1
+    // Resident watchers (the middle tier): panes advertising `@tma_watch_pid` are the SIGUSR1
     // nudge targets the focus-change hook signals. Read-only; a gone server yields none.
-    let watch_sidebars = tmux
+    let watch_panes = tmux
         .list_pane_option(opt::WATCH_PID)
         .map(|panes| panes.len())
         .unwrap_or(0);
@@ -657,7 +657,7 @@ fn gather(
         status_enabled,
         mouse_bindings,
         mouse_enabled,
-        watch_sidebars,
+        watch_panes,
         tmux_hooks: hook_diag.tmux_hooks,
         wrapper_path: hook_diag.wrapper_path,
         wrapper_present: hook_diag.wrapper_present,
@@ -680,7 +680,7 @@ fn gather(
 /// The `--exit-code` verdict: how many warnings the report carries, and how many panes sit below the
 /// tier their manifest supports. Every warning the report prints counts, so the flag and the report
 /// cannot disagree; posture facts that are not misconfiguration (no daemon, nothing polling yet, no
-/// sidebar, a model name `[telemetry.windows]` does not list) are not warnings and do not count.
+/// watcher, a model name `[telemetry.windows]` does not list) are not warnings and do not count.
 fn gate(r: &Report) -> (usize, usize) {
     let mut warnings = usize::from(!r.wrapper_present);
     warnings += r.tmux_hooks.iter().filter(|(_, s)| !s.is_present()).count();
@@ -898,7 +898,7 @@ mod tests {
             status_enabled: false,
             mouse_bindings: true,
             mouse_enabled: false,
-            watch_sidebars: 1,
+            watch_panes: 1,
             tmux_hooks: vec![("after-select-pane".to_string(), TmuxHookState::Present)],
             wrapper_path: PathBuf::from("/usr/local/bin/tma-hook"),
             wrapper_present: true,

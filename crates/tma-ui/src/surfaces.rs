@@ -250,19 +250,9 @@ impl StatusCounts {
 /// the output of a `#()` status job: a root-table mouse binding then reads the clicked class from
 /// `#{mouse_status_range}` (`tma install-keys --mouse`). Always emitted: without `mouse on` and
 /// those bindings the markers are inert, and tmux draws exactly what it drew before.
-///
-/// A trailing `tma:sidebar` segment carries the `tma watch --toggle` icon. It is the one segment
-/// with no count behind it, so it renders even with zero agents — the toggle stays reachable on an
-/// otherwise empty status line. Unlike the counts, it is *only* a click target: it says nothing on
-/// its own, so `sidebar_clickable` (the mouse bindings installed against a server with `mouse on`)
-/// gates it rather than merely styling it. `[status] sidebar = { glyph = "" }` drops it outright.
-pub fn render_status(
-    report: &CycleReport,
-    styles: &StatusStyles,
-    sidebar_clickable: bool,
-) -> String {
+pub fn render_status(report: &CycleReport, styles: &StatusStyles) -> String {
     let counts = StatusCounts::of(&report.rows);
-    let mut parts: Vec<String> = counts
+    let parts: Vec<String> = counts
         .styled(styles)
         .iter()
         .filter(|(_, count, _, _)| *count > 0)
@@ -270,12 +260,6 @@ pub fn render_status(
             format!("#[range=user|tma:{class}]#[fg={color}]{glyph}{count}#[norange]")
         })
         .collect();
-    let (glyph, color) = styles.resolved_sidebar();
-    if sidebar_clickable && !glyph.is_empty() {
-        parts.push(format!(
-            "#[range=user|tma:sidebar]#[fg={color}]{glyph}#[norange]"
-        ));
-    }
     parts.join(" ")
 }
 
@@ -701,9 +685,6 @@ mod tests {
         out.into_iter().collect()
     }
 
-    /// The trailing sidebar-toggle segment every default `render_status` ends with.
-    const SIDEBAR: &str = " #[range=user|tma:sidebar]#[fg=colour244]☰#[norange]";
-
     #[test]
     fn status_fixed_order_zeros_omitted() {
         let r = report(vec![
@@ -713,12 +694,10 @@ mod tests {
             row("%4", "c", AgentState::Working, None),
         ]);
         assert_eq!(
-            render_status(&r, &StatusStyles::default(), true),
-            format!(
-                "#[range=user|tma:blocked]#[fg=red]⚑1#[norange] \
-                 #[range=user|tma:working]#[fg=yellow]●2#[norange] \
-                 #[range=user|tma:idle]#[fg=green]○1#[norange]{SIDEBAR}"
-            )
+            render_status(&r, &StatusStyles::default()),
+            "#[range=user|tma:blocked]#[fg=red]⚑1#[norange] \
+             #[range=user|tma:working]#[fg=yellow]●2#[norange] \
+             #[range=user|tma:idle]#[fg=green]○1#[norange]"
         );
     }
 
@@ -732,81 +711,26 @@ mod tests {
         ]);
         // Order blocked → working → done → idle → unknown; done uses ✓ magenta, idle keeps ○.
         assert_eq!(
-            render_status(&r, &StatusStyles::default(), true),
-            format!(
-                "#[range=user|tma:blocked]#[fg=red]⚑1#[norange] \
-                 #[range=user|tma:done]#[fg=magenta]✓2#[norange] \
-                 #[range=user|tma:idle]#[fg=green]○1#[norange]{SIDEBAR}"
-            )
+            render_status(&r, &StatusStyles::default()),
+            "#[range=user|tma:blocked]#[fg=red]⚑1#[norange] \
+             #[range=user|tma:done]#[fg=magenta]✓2#[norange] \
+             #[range=user|tma:idle]#[fg=green]○1#[norange]"
         );
     }
 
-    /// With no agents the counts are all omitted, so the line is the sidebar icon alone: the toggle
-    /// must stay clickable on a server that has not started an agent yet.
+    /// Every class at zero means nothing to say, so the whole segment is empty rather than chrome
+    /// with no content behind it: an agent-less server's status line is the one it always had.
     #[test]
-    fn status_is_the_sidebar_icon_alone_when_no_agents() {
-        assert_eq!(
-            render_status(&report(vec![]), &StatusStyles::default(), true),
-            SIDEBAR.trim_start()
-        );
-    }
-
-    /// The icon is chrome, so it is configurable like a class, and an empty glyph removes the
-    /// segment (and with it the clickable range) rather than rendering a blank one.
-    #[test]
-    fn status_sidebar_icon_is_restylable_and_disablable() {
-        let styles: StatusStyles =
-            toml::from_str("sidebar = { glyph = \"S\", color = \"blue\" }").unwrap();
-        let r = report(vec![row("%1", "c", AgentState::Idle, None)]);
-        assert_eq!(
-            render_status(&r, &styles, true),
-            "#[range=user|tma:idle]#[fg=green]○1#[norange] \
-             #[range=user|tma:sidebar]#[fg=blue]S#[norange]"
-        );
-
-        let off: StatusStyles = toml::from_str("sidebar = { glyph = \"\" }").unwrap();
-        assert_eq!(
-            render_status(&r, &off, true),
-            "#[range=user|tma:idle]#[fg=green]○1#[norange]",
-            "an empty glyph drops the segment, not just its glyph"
-        );
-        assert_eq!(
-            render_status(&report(vec![]), &off, true),
-            "",
-            "with the icon off, zero agents is the empty line it always was"
-        );
-        // The other formats never carried the icon.
-        assert_eq!(render_status_plain(&r, &styles), "○1");
-    }
-
-    /// The icon is nothing but a click target, so it renders only where a click can reach it. The
-    /// counts are different: they carry their meaning without the mouse and always render.
-    #[test]
-    fn status_sidebar_icon_renders_only_when_it_is_clickable() {
-        let r = report(vec![row("%1", "c", AgentState::Idle, None)]);
-        let counts = "#[range=user|tma:idle]#[fg=green]○1#[norange]";
-        assert_eq!(
-            render_status(&r, &StatusStyles::default(), true),
-            format!("{counts}{SIDEBAR}")
-        );
-        assert_eq!(
-            render_status(&r, &StatusStyles::default(), false),
-            counts,
-            "no reachable click ⇒ the icon is dropped, the counts stay"
-        );
-        assert_eq!(
-            render_status(&report(vec![]), &StatusStyles::default(), false),
-            "",
-            "and with no agents either, the line is empty rather than a dead icon"
-        );
+    fn status_is_empty_when_there_are_no_agents() {
+        assert_eq!(render_status(&report(vec![]), &StatusStyles::default()), "");
     }
 
     #[test]
     fn status_unknown_uses_colour244() {
         let r = report(vec![row("%1", "c", AgentState::Unknown, None)]);
         assert_eq!(
-            render_status(&r, &StatusStyles::default(), true),
-            format!("#[range=user|tma:unknown]#[fg=colour244]?1#[norange]{SIDEBAR}")
+            render_status(&r, &StatusStyles::default()),
+            "#[range=user|tma:unknown]#[fg=colour244]?1#[norange]"
         );
     }
 
@@ -819,21 +743,16 @@ mod tests {
             row("%1", "c", AgentState::Blocked, None),
             row("%2", "c", AgentState::Working, None),
         ]);
-        let line = render_status(&r, &StatusStyles::default(), true);
-        // Two classes plus the trailing sidebar icon.
-        assert_eq!(line.matches("#[range=user|tma:").count(), 3);
+        let line = render_status(&r, &StatusStyles::default());
+        assert_eq!(line.matches("#[range=user|tma:").count(), 2);
         assert_eq!(
             line.matches("#[norange]").count(),
-            3,
+            2,
             "every opened range is closed: {line}"
         );
         assert!(
             line.starts_with("#[range=user|tma:blocked]#[fg=red]"),
             "the range opens outside the color: {line}"
-        );
-        assert!(
-            line.ends_with(SIDEBAR),
-            "the sidebar icon is last, after every count: {line}"
         );
     }
 
@@ -1033,11 +952,9 @@ mod tests {
             row("%2", "c", AgentState::Working, None),
         ]);
         assert_eq!(
-            render_status(&r, &styles, true),
-            format!(
-                "#[range=user|tma:blocked]#[fg=colour196]B1#[norange] \
-                 #[range=user|tma:working]#[fg=yellow]●1#[norange]{SIDEBAR}"
-            )
+            render_status(&r, &styles),
+            "#[range=user|tma:blocked]#[fg=colour196]B1#[norange] \
+             #[range=user|tma:working]#[fg=yellow]●1#[norange]"
         );
     }
 }
