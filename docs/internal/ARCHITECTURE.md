@@ -547,7 +547,9 @@ popup ergonomics and keybinding feel, which the PRD names as the interaction mod
 copy. Rejected: skim (ta's choice — heavier, less maintained, brings its own event
 loop) and fzf shelling (external dependency; F15's `tma ls --json` already serves
 users who prefer composing their own fzf pipelines). Picker ergonomics borrowed from
-ta: digit quick-select, ctrl-s session-scope toggle preserving the query.
+ta: ctrl-s session-scope toggle preserving the query. Its digit quick-select was
+dropped later — every printable key belongs to the query, or an agent named `auth`
+cannot be typed.
 
 ## Build order
 

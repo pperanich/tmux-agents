@@ -139,18 +139,10 @@ impl PickerModel {
                 self.recompute(matcher);
                 self.selection_preview_effect()
             }
-            // Digit quick-select on the default (unfiltered) list; once a query is typed, digits
-            // filter instead. An out-of-range digit is a no-op.
-            Key::Char(c) if c.is_ascii_digit() && self.query.is_empty() => {
-                if self.quick_select(c.to_digit(10).unwrap() as usize) {
-                    self.focus_batch()
-                } else {
-                    vec![]
-                }
-            }
-            // `a` opens the action menu on the highlighted pane. Gated on an empty query exactly like
-            // the digits above: once you are typing, `a` is a filter character and nothing else.
-            Key::Char('a') if self.query.is_empty() => match self.selected_row() {
+            // Tab opens the action menu on the highlighted pane. Not a printable character, which
+            // is the whole point: every one of those belongs to the query, so an agent called
+            // `auth` (or `1password`) can actually be searched for.
+            Key::Tab => match self.selected_row() {
                 Some(r) => vec![Effect::ActMenu {
                     pane: r.pane_id.clone(),
                 }],
@@ -282,21 +274,10 @@ impl PickerModel {
         self.sync_view();
     }
 
-    /// Digit quick-select on the default (unfiltered) list: `1`-`9` select rows one through nine,
-    /// `0` selects the tenth. Returns whether the index was in range.
-    fn quick_select(&mut self, n: usize) -> bool {
-        let idx = if n == 0 { 9 } else { n - 1 };
-        if idx < self.visible.len() {
-            self.sel.index = idx;
-            return true;
-        }
-        false
-    }
-
     // --- draw accessors -------------------------------------------------------------------------
 
-    /// The fuzzy query as typed; the prompt echoes it verbatim, and an empty one arms the
-    /// quick-select digits and the `a` action key.
+    /// The fuzzy query as typed; the prompt echoes it verbatim. Every printable key reaches it,
+    /// with no key held back for a shortcut.
     pub fn query(&self) -> &str {
         &self.query
     }
@@ -633,22 +614,6 @@ mod tests {
     }
 
     #[test]
-    fn quick_select_picks_nth_visible() {
-        let mut m = matcher();
-        let mut p = model(
-            vec![
-                row("a", 0, 0, "c", AgentState::Blocked, 10),
-                row("a", 0, 1, "c", AgentState::Working, 10),
-            ],
-            "a",
-            &mut m,
-        );
-        assert!(p.quick_select(2));
-        assert_eq!(p.sel.index, 1);
-        assert!(!p.quick_select(9), "out of range is a no-op");
-    }
-
-    #[test]
     fn move_by_wraps() {
         let mut m = matcher();
         let mut p = model(
@@ -827,41 +792,50 @@ mod tests {
         );
     }
 
+    /// Every printable key belongs to the query, with none held back for a shortcut: an agent
+    /// called `auth` or a branch called `2fa` has to be reachable from an empty prompt.
     #[test]
-    fn digit_quick_select_only_when_query_empty() {
+    fn every_printable_key_types_including_a_and_the_digits() {
         let mut m = matcher();
         let mut p = model(
             vec![
-                row("a", 0, 0, "c", AgentState::Blocked, 10),
-                row("a", 0, 1, "c", AgentState::Working, 10),
+                row("a", 0, 0, "auth", AgentState::Blocked, 10),
+                // Not `claude`: "au" is a subsequence of it, and this asserts the filter narrowed.
+                row("a", 0, 1, "codex", AgentState::Working, 10),
             ],
             "a",
             &mut m,
         );
-        // Empty query: `2` selects the second row and jumps (Focus batch with Quit).
-        let effects = p.update(Event::Key(Key::Char('2')), 0, &mut m);
-        assert_eq!(p.sel.index, 1);
-        assert!(
-            effects.iter().any(|e| matches!(e, Effect::Quit)),
-            "quick-select jumps"
-        );
-        // Non-empty query: the same `2` filters instead of selecting; no jump.
+        for c in "au".chars() {
+            let fx = p.update(Event::Key(Key::Char(c)), 0, &mut m);
+            // A keystroke may re-capture the preview for a newly-highlighted row; what it must
+            // never do is act or jump.
+            assert!(
+                !fx.iter()
+                    .any(|e| matches!(e, Effect::ActMenu { .. } | Effect::Quit)),
+                "typing neither acts nor jumps, got {fx:?}"
+            );
+        }
+        assert_eq!(p.query(), "au");
+        assert_eq!(p.visible_count(), 1, "and it filtered: {}", p.query());
+        assert_eq!(p.selected_row().unwrap().agent, "auth");
+
+        // Digits type too — there is no quick-select to intercept them.
         let mut p = model(
             vec![row("a", 0, 0, "claude", AgentState::Blocked, 10)],
             "a",
             &mut m,
         );
-        p.update(Event::Key(Key::Char('x')), 0, &mut m);
-        let effects = p.update(Event::Key(Key::Char('2')), 0, &mut m);
-        assert_eq!(p.query(), "x2", "the digit appended to the query");
+        let fx = p.update(Event::Key(Key::Char('2')), 0, &mut m);
+        assert_eq!(p.query(), "2");
         assert!(
-            !effects.iter().any(|e| matches!(e, Effect::Quit)),
-            "a digit mid-query does not jump"
+            !fx.iter().any(|e| matches!(e, Effect::Quit)),
+            "a digit no longer jumps, got {fx:?}"
         );
     }
 
     #[test]
-    fn a_opens_the_action_menu_only_on_the_unfiltered_list() {
+    fn tab_opens_the_action_menu_whatever_the_query_holds() {
         let mut m = matcher();
         let mut p = model(
             vec![
@@ -873,20 +847,20 @@ mod tests {
         );
         p.sel.index = 1;
         let pane = p.selected_row().unwrap().pane_id.clone();
-        // Empty query: `a` acts on the highlighted pane and leaves the picker open (no Quit).
-        let fx = p.update(Event::Key(Key::Char('a')), 0, &mut m);
+        let fx = p.update(Event::Key(Key::Tab), 0, &mut m);
         assert!(
             matches!(fx.as_slice(), [Effect::ActMenu { pane: q }] if *q == pane),
-            "`a` yields one ActMenu for the highlighted pane, got {fx:?}"
+            "tab yields one ActMenu for the highlighted pane, got {fx:?}"
         );
         assert_eq!(p.query(), "", "acting did not type into the query");
-        // Mid-query, the same `a` is a filter character: it appends and emits no menu.
+
+        // Mid-query it still acts: tab is not a character anyone can be searching for.
         p.update(Event::Key(Key::Char('c')), 0, &mut m);
-        let fx = p.update(Event::Key(Key::Char('a')), 0, &mut m);
-        assert_eq!(p.query(), "ca");
+        let fx = p.update(Event::Key(Key::Tab), 0, &mut m);
+        assert_eq!(p.query(), "c", "tab did not touch the query");
         assert!(
-            !fx.iter().any(|e| matches!(e, Effect::ActMenu { .. })),
-            "a digit-style gate: `a` filters once a query is typed, got {fx:?}"
+            fx.iter().any(|e| matches!(e, Effect::ActMenu { .. })),
+            "tab acts mid-query too, got {fx:?}"
         );
     }
 

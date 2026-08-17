@@ -107,18 +107,18 @@ fn draw(f: &mut Frame, model: &PickerModel, now: u64, palette: &RowPalette) {
 
     // Same show/hide rule as watch: the branch column appears only when a visible row resolved one.
     let show_branch = model.show_branch();
-    // Agent list. The picker stays flat (grouping would break the 1-9/0 quick-select indexing); the
-    // row carries a leading quick-select index (the varying piece) and the dimmed branch label.
+    // Agent list, flat (the fuzzy query is the way to narrow it, not grouping). No leading index:
+    // the digits that once jumped to one now type into the query, and a number printed beside a row
+    // would promise a shortcut that no longer exists.
     let items: Vec<ListItem> = model
         .visible_rows()
-        .enumerate()
-        .map(|(n, r)| {
+        .map(|r| {
             let (glyph, color) = row_style(palette, r);
             let time = fmt_since(now, r.since);
-            let mut spans = vec![
-                Span::styled(format!("{} ", n + 1), Style::default().fg(Color::DarkGray)),
-                Span::styled(format!("{glyph} "), Style::default().fg(color)),
-            ];
+            let mut spans = vec![Span::styled(
+                format!("{glyph} "),
+                Style::default().fg(color),
+            )];
             spans.extend(dash::grid_columns(&r.agent, &r.locator(), &time));
             spans.push(branch_span(r.branch(), BRANCH_W, show_branch));
             spans.push(Span::raw(format!(" {}", truncate(&r.title, 40))));
@@ -148,20 +148,14 @@ fn draw(f: &mut Frame, model: &PickerModel, now: u64, palette: &RowPalette) {
         f.render_widget(preview_widget, area);
     }
 
-    // Query / status line.
+    // Query / status line. Every hint here fires whatever the query holds — no key is conditional
+    // any more, because none of them is a character you might want to search for.
     let scope = if model.scoped() { "session" } else { "all" };
-    // `a` acts only on the unfiltered list (mid-query it is a filter character), so the hint appears
-    // exactly when the key would fire — no need to explain the gate in a footer.
-    let act_hint = if model.query().is_empty() {
-        "  a=act"
-    } else {
-        ""
-    };
     let prompt = Line::from(vec![
         Span::styled("› ", Style::default().fg(Color::Yellow)),
         Span::raw(model.query().to_string()),
         Span::styled(
-            format!("   [scope: {scope}]  enter=jump{act_hint}  ctrl-s=scope  esc=quit"),
+            format!("   [scope: {scope}]  enter=jump  tab=act  ctrl-s=scope  esc=quit"),
             Style::default().fg(Color::DarkGray),
         ),
     ]);
@@ -212,7 +206,7 @@ mod draw_tests {
     }
 
     #[test]
-    fn picker_renders_indexed_rows_and_highlights_selection() {
+    fn picker_renders_sorted_rows_and_highlights_selection() {
         let mut mtch = matcher();
         let mut p = model(three_rows(), 100, &mut mtch);
         key(&mut p, Key::Down, &mut mtch); // highlight the second row
@@ -221,7 +215,7 @@ mod draw_tests {
         let buf = render(100, 14, |f| draw(f, &p, NOW, &palette));
         let ls = lines(&buf);
 
-        // Rows in state-sorted order (blocked, working, idle), each with its quick-select index.
+        // Rows in state-sorted order (blocked, working, idle).
         let a = ls
             .iter()
             .position(|l| l.contains("alpha"))
@@ -235,22 +229,16 @@ mod draw_tests {
             .position(|l| l.contains("charlie"))
             .expect("charlie row");
         assert!(a < b && b < c, "rows in state-sorted order: {ls:?}");
-        // The quick-select digit sits just inside the left border ('│' at x0, the digit at x1).
-        assert!(
-            ls[a].starts_with("│1"),
-            "row 1 quick-select index: {:?}",
-            ls[a]
-        );
-        assert!(
-            ls[b].starts_with("│2"),
-            "row 2 quick-select index: {:?}",
-            ls[b]
-        );
-        assert!(
-            ls[c].starts_with("│3"),
-            "row 3 quick-select index: {:?}",
-            ls[c]
-        );
+        // The row opens with its state glyph, right inside the left border: no leading index, since
+        // the digits that once jumped to a row now type into the query.
+        for (line, agent) in [(a, "alpha"), (b, "bravo"), (c, "charlie")] {
+            let after_border = ls[line].chars().nth(1).unwrap_or(' ');
+            assert!(
+                !after_border.is_ascii_digit(),
+                "{agent}'s row must not lead with an index: {:?}",
+                ls[line]
+            );
+        }
         // The prompt line carries the scope hint.
         assert!(
             ls.iter().any(|l| l.contains("scope: all")),

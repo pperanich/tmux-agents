@@ -281,6 +281,7 @@ fn map_key(k: KeyEvent) -> Option<Event> {
     let key = match k.code {
         KeyCode::Esc => Key::Esc,
         KeyCode::Enter => Key::Enter,
+        KeyCode::Tab => Key::Tab,
         KeyCode::Up => Key::Up,
         KeyCode::Down => Key::Down,
         KeyCode::Backspace => Key::Backspace,

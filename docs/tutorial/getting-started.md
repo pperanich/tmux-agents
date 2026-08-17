@@ -158,12 +158,13 @@ tma
 ```
 
 The picker is a fuzzy list of every agent pane across all your sessions, blocked
-ones sorted first. Each row leads with a dimmed quick-select digit, then the state
-glyph, agent name, `session:window.pane`, and time in state, then a dimmed branch
-label when the pane resolves one, and finally the pane title. A live preview of the
-highlighted pane sits beside the list. Type to filter, use the arrow keys to
-move, `Enter` to jump to the highlighted agent, `Esc` to cancel. While the query is
-empty the digits jump straight to a row: `1`-`9`, and `0` for the tenth.
+ones sorted first. Each row leads with the state glyph, then the agent name,
+`session:window.pane`, and time in state, then a dimmed branch label when the pane
+resolves one, and finally the pane title. A live preview of the highlighted pane
+sits beside the list. Type to filter, use the arrow keys to move, `Enter` to jump
+to the highlighted agent, `tab` for that agent's action menu, `Esc` to cancel.
+Every printable key types, so any agent name is searchable from the first
+keystroke.
 
 ## 6. Open the watch sidebar
 

@@ -10,6 +10,9 @@ pub enum Key {
     Esc,
     Backspace,
     Char(char),
+    /// The picker's action-menu key. A key no query can contain, because every printable character
+    /// belongs to the fuzzy query — an agent named `auth` has to be typeable.
+    Tab,
     CtrlC,
     CtrlS,
 }

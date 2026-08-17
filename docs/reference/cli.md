@@ -15,10 +15,10 @@ the picker itself stays a flat list, ungrouped. The pane you opened the picker
 from is left out of the list (jumping to where you already are does nothing), so
 opening it from your only agent shows an empty list; `ls`, `status`, and `watch`
 still list every agent. Enter jumps to the highlighted
-agent; `a` opens that agent's [action menu](#tma-act) instead of jumping, and
-like the quick-select digits it applies only while the query is empty (once you
-are typing, `a` is a filter character). The digits are `1`-`9` for the first nine
-rows plus `0` for the tenth. A popup at least 76 columns wide carries
+agent; `tab` opens that agent's [action menu](#tma-act) instead of jumping. Every
+printable key belongs to the query — no letter or digit is reserved for a
+shortcut, so an agent named `auth` is searchable from an empty prompt. A popup at
+least 76 columns wide carries
 a live preview of the highlighted pane beside the list, the same threshold `tma
 watch` uses; below it the list takes the whole popup and nothing is captured. The
 [key tables](keybindings.md#keys-inside-the-picker) list both

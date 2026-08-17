@@ -220,7 +220,9 @@ impl WatchModel {
             // `a` opens the action menu on the HIGHLIGHTED pane, not the pane the sidebar lives in:
             // triaging N blocked agents from here is the point, and jumping to each first is not.
             // The menu is tmux's own overlay, so the sidebar neither draws it nor closes for it.
-            Key::Char('a') => match self.selected_row() {
+            // `tab` does the same, so the key that acts is the same one in both surfaces (the
+            // picker has only `tab`: there, every printable key belongs to the query).
+            Key::Char('a') | Key::Tab => match self.selected_row() {
                 Some(r) => vec![Effect::ActMenu {
                     pane: r.pane_id.clone(),
                 }],

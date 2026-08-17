@@ -57,17 +57,16 @@ the list, so jumping to where you already are is not offered.
 | key | does |
 |---|---|
 | `enter` | Jump to the highlighted agent, clear its attention flag, close the picker. |
-| `1`-`9`, `0` | Jump to the nth listed agent (`0` is the tenth). Empty query only; an out-of-range digit does nothing. |
-| `a` | Open the tmux action menu for the highlighted agent. Empty query only. |
+| `tab` | Open the tmux action menu for the highlighted agent. |
 | `ctrl-s` | Toggle the scope between every session and the invoking one. |
 | `↑` / `↓` | Move the selection (wraps at both ends). |
 | `backspace` | Delete the last query character. |
-| any other character | Append to the fuzzy query. |
+| any printable character | Append to the fuzzy query. |
 | `esc`, `ctrl-c` | Close. |
 
-`a` and the digits act only while the query is empty, because once you are typing
-they are ordinary filter characters. The status line shows `a=act` exactly when
-the key would fire.
+Every printable key types, with none held back for a shortcut — an agent called
+`auth` and a branch called `2fa` both have to be searchable, so the action menu
+sits on `tab` and there is no digit quick-select.
 
 The mouse works inside the popup too, with `set -g mouse on` (no `install-keys`
 needed — the surface asks the terminal for reports itself):
@@ -95,7 +94,7 @@ captured.
 | key | does |
 |---|---|
 | `enter` | Jump to the highlighted agent and clear its attention flag; the sidebar stays open and follows you (below). |
-| `a` | Open the tmux action menu for the highlighted agent. |
+| `a`, `tab` | Open the tmux action menu for the highlighted agent. (`tab` is the picker's spelling; both work here.) |
 | `p` | Swap the live preview for the full-width status table, and back. Wide body only. |
 | `g` | Flatten the repo grouping, and regroup. Wide body only. |
 | `k` / `j`, `↑` / `↓` | Move the selection (wraps at both ends). |

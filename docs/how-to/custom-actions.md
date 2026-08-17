@@ -233,9 +233,10 @@ ways: a `tma act` shell line, the tmux menu (`tma act --menu`, wired to a key by
 hardware deck. Nothing works on a deck that a keyboard-only tmux user cannot reach
 through the menu; if a flow needs hardware, it is a bug.
 
-From the picker and from `tma watch`, `a` is the triage key: it opens the menu
-for the agent under the cursor rather than the pane you are standing in, so a
-screenful of blocked agents is answered from one place. Two things follow from
+Both live surfaces carry a triage key that opens the menu for the agent under the
+cursor rather than the pane you are standing in, so a screenful of blocked agents
+is answered from one place: `a` in `tma watch`, and `tab` in the picker (whose
+every printable key belongs to the fuzzy query). Two things follow from
 the menu being computed fresh, on the target pane. If nothing is fireable there
 right now, no menu opens at all, and `tma act --list --pane <id>` says why. And
 the menu is handed to tmux rather than run as a child of the dashboard, so it
