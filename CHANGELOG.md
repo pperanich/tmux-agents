@@ -10,6 +10,13 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- The daemon's status file no longer reports a `tma wait` subscriber that has already exited. A push
+  to a departed waiter drops it, and that drop did not mark the status dirty, so the
+  `wait_subscribers` gauge could overcount for up to one sweep (45 s). Introspection only — the
+  daemon's own subscriber set, and therefore every push, was already correct.
+
 ## [0.2.0] - 2026-08-17
 
 ### Breaking
