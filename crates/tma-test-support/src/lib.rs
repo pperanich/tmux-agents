@@ -204,14 +204,73 @@ fn scratch_socket_path(socket: &str) -> PathBuf {
 
 /// Remove a scratch server's socket file after `kill-server`, which does not reliably unlink the
 /// inode (notably on macOS); else dead sockets accumulate and slow creation into timing flake.
+///
+/// Never unlinks while a process still holds the name. The socket file is what [`reap_orphans`]
+/// walks, so removing it out from under a survivor makes that server unreachable AND invisible: it
+/// then lives until reboot, which is how a machine ends up with a hundred of them.
 pub fn cleanup_scratch_socket(socket: &str) {
+    if scratch_processes().iter().any(|(_, s)| s == socket) {
+        return;
+    }
     let _ = std::fs::remove_file(scratch_socket_path(socket));
+}
+
+/// Every live process whose argv names a `-L tma_test_…` socket, as `(pid, socket)`. Both the server
+/// and any leaked control client match, which is intended: either is load the next run pays for.
+fn scratch_processes() -> Vec<(u32, String)> {
+    let Ok(out) = Command::new("ps").args(["-eo", "pid=,command="]).output() else {
+        return Vec::new(); // no `ps` (a stripped container): the socket sweep still runs
+    };
+    parse_ps_sockets(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// The `(pid, socket)` pairs in `ps -eo pid=,command=` output, split out for its own test.
+fn parse_ps_sockets(text: &str) -> Vec<(u32, String)> {
+    let mut found = Vec::new();
+    for line in text.lines() {
+        let fields: Vec<&str> = line.split_whitespace().collect();
+        let Some(Ok(pid)) = fields.first().map(|p| p.parse::<u32>()) else {
+            continue;
+        };
+        // The socket is the token after `-L`; a tmux command line carries at most one.
+        let Some(socket) = fields
+            .iter()
+            .position(|f| *f == "-L")
+            .and_then(|i| fields.get(i + 1))
+        else {
+            continue;
+        };
+        if socket.starts_with("tma_test_") {
+            found.push((pid, (*socket).to_string()));
+        }
+    }
+    found
+}
+
+/// SIGKILL, ignoring every error: the process may have exited between the scan and here, and a drop
+/// path must never panic.
+fn kill_pid(pid: u32) {
+    let Ok(raw) = i32::try_from(pid) else { return };
+    let Some(pid) = rustix::process::Pid::from_raw(raw) else {
+        return;
+    };
+    let _ = rustix::process::kill_process(pid, rustix::process::Signal::KILL);
 }
 
 /// Kill a scratch server without ever panicking: a drop path runs while a failed test is unwinding,
 /// where a panic would abort the whole binary and leak every other scratch server. Every harness
 /// Drop must go through this rather than a `.expect`-ing tmux call.
+///
+/// `kill-server` is cooperative and its exit status says only that the request was delivered: a
+/// server whose control-mode client has lost its reader (a daemon test's client, orphaned when the
+/// daemon died) acknowledges and then never finishes tearing down. So the holders are noted first,
+/// waited out, and SIGKILLed if the polite path did not take.
 pub fn kill_scratch_server(socket: &str) {
+    let holders: Vec<u32> = scratch_processes()
+        .into_iter()
+        .filter(|(_, s)| s == socket)
+        .map(|(pid, _)| pid)
+        .collect();
     let _ = without_ambient_tmux(&mut Command::new("tmux"))
         .arg("-L")
         .arg(socket)
@@ -219,7 +278,25 @@ pub fn kill_scratch_server(socket: &str) {
         .arg("/dev/null")
         .arg("kill-server")
         .output();
+    // Signal-0 probes rather than another `ps`: the pids are already known, and the healthy case
+    // exits within a tick or two, so this costs nothing when the kill worked.
+    for _ in 0..KILL_SETTLE_POLLS {
+        if holders.iter().all(|pid| !pid_is_live(*pid)) {
+            return;
+        }
+        std::thread::sleep(KILL_SETTLE_STEP);
+    }
+    for pid in holders {
+        if pid_is_live(pid) {
+            kill_pid(pid);
+        }
+    }
 }
+
+/// How long [`kill_scratch_server`] waits out a cooperative `kill-server` before SIGKILL: 25 × 20ms.
+/// Long enough that a healthy server is never killed mid-teardown, short enough to not pad a suite.
+const KILL_SETTLE_POLLS: u32 = 25;
+const KILL_SETTLE_STEP: Duration = Duration::from_millis(20);
 
 /// The pid embedded in a scratch socket name (`tma_test_<tag>_<pid>_<nanos>_<counter>`, see
 /// [`unique_id`]); [`None`] for any name this harness did not create. Anchored on the nanosecond
@@ -266,19 +343,31 @@ pub fn reap_orphan_scratch_servers() {
 }
 
 fn reap_orphans() {
-    let Ok(entries) = std::fs::read_dir(scratch_socket_dir()) else {
-        return; // no socket dir yet: nothing has ever run here
-    };
-    for entry in entries.flatten() {
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let Some(owner) = socket_owner_pid(&name) else {
+    if let Ok(entries) = std::fs::read_dir(scratch_socket_dir()) {
+        for entry in entries.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(owner) = socket_owner_pid(&name) else {
+                continue;
+            };
+            if pid_is_live(owner) {
+                continue;
+            }
+            kill_scratch_server(&name);
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
+    // A second pass over processes, not files: an orphan whose socket was already unlinked (an
+    // older harness did that unconditionally) is unreachable by name, so the sweep above cannot see
+    // it and it would otherwise live until reboot. Same ownership rule — a socket is only ever
+    // reaped once the pid that created it is provably gone.
+    for (pid, socket) in scratch_processes() {
+        let Some(owner) = socket_owner_pid(&socket) else {
             continue;
         };
         if pid_is_live(owner) {
             continue;
         }
-        kill_scratch_server(&name);
-        let _ = std::fs::remove_file(entry.path());
+        kill_pid(pid);
     }
 }
 
@@ -879,6 +968,52 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The process sweep reads `-L <socket>`, which is what both a scratch server (macOS keeps the
+    /// creating argv) and a leaked control client carry. Everything else on the machine is ignored:
+    /// another user's tmux, a `-L` socket this harness never made, a header row.
+    #[test]
+    fn ps_scan_finds_scratch_sockets_and_nothing_else() {
+        let text = "\
+  350 tmux -L tma_test_sub-degrade_98112_1786627368312963000_5 -f /dev/null new-session -d
+  443 /nix/store/x/bin/tmux -u -L tma_test_sub-degrade_98112_1786627368312963000_5 -C attach-session
+  512 tmux -L work new-session
+  777 tmux new-session -d
+  PID COMMAND";
+        assert_eq!(
+            parse_ps_sockets(text),
+            vec![
+                (
+                    350,
+                    "tma_test_sub-degrade_98112_1786627368312963000_5".into()
+                ),
+                (
+                    443,
+                    "tma_test_sub-degrade_98112_1786627368312963000_5".into()
+                ),
+            ],
+            "only tma_test sockets, server and client alike"
+        );
+    }
+
+    /// A socket file is never unlinked while a process still holds the name: that is what turns a
+    /// reapable orphan into one no later run can find.
+    #[test]
+    fn cleanup_spares_the_socket_of_a_live_holder() {
+        let s = Scratch::new("cleanup_live");
+        assert!(s
+            .tmux(&["new-session", "-d", "-x", "80", "-y", "24"])
+            .status
+            .success());
+        let path = scratch_socket_path(&s.socket);
+        assert!(path.exists(), "the scratch server bound its socket");
+        cleanup_scratch_socket(&s.socket);
+        assert!(
+            path.exists(),
+            "a running server keeps its socket file: {}",
+            path.display()
+        );
+    }
 
     #[test]
     fn owner_pid_is_parsed_from_the_socket_name() {
