@@ -75,9 +75,9 @@ pub(crate) struct ListSelection {
     pub(crate) count: usize,
 }
 
-/// Mark the hovered line with a dim reversed background: visibly "the mouse is here" without
-/// competing with the selection's full REVERSED highlight. A hovered line that is also the selected
-/// one keeps the selection style (the widget paints that over this).
+/// Underline the hovered line. Deliberately not a second block highlight: the selection owns
+/// REVERSED, and two reversed rows read as two selections. An underline says "a click would take
+/// this one" while staying legible under the selection's own style on the row that is both.
 pub(crate) fn with_hover(items: Vec<ListItem<'_>>, hovered: Option<usize>) -> Vec<ListItem<'_>> {
     let Some(h) = hovered else {
         return items;
@@ -87,7 +87,7 @@ pub(crate) fn with_hover(items: Vec<ListItem<'_>>, hovered: Option<usize>) -> Ve
         .enumerate()
         .map(|(i, item)| {
             if i == h {
-                item.style(Style::default().add_modifier(Modifier::DIM | Modifier::REVERSED))
+                item.style(Style::default().add_modifier(Modifier::UNDERLINED))
             } else {
                 item
             }

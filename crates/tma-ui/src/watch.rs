@@ -253,7 +253,7 @@ fn draw_table(
 #[cfg(test)]
 mod draw_tests {
     use super::*;
-    use crate::test_render::{dim_rows, lines, render, reversed_rows, row, with_repo};
+    use crate::test_render::{lines, render, reversed_rows, row, underlined_rows, with_repo};
     use tma_core::AgentState;
     use tma_ui_core::{Key, Mouse, MouseKind};
 
@@ -465,7 +465,7 @@ mod draw_tests {
         );
         let palette = RowPalette::default();
         let buf = render(32, 10, |f| draw(f, &m, NOW, &palette));
-        assert_eq!(dim_rows(&buf), vec![3], "the hovered row is dimmed");
+        assert_eq!(underlined_rows(&buf), vec![3], "the hovered row is dimmed");
         assert!(
             reversed_rows(&buf).contains(&1),
             "the selection keeps its own highlight on the first row"

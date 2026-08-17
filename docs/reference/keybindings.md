@@ -74,10 +74,14 @@ needed — the surface asks the terminal for reports itself):
 
 | gesture | does |
 |---|---|
-| move the pointer over a row | Highlight it dimly: what a click would take. |
+| move the pointer over a row | Underline it: what a click would take. |
 | click a row | Select it, the same as moving the highlight there with `↑`/`↓`. |
 | click the selected row again | Jump to it and close, the same as `enter`. Two clicks, so a stray one cannot move your client. |
 | wheel up / down | Move the selection three rows, stopping at each end rather than wrapping. |
+
+Hover is an underline and selection is the reversed block, because they are
+different claims: the pointer's and the keyboard's. Any keypress drops the hover
+so only one row is marked, and the next pointer move brings it back.
 
 A press anywhere else in the popup (the border, the preview half, the query line)
 does nothing.
@@ -104,10 +108,10 @@ Note that `a` targets the pane under the cursor, not the pane the sidebar lives
 in, which is what lets a screenful of blocked agents be answered from one place.
 See [Author a custom action](../how-to/custom-actions.md).
 
-The sidebar takes the same mouse gestures as the picker (hover to highlight,
-click to select, click again to jump — the sidebar stays open, exactly as `enter`
-does; wheel to move three rows). Group headers are not selectable, so hovering or
-clicking a `▸ repo` line does nothing.
+The sidebar takes the same mouse gestures as the picker (hover underlines, click
+selects, click again jumps — the sidebar stays open, exactly as `enter` does;
+wheel moves three rows, and any key drops the hover). Group headers are not
+selectable, so hovering or clicking a `▸ repo` line does nothing.
 
 While `tma watch` is running, that pane's mouse belongs to tma: tmux's own
 drag-to-select and scroll-into-copy-mode do not apply inside it (hold `shift` for

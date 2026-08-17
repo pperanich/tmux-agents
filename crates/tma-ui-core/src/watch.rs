@@ -199,6 +199,10 @@ impl WatchModel {
     }
 
     fn on_key(&mut self, k: Key) -> Vec<Effect> {
+        // Reaching for the keyboard ends the pointer's claim: otherwise the hover mark sits there
+        // beside the selection, and two marked rows read as two selections. The next pointer move
+        // brings it back.
+        self.view.set_hover(None);
         match k {
             // q/Esc/Ctrl-C quit; a plain `Quit` batch, nothing to defer (no jump rides with it).
             Key::Char('q') | Key::Esc | Key::CtrlC => vec![Effect::Quit],
@@ -794,6 +798,22 @@ mod tests {
         assert_eq!(m.hover(), None, "the footer is not a row");
         // Hover never selects: that is what a click is for.
         assert_eq!(m.selected_index(), 0);
+    }
+
+    /// Two marked rows read as two selections, so the keyboard takes the list back: any key drops
+    /// the hover, and only a fresh pointer move restores it.
+    #[test]
+    fn a_keypress_drops_the_hover() {
+        let mut m = narrow(six_rows());
+        mouse(&mut m, MouseKind::Moved, 5, 4, 0);
+        assert_eq!(m.hover(), Some(3));
+        m.update(Event::Key(Key::Down), 0, &mut ());
+        assert_eq!(m.hover(), None, "the keyboard owns the list again");
+        assert_eq!(m.selected_index(), 1, "and the key still did its own job");
+        // The wheel is the pointer, so it does not clear what the pointer is pointing at.
+        mouse(&mut m, MouseKind::Moved, 5, 4, 0);
+        mouse(&mut m, MouseKind::ScrollDown, 5, 4, 0);
+        assert_eq!(m.hover(), Some(3));
     }
 
     #[test]

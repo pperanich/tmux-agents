@@ -114,6 +114,10 @@ impl PickerModel {
     }
 
     fn on_key(&mut self, k: Key, matcher: &mut Matcher) -> Vec<Effect> {
+        // Reaching for the keyboard ends the pointer's claim: otherwise the hover mark sits there
+        // beside the selection, and two marked rows read as two selections. The next pointer move
+        // brings it back.
+        self.view.set_hover(None);
         match k {
             Key::Esc | Key::CtrlC => vec![Effect::Quit],
             Key::Enter => self.focus_batch(),
@@ -510,10 +514,22 @@ mod tests {
         mouse(&mut p, MouseKind::Moved, 4, 0, 0, &mut mtch);
         assert_eq!(p.hover(), None, "the border is not a row");
 
+        // Back over a row, then the wheel: the pointer has not left, so the hover stays put while
+        // the selection moves under it.
+        mouse(&mut p, MouseKind::Moved, 4, 3, 0, &mut mtch);
         mouse(&mut p, MouseKind::ScrollDown, 4, 3, 0, &mut mtch);
         assert_eq!(p.selected_index(), 3);
         mouse(&mut p, MouseKind::ScrollDown, 4, 3, 0, &mut mtch);
         assert_eq!(p.selected_index(), 4, "the last row holds — no wrap");
+        assert_eq!(
+            p.hover(),
+            Some(2),
+            "the wheel is the pointer, so hover stays"
+        );
+
+        // Typing takes the list back: two marked rows would read as two selections.
+        p.update(Event::Key(Key::Down), 0, &mut mtch);
+        assert_eq!(p.hover(), None);
     }
 
     /// The fuzzy filter shortens the list under the pointer; a hover left pointing past the end is

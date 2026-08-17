@@ -175,7 +175,7 @@ pub(crate) fn unix_now() -> u64 {
 #[cfg(test)]
 mod draw_tests {
     use super::*;
-    use crate::test_render::{dim_rows, lines, render, reversed_rows, row, with_repo};
+    use crate::test_render::{lines, render, reversed_rows, row, underlined_rows, with_repo};
     use tma_core::{AgentRow, AgentState};
     use tma_ui_core::{Key, Mouse, MouseKind};
 
@@ -367,7 +367,7 @@ mod draw_tests {
         let ls = lines(&buf);
         assert!(ls[2].contains("bravo"), "the pointed row: {ls:?}");
         assert_eq!(
-            dim_rows(&buf),
+            underlined_rows(&buf),
             vec![2],
             "the hovered row is the one under the pointer"
         );

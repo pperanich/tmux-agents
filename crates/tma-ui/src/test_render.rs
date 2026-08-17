@@ -40,14 +40,14 @@ pub(crate) fn reversed_rows(buf: &Buffer) -> Vec<usize> {
         .collect()
 }
 
-/// The row indices carrying at least one DIM cell: the hover highlight, which is deliberately the
-/// dim sibling of the selection's REVERSED (a hovered row carries both).
-pub(crate) fn dim_rows(buf: &Buffer) -> Vec<usize> {
+/// The row indices carrying at least one UNDERLINED cell: the hover mark, deliberately not a
+/// second REVERSED block (that is the selection's, and two of them read as two selections).
+pub(crate) fn underlined_rows(buf: &Buffer) -> Vec<usize> {
     (0..buf.area.height as usize)
         .filter(|&y| {
             (0..buf.area.width).any(|x| {
                 buf.cell((x, y as u16))
-                    .is_some_and(|c| c.modifier.contains(Modifier::DIM))
+                    .is_some_and(|c| c.modifier.contains(Modifier::UNDERLINED))
             })
         })
         .collect()
