@@ -760,9 +760,9 @@ Usage: tma install-keys [OPTIONS]
 | option | meaning |
 |---|---|
 | `--uninstall` | Remove the managed file and the marked `source-file` line (symmetric to install). |
-| `--check` | Verify the managed file is current and the resolved tmux config sources it exactly once; report drift. A file with or without either opt-in group counts as current. |
+| `--check` | Verify the managed file is current and the resolved tmux config sources it exactly once; report drift. A file with or without the mouse group counts as current; a file without the daemon launcher is drift unless `--no-daemon` says so. |
 | `--mouse` | Also write the root-table bindings that make the status-line counts clickable. With `--check`, require them instead of accepting either file. |
-| `--daemon` | Also write a `run-shell` line that starts the event-hub daemon for every tmux server that loads the file. With `--check`, require it. |
+| `--no-daemon` | Omit the `run-shell` line that starts the event-hub daemon for every tmux server that loads the file (written by default). With `--check`, stop requiring it. |
 | `--yes` | Apply without the interactive diff confirmation (scripts, tests). |
 | `--conf <PATH>` | The tmux config to mark with the `source-file` line. Defaults to the first tmux config that exists, in tmux's own load order: `~/.tmux.conf`, `$XDG_CONFIG_HOME/tmux/tmux.conf`, `~/.config/tmux/tmux.conf`. With none of them present, tma creates `$XDG_CONFIG_HOME/tmux/tmux.conf` (or `~/.config/tmux/tmux.conf` when `~/.config` exists, else `~/.tmux.conf`); it only ever creates a config when you have none, so the new file cannot shadow one. |
 | `--config-dir <DIR>` | Override the tma config dir holding the managed `tmux.conf` (env `TMA_CONFIG_DIR`). Defaults to `~/.config/tma`. |
@@ -788,21 +788,26 @@ longer opens tmux's window menu (`Alt`-right-click still does). `tma doctor` war
 when the bindings are installed but `mouse` is off. Full write-up in [Clickable
 status segments](../how-to/install-the-keybindings.md#clickable-status-segments).
 
-`--daemon` appends one line:
+Every install ends with one more line, which `--no-daemon` omits:
 
 ```
 run-shell -b 'tma --socket-path "#{socket_path}" daemon --ensure >/dev/null 2>&1'
 ```
 
 The managed file is sourced when a tmux server loads its config, so this fires
-once per server start. `run-shell` expands `#{socket_path}` to the socket of the
-server doing the loading, so `tmux -L work` starts a daemon for itself rather
-than for the default server a bare `tma daemon --ensure` would resolve. Nothing
-accumulates on a re-source: `--ensure` takes a single-instance lock and exits 0
-when a daemon already holds it. The daemon exits on its own when its tmux server
-does, so there is no matching stop line. Without this flag the daemon starts
-only when you run `tma daemon --ensure`, `tma init --daemon`, or set
-`[daemon] autostart = true`; see [Run the daemon](../how-to/run-the-daemon.md).
+once per server start and your servers run at tier 3 without being asked.
+`run-shell` expands `#{socket_path}` to the socket of the server doing the
+loading, so `tmux -L work` starts a daemon for itself rather than for the default
+server a bare `tma daemon --ensure` would resolve. Nothing accumulates on a
+re-source: `--ensure` takes a single-instance lock and exits 0 when a daemon
+already holds it. The daemon exits on its own when its tmux server does, so there
+is no matching stop line.
+
+`--no-daemon` is a standing choice, not a one-off: a plain `--check` reports the
+missing line as drift, so pair it (`--check --no-daemon`) in whatever script
+verifies your setup. The daemon can still be started by hand with
+`tma daemon --ensure` or lazily with `[daemon] autostart = true`; see
+[Run the daemon](../how-to/run-the-daemon.md).
 
 ## `tma doctor`
 

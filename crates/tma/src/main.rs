@@ -198,6 +198,7 @@ fn main() -> ExitCode {
         Some(Command::Init(args)) => init::run(init::InitOpts {
             assume_yes: args.yes,
             daemon: args.daemon,
+            no_daemon: args.no_daemon,
             config_dir: args.config_dir,
             conf: args.conf,
             server: server.clone(),
@@ -230,7 +231,7 @@ fn main() -> ExitCode {
             uninstall: args.uninstall,
             check: args.check,
             mouse: args.mouse,
-            daemon: args.daemon,
+            daemon: !args.no_daemon,
             assume_yes: args.yes,
             conf: args.conf,
             config_dir: args.config_dir,

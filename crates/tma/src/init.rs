@@ -24,8 +24,11 @@ use crate::{cli_support, doctor};
 pub(crate) struct InitOpts {
     /// Skip every interactive diff confirmation (scripted setup, tests).
     pub assume_yes: bool,
-    /// Also bring up the event-hub daemon for this server (`tma daemon --ensure`).
+    /// Also bring up the event-hub daemon for THIS server now (`tma daemon --ensure`); the
+    /// launcher for future servers rides the keybindings install either way.
     pub daemon: bool,
+    /// Wire no daemon at all: no server-start launcher in the managed file, and none started here.
+    pub no_daemon: bool,
     /// Override the tma config dir holding the managed `tmux.conf` and the per-server
     /// `hooks-state-<server>.toml` (env `TMA_CONFIG_DIR`), forwarded to both install steps.
     pub config_dir: Option<PathBuf>,
@@ -271,16 +274,16 @@ pub(crate) fn run(opts: InitOpts) -> ExitCode {
     if install_keys::keys_current(
         opts.config_dir.as_deref(),
         opts.conf.as_deref(),
-        opts.daemon,
+        !opts.no_daemon,
     ) {
         println!("tma: keybindings already installed and current; skipping");
     } else if !ok(install_keys::run(install_keys::InstallKeysOpts {
         uninstall: false,
         check: false,
         mouse: false,
-        // `--daemon` means "I want the daemon": start it below, and persist the launcher so the
-        // next tmux server gets one too.
-        daemon: opts.daemon,
+        // The launcher rides the default install, so every future server gets a daemon; `--daemon`
+        // additionally starts one for the server running this wizard.
+        daemon: !opts.no_daemon,
         assume_yes: opts.assume_yes,
         conf: opts.conf.clone(),
         config_dir: opts.config_dir.clone(),

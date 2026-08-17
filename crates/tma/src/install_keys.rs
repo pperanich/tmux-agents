@@ -118,8 +118,9 @@ const MOUSE_BINDINGS: &[Binding] = &[
 /// took the group: `tma doctor` reads it to pair the bindings against the server's `mouse` option.
 const MOUSE_LINE_PREFIX: &str = "bind-key -n Mouse";
 
-/// The opt-in daemon launcher (`--daemon`). The managed file is sourced from the user's tmux config,
-/// so this fires once per server start. `#{socket_path}` (expanded by `run-shell` at load time)
+/// The daemon launcher, written unless `--no-daemon`. The managed file is sourced from the user's
+/// tmux config, so this fires once per server start. `#{socket_path}` (expanded by `run-shell` at
+/// load time)
 /// pins the server doing the sourcing, so a `tmux -L work` server daemonizes itself rather than the
 /// ambient default one; `-b` keeps the spawn off the config-load path, and the redirect keeps a
 /// missing binary from surfacing as a tmux message. `--ensure` is idempotent, so a re-source is a
@@ -150,8 +151,8 @@ pub(crate) struct InstallKeysOpts {
     /// Also write the [`MOUSE_BINDINGS`] group (opt-in: it claims tmux's status-line mouse keys and
     /// needs `set -g mouse on`, which tma never sets for you). With `--check`, require them.
     pub mouse: bool,
-    /// Also write the [`DAEMON_LINE`] (opt-in: it starts a resident process for every tmux server
-    /// that sources the file). With `--check`, require it.
+    /// Write the [`DAEMON_LINE`]. On by default (`--no-daemon` clears it), and with `--check` a
+    /// file missing the line is drift for the same reason.
     pub daemon: bool,
     /// Skip the interactive diff confirmation (tests, scripted installs).
     pub assume_yes: bool,
@@ -219,7 +220,7 @@ fn render_managed(mouse: bool, daemon: bool) -> String {
     }
     if daemon {
         out.push_str(
-            "# Event-hub daemon, started once per tmux server start (--daemon). Idempotent.\n",
+            "# Event-hub daemon, started once per tmux server start (omit with --no-daemon). Idempotent.\n",
         );
         out.push_str(DAEMON_LINE);
         out.push('\n');
@@ -438,9 +439,10 @@ pub(crate) fn keys_current(
     .is_empty()
 }
 
-/// Verify the install. Both extra groups are opt-in, so every rendering is current by default:
-/// the check accepts any of the four, and only `--check --mouse` / `--check --daemon` insist on
-/// one (that spelling is how a script asks "are the clickable segments wired?").
+/// Verify the install. The two extra groups differ by default: the mouse group is opt-in, so its
+/// absence is never drift and `--check --mouse` is how a script asks "are the clickable segments
+/// wired?"; the daemon launcher is written by default, so its absence IS drift unless the check
+/// waives it with `--no-daemon`.
 fn check(
     managed: &Path,
     conf: &Path,
@@ -492,7 +494,7 @@ fn drift(
                     if require_daemon && !daemon {
                         drift.push(format!(
                             "keybindings file {} has no daemon launcher; re-run \
-                             `tma install-keys --daemon`",
+                             `tma install-keys` (or `--check --no-daemon` if that is deliberate)",
                             managed.display()
                         ));
                     }
@@ -1058,15 +1060,15 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
             "the daemon line is appended, not woven in"
         );
         let want = "\
-# Event-hub daemon, started once per tmux server start (--daemon). Idempotent.
+# Event-hub daemon, started once per tmux server start (omit with --no-daemon). Idempotent.
 run-shell -b 'tma --socket-path \"#{socket_path}\" daemon --ensure >/dev/null 2>&1'
 ";
         assert_eq!(&got[base.len()..], want);
     }
 
-    /// The daemon line is opt-in in both directions, exactly like the mouse group: absent by default
-    /// and not drift, `--check --daemon` is how you ask whether it is wired, and the two groups
-    /// compose (a mouse+daemon install satisfies a plain `--check`).
+    /// The daemon line is opt-OUT, unlike the mouse group: a plain install writes it and a plain
+    /// `--check` calls its absence drift, which is what makes `--no-daemon` a standing choice
+    /// rather than a one-off. The two groups still compose in every combination.
     #[test]
     fn daemon_line_is_opt_in_and_composes_with_the_mouse_group() {
         let dir = std::env::temp_dir().join(format!(
@@ -1081,6 +1083,25 @@ run-shell -b 'tma --socket-path \"#{socket_path}\" daemon --ensure >/dev/null 2>
         let conf = dir.join(".tmux.conf");
         std::fs::create_dir_all(&dir).unwrap();
 
+        // The default install: launcher present, and a plain `--check` is satisfied.
+        assert!(matches!(
+            install(&managed, &conf, ConfigDir::Pinned, true, false, true),
+            ExitCode::SUCCESS
+        ));
+        assert_eq!(
+            std::fs::read_to_string(&managed)
+                .unwrap()
+                .matches(DAEMON_LINE)
+                .count(),
+            1,
+            "the launcher is written by default"
+        );
+        assert!(matches!(
+            check(&managed, &conf, ConfigDir::Pinned, false, true),
+            ExitCode::SUCCESS
+        ));
+
+        // `--no-daemon` drops it, which a plain check calls drift and `--check --no-daemon` accepts.
         assert!(matches!(
             install(&managed, &conf, ConfigDir::Pinned, true, false, false),
             ExitCode::SUCCESS
@@ -1089,15 +1110,19 @@ run-shell -b 'tma --socket-path \"#{socket_path}\" daemon --ensure >/dev/null 2>
             !std::fs::read_to_string(&managed)
                 .unwrap()
                 .contains("tma daemon --ensure"),
-            "not installed by default"
+            "--no-daemon omits the launcher"
         );
         assert!(
             matches!(
                 check(&managed, &conf, ConfigDir::Pinned, false, true),
                 ExitCode::FAILURE
             ),
-            "--check --daemon insists on the launcher"
+            "a missing launcher is drift by default"
         );
+        assert!(matches!(
+            check(&managed, &conf, ConfigDir::Pinned, false, false),
+            ExitCode::SUCCESS
+        ));
 
         // Both groups at once: current for a plain check and for either group's own check.
         assert!(matches!(

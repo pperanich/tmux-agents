@@ -125,9 +125,14 @@ pub(crate) struct InitArgs {
     /// Apply every step without the interactive diff confirmations (scripts, tests).
     #[arg(long)]
     pub(crate) yes: bool,
-    /// Also start the event-hub daemon for this server (what `tma daemon --ensure` does).
+    /// Also start the event-hub daemon for this server right now (what `tma daemon --ensure`
+    /// does). The launcher for future servers is written either way; `--no-daemon` skips both.
     #[arg(long)]
     pub(crate) daemon: bool,
+    /// Wire no daemon at all: omit the server-start launcher `install-keys` writes by default,
+    /// and start none for this server.
+    #[arg(long = "no-daemon", conflicts_with = "daemon")]
+    pub(crate) no_daemon: bool,
     /// Override the tma config dir holding the managed `tmux.conf` and the per-server
     /// `hooks-state-<server>.toml` (env `TMA_CONFIG_DIR`). Defaults to `~/.config/tma`.
     #[arg(long = "config-dir", value_name = "DIR")]
@@ -207,10 +212,10 @@ pub(crate) struct InstallKeysArgs {
     /// With `--check`, require them.
     #[arg(long)]
     pub(crate) mouse: bool,
-    /// Also start the event-hub daemon on every tmux server start (a `run-shell` line running
-    /// `tma daemon --ensure` for the server that sources the file). With `--check`, require it.
-    #[arg(long)]
-    pub(crate) daemon: bool,
+    /// Omit the `run-shell` line that starts the event-hub daemon for every tmux server that
+    /// sources the file. Written by default; with `--check`, stop requiring it.
+    #[arg(long = "no-daemon")]
+    pub(crate) no_daemon: bool,
     /// Apply without the interactive diff confirmation (scripts, tests).
     #[arg(long)]
     pub(crate) yes: bool,

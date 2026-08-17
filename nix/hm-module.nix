@@ -76,13 +76,15 @@ in
 
     daemon.autostart = lib.mkOption {
       type = lib.types.bool;
-      default = false;
+      default = cfg.keybindings.enable;
+      defaultText = lib.literalExpression "config.programs.tma.keybindings.enable";
       description = ''
-        Start the event-hub daemon for every tmux server that loads this config
-        (what `tma install-keys --daemon` writes). `#{socket_path}` pins the
-        server doing the loading, so a `tmux -L work` server gets its own
-        daemon rather than the default one, and `--ensure` is idempotent. The
-        daemon exits on its own when its tmux server does.
+        Start the event-hub daemon for every tmux server that loads this config.
+        Follows {option}`keybindings.enable` by default, because that is what
+        `tma install-keys` writes unless told `--no-daemon`. `#{socket_path}`
+        pins the server doing the loading, so a `tmux -L work` server gets its
+        own daemon rather than the default one, and `--ensure` is idempotent.
+        The daemon exits on its own when its tmux server does.
       '';
     };
   };
