@@ -34,8 +34,6 @@ and aarch64. The Linux builds are static musl binaries, so your distribution's
 glibc does not come into it. On any other platform the script stops and points
 you at the cargo path below.
 
-Two environment variables change what it does:
-
 It also installs shell completions, for whichever of bash, zsh, and fish it
 finds on your machine, into that shell's per-user directory. zsh needs one more
 line in your `~/.zshrc` for its directory to be searched at all, which the
