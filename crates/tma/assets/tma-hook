@@ -29,7 +29,11 @@ payload_arg=$3
 if [ -n "$TMA_BIN" ] && [ -x "$TMA_BIN" ]; then
   bin=$TMA_BIN
 else
-  dir=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)
+  # `dirname` absent leaves this empty, which skips the sibling probe: `cd -- ""` would land on
+  # $PWD and exec a stray `tma` from whatever directory the agent happened to run in.
+  self_dir=$(dirname -- "$0" 2>/dev/null)
+  dir=
+  [ -n "$self_dir" ] && dir=$(CDPATH= cd -- "$self_dir" 2>/dev/null && pwd)
   if [ -n "$dir" ] && [ -x "$dir/tma" ]; then
     bin="$dir/tma"
   else

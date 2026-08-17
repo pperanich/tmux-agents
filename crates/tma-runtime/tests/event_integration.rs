@@ -28,6 +28,13 @@ fn wrapper(s: &Scratch) -> PathBuf {
     dst
 }
 
+/// First `name` on PATH, for the one test that has to build a PATH of its own.
+fn which(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|p| p.is_file())
+}
+
 /// Fire the wrapper as a hook would: `tma-hook <agent> <event>` with `payload` on stdin,
 /// `TMUX_PANE` set, and the scratch socket pinned. Notify opt-in is toggled by `notify`.
 fn fire(s: &Scratch, agent: &str, event: &str, pane: &str, payload: &str, notify: bool) {
@@ -707,14 +714,24 @@ fn wrapper_exits_zero_silently_when_binary_missing() {
     use std::io::Write;
     let s = Scratch::new("event");
     let wrapper = wrapper(&s); // copied into the workdir with no sibling `tma` next to it
+    // A PATH holding `dirname` and nothing else, so the wrapper's own utilities resolve but `tma`
+    // cannot. Symlinked rather than pointed at `/usr/bin:/bin`, which the nix build sandbox does
+    // not mount, and rather than copied, which breaks a multi-call coreutils build.
+    let path_dir = s.workdir.join("emptypath");
+    std::fs::create_dir_all(&path_dir).unwrap();
+    let Some(dirname) = which("dirname") else {
+        eprintln!("skipping: no dirname on PATH to link");
+        return;
+    };
+    std::os::unix::fs::symlink(dirname, path_dir.join("dirname")).unwrap();
 
     let mut child = Command::new(&wrapper)
         .arg("claude")
         .arg("SessionStart")
-        // No $TMA_BIN, and a PATH with no `tma` on it (dirname/pwd still resolve from /bin):
-        // all three resolution paths fail, so the wrapper must silently succeed.
+        // No $TMA_BIN, and a PATH with no `tma` on it: all three resolution paths fail, so the
+        // wrapper must silently succeed.
         .env_remove("TMA_BIN")
-        .env("PATH", "/usr/bin:/bin")
+        .env("PATH", &path_dir)
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
