@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-08-17
+
 ### Added
 
 - `[install] wrapper_ref = "bare"` (or `tma install-hooks --wrapper-ref bare`) writes the wrapper's
@@ -133,7 +135,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.3.0...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.3.1...HEAD
+[0.3.1]: https://github.com/pperanich/tmux-agents/compare/v0.3.0...v0.3.1
 [0.3.0]: https://github.com/pperanich/tmux-agents/compare/v0.2.1...v0.3.0
 [0.2.1]: https://github.com/pperanich/tmux-agents/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/pperanich/tmux-agents/compare/v0.1.1...v0.2.0
