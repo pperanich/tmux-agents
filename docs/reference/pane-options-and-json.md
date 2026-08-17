@@ -294,6 +294,7 @@ guessing which prefix belongs to what. Top level:
 | `tmux_hooks` | array | one object per checked hook: `hook` (name), `present` (boolean), `hook_state` (`present` / `drifted` / `wiped` / `missing`) |
 | `manifests` | object | `ok` (number loaded) and `issues`, an array of `{ file, problem }` |
 | `process_name_issues` | array | `{ agent, name, comm_max }` per `process_names` entry past the truncation width |
+| `process_walk` | object | `ok` (boolean: the `ps` walk ran) and `error` (string or `null`). With `ok: false` the `agents` array holds only panes a hook registered |
 | `nested_multiplexers` | array | `{ pane, locator, command }` per pane running an inner multiplexer client |
 | `remote_panes` | array | `{ pane, locator, command, stamped }` per pane behind a remote shell; `stamped` says whether it still carries a held `@agent_*` stamp |
 | `ignored_panes` | array | `{ pane, locator, value }` per pane carrying `@agent_ignore`, with the value you set |

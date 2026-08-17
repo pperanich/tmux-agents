@@ -281,6 +281,15 @@ pub(super) fn render_text(r: &Report) -> String {
         }
     }
 
+    // A `ps` that will not run: every pane row below it is missing or thinner than it should be,
+    // so the reason comes first rather than leaving the panes section to look like an empty server.
+    if let Some(err) = &r.process_walk_error {
+        out.push_str(&format!(
+            "procs:   the process walk failed ({err}) — detection cannot see what runs in a pane; \
+             only panes a hook registered are listed below (check that `ps` is on PATH)\n"
+        ));
+    }
+
     // Agent panes. Headed `panes` rather than `agents`, which above names the manifest roster.
     out.push('\n');
     if r.agents.is_empty() {
@@ -426,6 +435,16 @@ pub(super) fn render_json(r: &Report) -> String {
             j.end_object();
         }
         None => j.null("last_failure"),
+    }
+    j.end_object();
+
+    // The `ps` walk. `ok: false` means the pane list below carries only hook-registered agents.
+    j.key("process_walk");
+    j.begin_object();
+    j.bool("ok", r.process_walk_error.is_none());
+    match &r.process_walk_error {
+        Some(err) => j.string("error", err),
+        None => j.null("error"),
     }
     j.end_object();
 
@@ -704,6 +723,7 @@ mod tests {
                 "daemon",
                 "enabled",
                 "endpoint_ok",
+                "error",
                 "evidence_age_ms",
                 "file",
                 "hook",
@@ -730,6 +750,7 @@ mod tests {
                 "present",
                 "problem",
                 "process_name_issues",
+                "process_walk",
                 "reason",
                 "remote_panes",
                 "running",

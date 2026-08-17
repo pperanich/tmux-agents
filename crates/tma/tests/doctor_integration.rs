@@ -26,8 +26,13 @@ fn wrapper(s: &Scratch) -> PathBuf {
 /// Run `tma <args>` against the scratch server + temp manifest dir, hook-config paths pinned via env
 /// so both `install-hooks` and `doctor` resolve the same files.
 fn tma(s: &Scratch, args: &[&str]) -> Output {
-    Command::new(env!("CARGO_BIN_EXE_tma"))
-        .args(args)
+    tma_cmd(s, args).output().expect("spawn tma")
+}
+
+/// The command [`tma`] runs, for the one check that has to alter the child's environment.
+fn tma_cmd(s: &Scratch, args: &[&str]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tma"));
+    cmd.args(args)
         .arg("--socket-name")
         .arg(&s.socket)
         .arg("--manifest-dir")
@@ -36,9 +41,8 @@ fn tma(s: &Scratch, args: &[&str]) -> Output {
         .env("TMA_BIN", env!("CARGO_BIN_EXE_tma"))
         .env("TMA_CLAUDE_SETTINGS", settings(s))
         .env("TMA_WRAPPER_PATH", wrapper(s))
-        .env("TMA_CONFIG_DIR", config_dir(s))
-        .output()
-        .expect("spawn tma")
+        .env("TMA_CONFIG_DIR", config_dir(s));
+    cmd
 }
 
 /// Run `tma <args>` like [`tma`] but feed `stdin_payload` on stdin (for `tma event --payload -`),
@@ -632,4 +636,65 @@ fn doctor_pairs_installed_mouse_bindings_against_the_mouse_option() {
     assert!(!text.contains("`mouse` option is off"), "{text}");
     let json = String::from_utf8_lossy(&tma(&s, &["doctor", "--json"]).stdout).to_string();
     assert!(json.contains("\"mouse\":{\"bindings_installed\":true,\"enabled\":true}"));
+}
+
+/// A `ps` the child cannot spawn (a stripped PATH, a sandbox that blocks the system copy) costs the
+/// process walk and nothing else: the server-side half of the report still prints, the failure is
+/// named where the missing pane rows are, and the exit stays 0 without `--exit-code`.
+#[test]
+fn doctor_degrades_when_the_process_walk_fails() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new("no-ps");
+    assert!(s
+        .tmux(&["new-session", "-d", "-x", "80", "-y", "24"])
+        .status
+        .success());
+
+    // A PATH with tmux and nothing else: every server read still works, `ps` is unreachable.
+    let bin = s.workdir.join("path-without-ps");
+    std::fs::create_dir_all(&bin).unwrap();
+    let tmux = std::env::split_paths(&std::env::var_os("PATH").expect("PATH"))
+        .map(|dir| dir.join("tmux"))
+        .find(|p| p.is_file())
+        .expect("tmux on PATH");
+    std::os::unix::fs::symlink(tmux, bin.join("tmux")).unwrap();
+
+    let out = tma_cmd(&s, &["doctor"])
+        .env("PATH", &bin)
+        .output()
+        .expect("spawn tma");
+    let text = String::from_utf8_lossy(&out.stdout).to_string();
+    assert!(out.status.success(), "a failed walk is not a failed report");
+    assert!(
+        text.contains("procs:") && text.contains("`ps` is on PATH"),
+        "the failure is named with its fix: {text}"
+    );
+    assert!(
+        text.contains("daemon:") && text.contains("hooks:") && text.contains("wrapper:"),
+        "the checks that do not need `ps` still print: {text}"
+    );
+
+    let json = String::from_utf8_lossy(
+        &tma_cmd(&s, &["doctor", "--json"])
+            .env("PATH", &bin)
+            .output()
+            .expect("spawn tma")
+            .stdout,
+    )
+    .to_string();
+    assert!(
+        json.contains("\"process_walk\":{\"ok\":false,\"error\":\""),
+        "the JSON carries the verdict and the error: {json}"
+    );
+
+    // The same server with `ps` reachable reports a clean walk and says nothing about it.
+    let json = String::from_utf8_lossy(&tma(&s, &["doctor", "--json"]).stdout).to_string();
+    assert!(
+        json.contains("\"process_walk\":{\"ok\":true,\"error\":null}"),
+        "{json}"
+    );
+    assert!(!String::from_utf8_lossy(&tma(&s, &["doctor"]).stdout).contains("procs:"));
 }

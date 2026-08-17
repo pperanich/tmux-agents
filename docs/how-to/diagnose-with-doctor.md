@@ -64,11 +64,12 @@ per file the loader skipped and per action naming an unknown agent. A
 the width both macOS libproc and the Linux kernel truncate `comm` to, so such an
 entry can never match a pane unless a truncated spelling sits beside it.
 
-Three more appear only when the condition holds: `status:` (the global `status`
+Four more appear only when the condition holds: `status:` (the global `status`
 option is off, which kills both `#(tma status)` and `display-message`
 notifications), `mouse:` (the clickable bindings are installed but `mouse` is
-off), and `notify:` (your `[notify] command` failed, with the reason and a
-pointer to `tma debug notify-test`).
+off), `notify:` (your `[notify] command` failed, with the reason and a pointer to
+`tma debug notify-test`), and `procs:` (the `ps` walk itself failed, so detection
+cannot see what runs in a pane and only hook-registered panes are listed below).
 
 ## The per-pane block
 
@@ -109,9 +110,10 @@ string. `api:` flags a pending permission request with no reachable endpoint.
 ## A pane that is not listed at all
 
 If the pane you care about has no line under `panes`, doctor has already told you
-one of two things somewhere above (it is behind a remote shell, or it carries
-`@agent_ignore`) or the answer is that identity did not resolve. `tma debug
-explain` prints the whole decision for one pane:
+one of three things somewhere above (it is behind a remote shell, it carries
+`@agent_ignore`, or the `procs:` line says the process walk failed) or the answer
+is that identity did not resolve. `tma debug explain` prints the whole decision
+for one pane:
 
 ```
 $ tma debug explain %0

@@ -372,6 +372,10 @@ struct Report {
     ignored: Vec<IgnoredPane>,
     /// Panes whose `@agent_*` options do not decode, with the option and value that broke them.
     stamp_issues: Vec<StampLint>,
+    /// The `ps` walk failed (a stripped PATH, a sandbox that blocks the system `ps`), `None` when
+    /// it ran. Process identity is then unavailable, so the pane rows below hold only what a hook
+    /// registration names — the rest of the report is unaffected and still worth printing.
+    process_walk_error: Option<String>,
     /// The last notify-command failure recorded by a fire, `None` when the marker is absent (nothing
     /// has failed, or the last fire was clean). A real fire discards its command's output, so this
     /// marker is the only place a broken sink surfaces.
@@ -473,8 +477,13 @@ fn gather(
     // Hook wiring diagnosis (the `install-hooks --check` machinery, read-only).
     let hook_diag = install::diagnose_hooks(manifests, tmux, focus_events);
 
-    // Identify agent panes the same way the poll cycle's read half does — but never stamp.
-    let procs = tmux::ps_all()?;
+    // Identify agent panes the same way the poll cycle's read half does — but never stamp. A `ps`
+    // that cannot run costs the identification below (registered panes still resolve) and nothing
+    // else, so it is reported as a warning rather than sinking the whole report.
+    let (procs, process_walk_error) = match tmux::ps_all() {
+        Ok(procs) => (procs, None),
+        Err(err) => (Vec::new(), Some(err.to_string())),
+    };
     let mut agents = Vec::new();
     let mut nested: Vec<NestedMultiplexer> = Vec::new();
     let mut remote: Vec<RemotePane> = Vec::new();
@@ -662,6 +671,7 @@ fn gather(
         remote,
         ignored,
         stamp_issues,
+        process_walk_error,
         notify_failure_age_ms: notify_failure.as_ref().map(|f| now.saturating_sub(f.at)),
         notify_failure,
     })
@@ -676,6 +686,8 @@ fn gate(r: &Report) -> (usize, usize) {
     warnings += r.tmux_hooks.iter().filter(|(_, s)| !s.is_present()).count();
     warnings += r.manifest_issues.len() + r.action_issues.len() + r.process_name_issues.len();
     warnings += r.stamp_issues.len();
+    // No process walk means detection itself is blind here, not just the report.
+    warnings += usize::from(r.process_walk_error.is_some());
     // A detached server only matters while nothing else keeps state fresh.
     warnings += usize::from(r.attached_clients == 0 && !r.daemon_alive);
     warnings += usize::from(!r.status_enabled);
@@ -939,6 +951,7 @@ mod tests {
                 locator: "s:3.0".to_string(),
                 problem: "unknown @agent_state token: \"spinning\"".to_string(),
             }],
+            process_walk_error: Some("failed to spawn `ps`: No such file or directory".to_string()),
             notify_failure: Some(notify::failure::NotifyFailure {
                 at: 1_700_000_000_000,
                 reason: "exited 127".to_string(),
@@ -964,6 +977,7 @@ mod tests {
         // The remote pane deliberately stays: it is a posture fact (the agent lives elsewhere),
         // not misconfiguration, so a clean server still gates green with one.
         r.stamp_issues.clear();
+        r.process_walk_error = None;
         r.notify_failure = None;
         r.notify_failure_age_ms = None;
         r.agents[0].tier = derive_tier(HookClass::Wired, false);
@@ -1019,6 +1033,33 @@ mod tests {
 
         // A pane whose options all decode says nothing about stamps.
         assert!(!render_text(&clean_report()).contains("stamps:"));
+    }
+
+    /// A `ps` that will not run used to sink the whole report. It costs pane identification only,
+    /// so the server-side half still prints, the reason is named, and the gate counts it once.
+    #[test]
+    fn a_failed_process_walk_is_named_and_gates_red() {
+        let mut r = clean_report();
+        r.process_walk_error = Some("failed to spawn `ps`: Operation not permitted".to_string());
+        assert_eq!(gate(&r).0, 1, "the failed walk is one warning");
+
+        let text = render_text(&r);
+        assert!(
+            text.contains("Operation not permitted"),
+            "the spawn error is quoted: {text}"
+        );
+        assert!(
+            text.contains("hooks:") && text.contains("wrapper:"),
+            "the server-side checks still print: {text}"
+        );
+
+        let json = render_json(&r);
+        assert!(
+            json.contains("\"process_walk\":{\"ok\":false"),
+            "the walk's verdict rides the document: {json}"
+        );
+        // A working walk says nothing beyond the `ok` flag.
+        assert!(!render_text(&clean_report()).contains("procs:"));
     }
 
     #[test]
