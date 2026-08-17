@@ -378,6 +378,18 @@ pub(super) fn serve(
             break;
         }
 
+        // Wake subscribers on any state-affecting work (`status_dirty`). The push is only a WAKE hint;
+        // `tma wait` re-runs its authoritative cycle, so the coarse gate is correct (spurious costs one cycle).
+        //
+        // Ordered before the status write, not after: a push to a waiter that has already exited fails
+        // and drops it, so writing the gauge first records a subscriber that is gone by the end of this
+        // iteration — and nothing dirties the status again until the 45 s sweep, since the hangup this
+        // path consumed is exactly what `reap_closed_subscribers` would have counted.
+        if status_dirty && !subscribers.is_empty() {
+            // Folded back in so the gauge is right even if this is ever reordered after the write.
+            status_dirty |= push_subscribers(&mut subscribers) > 0;
+        }
+
         if status_dirty {
             if let Some(p) = status_file {
                 pool.write_status(
@@ -387,12 +399,6 @@ pub(super) fn serve(
                     &status_extra(&capture, &notify, subscribers.len()),
                 );
             }
-        }
-
-        // Wake subscribers on any state-affecting work (`status_dirty`). The push is only a WAKE hint;
-        // `tma wait` re-runs its authoritative cycle, so the coarse gate is correct (spurious costs one cycle).
-        if status_dirty && !subscribers.is_empty() {
-            push_subscribers(&mut subscribers);
         }
     }
     // `pool` drops here → every control client is killed + waited (no leaked `tmux -C`). `subscribers`
@@ -450,7 +456,16 @@ fn drain_and_fold_edges(
             return true;
         }
     }
-    if pool.edges_emitted() != edges_before || had_edges {
+    // A hookless quiet edge may have changed state; wake subscribers BEFORE the poll block so a
+    // hookless waiter's blocked latency tracks the quiet edge, not the next fallback cycle. The push
+    // comes before the status write because it can DROP a subscriber whose peer has already exited,
+    // and the `wait_subscribers` gauge must report the set that survived it.
+    let dropped = if had_edges && !subscribers.is_empty() {
+        push_subscribers(subscribers)
+    } else {
+        0
+    };
+    if pool.edges_emitted() != edges_before || had_edges || dropped > 0 {
         if let Some(p) = status_file {
             pool.write_status(
                 p,
@@ -459,11 +474,6 @@ fn drain_and_fold_edges(
                 &status_extra(capture, notify, subscribers.len()),
             );
         }
-    }
-    // A hookless quiet edge may have changed state; wake subscribers BEFORE the poll block so a
-    // hookless waiter's blocked latency tracks the quiet edge, not the next fallback cycle.
-    if had_edges && !subscribers.is_empty() {
-        push_subscribers(subscribers);
     }
     false
 }

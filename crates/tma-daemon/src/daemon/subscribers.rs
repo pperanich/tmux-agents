@@ -31,8 +31,16 @@ pub(super) fn register_subscriber(subscribers: &mut Vec<UnixStream>, mut stream:
 /// cannot take the byte (`WouldBlock` full buffer, or a dead peer) DROPS the subscriber rather than
 /// stall the loop. Dropping loses nothing (a full buffer already holds a wake; a dropped waiter
 /// polls). Rust ignores SIGPIPE, so a write to a closed peer errors here, never signals.
-pub(super) fn push_subscribers(subscribers: &mut Vec<UnixStream>) {
+///
+/// Returns how many were dropped, which the caller MUST fold into its status-dirty flag: this is the
+/// second way the subscriber set shrinks (the first being [`reap_closed_subscribers`]), and a drop
+/// that does not reach the `wait_subscribers` gauge leaves it overcounting until the next sweep,
+/// 45 s later. A waiter that exits in response to its own wake takes exactly this path.
+#[must_use = "a dropped subscriber must dirty the status, or the gauge overcounts until the sweep"]
+pub(super) fn push_subscribers(subscribers: &mut Vec<UnixStream>) -> usize {
+    let before = subscribers.len();
     subscribers.retain_mut(|s| matches!(s.write(&[PUSH]), Ok(1)));
+    before - subscribers.len()
 }
 
 /// Reap subscribers whose poll fd reported hangup/error, EOF, or stray data. `base` is the first
@@ -73,6 +81,29 @@ pub(super) fn reap_closed_subscribers(
 mod tests {
     use super::*;
     use std::os::unix::io::AsRawFd;
+
+    /// A push to a peer that has already gone drops that subscriber AND reports it, which is what
+    /// keeps the `wait_subscribers` gauge honest. A waiter exiting in response to its own wake lands
+    /// here rather than on the poll hangup, and an unreported drop left the gauge reading one
+    /// subscriber for a full 45 s sweep (seen as a CI failure of
+    /// `push_edge_returns_well_under_the_poll_tick`, whose 45 s ceiling is exactly that sweep).
+    #[test]
+    fn push_reports_the_subscribers_it_drops() {
+        let (live, _live_peer) = UnixStream::pair().unwrap();
+        let (dead, dead_peer) = UnixStream::pair().unwrap();
+        drop(dead_peer); // the waiter exited
+        let mut subs = vec![live, dead];
+
+        let dropped = push_subscribers(&mut subs);
+
+        assert_eq!(dropped, 1, "the write to the closed peer failed");
+        assert_eq!(subs.len(), 1, "and that subscriber is gone from the set");
+        assert_eq!(
+            push_subscribers(&mut subs),
+            0,
+            "a push every peer takes drops nobody"
+        );
+    }
 
     /// The reap branches. EOF, stray data (the busy-spin fix), and POLLHUP/POLLERR all drop; a
     /// spurious `POLLIN` that reads `WouldBlock` and a subscriber with no event both stay.
