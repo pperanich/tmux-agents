@@ -32,9 +32,13 @@ impl Env {
             let perms = std::fs::Permissions::from_mode(0o755);
             std::fs::set_permissions(&path, perms).unwrap();
         }
-        // tmux itself has to stay reachable: the child spawns it for every server read.
-        if let Some(tmux) = which("tmux") {
-            std::os::unix::fs::symlink(tmux, env.bin().join("tmux")).unwrap();
+        // tmux and ps have to stay reachable: the child spawns tmux for every server read and `ps`
+        // for the closing doctor report. Symlinked from the test's own PATH rather than trusted to
+        // /bin, because a sandboxed build (nix) can have the system copies blocked.
+        for tool in ["tmux", "ps"] {
+            if let Some(found) = which(tool) {
+                std::os::unix::fs::symlink(found, env.bin().join(tool)).unwrap();
+            }
         }
         env
     }
