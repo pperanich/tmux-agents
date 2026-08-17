@@ -33,68 +33,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo check --workspace --all-features
 
-  test-linux:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # python3 is preinstalled on the runner; tmux is not. Built from source because the distro
-      # package is older than the declared 3.6 floor (3.4 prints the 0x1f field separator as a
-      # literal `\037`, breaking every list-panes parse).
-      - name: Cache tmux
-        id: tmux-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/tmux-bin
-          key: tmux-3.6a-${{ runner.os }}
-      - name: Install tmux deps
-        run: sudo apt-get update && sudo apt-get install -y libevent-dev libncurses-dev bison
-      - name: Build tmux 3.6a
-        if: steps.tmux-cache.outputs.cache-hit != 'true'
-        run: |
-          curl -fsSL https://github.com/tmux/tmux/releases/download/3.6a/tmux-3.6a.tar.gz | tar xz
-          cd tmux-3.6a && ./configure --prefix="$HOME/tmux-bin" && make -j"$(nproc)" && make install
-      - name: Install tmux
-        run: |
-          echo "$HOME/tmux-bin/bin" >> "$GITHUB_PATH"
-          "$HOME/tmux-bin/bin/tmux" -V
-      # --all-features matches `mise run test`: the manifest-fixture suites are behind tma-core's
-      # default-off `fixtures` feature, so without it 49 detection tests never run.
-      - name: Test (tmux required)
-        run: TMA_REQUIRE_TMUX=1 cargo test --workspace --all-features
-
-  test-macos:
-    runs-on: macos-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-      # Built from source at the declared 3.6a floor: brew ships whatever is newest, and the lane
-      # should test the version we promise. 3.7b also passes the full suite (verified locally).
-      - name: Cache tmux
-        id: tmux-cache
-        uses: actions/cache@v4
-        with:
-          path: ~/tmux-bin
-          key: tmux-3.6a-${{ runner.os }}
-      - name: Install tmux deps
-        run: brew install libevent ncurses bison utf8proc
-      - name: Build tmux 3.6a
-        if: steps.tmux-cache.outputs.cache-hit != 'true'
-        run: |
-          curl -fsSL https://github.com/tmux/tmux/releases/download/3.6a/tmux-3.6a.tar.gz | tar xz
-          cd tmux-3.6a
-          ./configure --prefix="$HOME/tmux-bin" --enable-utf8proc \
-            CPPFLAGS="-I$(brew --prefix libevent)/include -I$(brew --prefix ncurses)/include -I$(brew --prefix utf8proc)/include" \
-            LDFLAGS="-L$(brew --prefix libevent)/lib -L$(brew --prefix ncurses)/lib -L$(brew --prefix utf8proc)/lib"
-          make -j"$(sysctl -n hw.ncpu)" && make install
-      - name: Install tmux
-        run: |
-          echo "$HOME/tmux-bin/bin" >> "$GITHUB_PATH"
-          "$HOME/tmux-bin/bin/tmux" -V
-      - name: Test (tmux required)
-        run: TMA_REQUIRE_TMUX=1 cargo test --workspace --all-features
+  # The tmux-touching suites, shared with the release workflow so a tag cannot ship past a red
+  # lane: one definition, called from both, rather than a copy that drifts.
+  tests:
+    uses: ./.github/workflows/tests.yml
 
   # Optional: mirrors `nix flake check` (which pins tmux via nativeCheckInputs). Non-blocking so a
   # nix-side hiccup never gates the cargo lanes above.

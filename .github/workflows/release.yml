@@ -33,8 +33,14 @@ jobs:
       - name: Tag has a CHANGELOG section
         run: ./scripts/changelog-section.sh "$GITHUB_REF_NAME" >/dev/null
 
-  build:
+  # The gap that let v0.2.0 publish over a red `test-linux`: the release built straight from the tag
+  # and never ran a test. Same lanes CI runs, from the one shared definition, and the build waits.
+  tests:
     needs: version
+    uses: ./.github/workflows/tests.yml
+
+  build:
+    needs: [version, tests]
     strategy:
       fail-fast: false
       matrix:
