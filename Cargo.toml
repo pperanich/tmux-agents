@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/tma-core", "crates/tma-tmux", "crates/tma-runtime", "crates/tma-daemon", "crates/tma-ui-core", "crates/tma-ui", "crates/tma", "crates/tma-test-support"]
 
 [workspace.package]
-version = "0.2.1"
+version = "0.3.0"
 edition = "2021"
 # The floor the dependency graph already imposes: ratatui 0.30 and its ratatui-core /
 # ratatui-widgets / instability siblings declare 1.88, the highest in the tree.
