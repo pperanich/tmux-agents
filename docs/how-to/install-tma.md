@@ -46,7 +46,7 @@ wrong process:
 
 ```
 $ curl -fsSL https://raw.githubusercontent.com/pperanich/tmux-agents/main/scripts/install.sh \
-    | TMA_VERSION=v0.1.0 TMA_INSTALL_DIR=~/bin sh
+    | TMA_VERSION=v0.1.1 TMA_INSTALL_DIR=~/bin sh
 ```
 
 If piping a script into a shell is not your habit, [read it
@@ -67,7 +67,7 @@ The workspace builds one binary. Check it landed on your `PATH`:
 
 ```
 $ tma --version
-tma 0.1.0
+tma 0.1.1
 ```
 
 To upgrade, `git pull` and run the same `cargo install` again; it replaces the
