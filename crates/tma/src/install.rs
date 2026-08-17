@@ -30,7 +30,7 @@ mod statusline;
 pub(crate) use paths::{resolve_config_dir, resolve_tmux_conf};
 
 use adapters::{adapter_for, resolve_adapter};
-use paths::{resolve_wrapper, tma_bin, ConfigPaths, PathOverrides};
+use paths::{tma_bin, ConfigPaths, PathOverrides, Wrapper, WRAPPER_NAME};
 pub(crate) use statusline::Statusline;
 
 /// The wrapper script shipped in the crate, embedded so `install-hooks` can write it out
@@ -88,6 +88,8 @@ pub(crate) struct InstallOpts {
     /// Override where the wrapper is written (default: sibling `tma-hook` of the binary; env
     /// `TMA_WRAPPER_PATH`).
     pub wrapper_path: Option<PathBuf>,
+    /// `[install] wrapper_ref` (or `--wrapper-ref`): how the agent configs NAME the wrapper.
+    pub wrapper_ref: crate::config::WrapperRef,
     /// Override the OpenCode plugin path (default `~/.config/opencode/plugin/tma.js`; env
     /// `TMA_OPENCODE_PLUGIN`).
     pub opencode_plugin: Option<PathBuf>,
@@ -142,7 +144,7 @@ pub(crate) fn run(opts: InstallOpts) -> ExitCode {
         pi_extension: opts.pi_extension.as_deref(),
     });
     let config_dir = resolve_config_dir(opts.config_dir.as_deref());
-    let wrapper_path = resolve_wrapper(opts.wrapper_path.as_deref());
+    let wrapper = Wrapper::resolve(opts.wrapper_path.as_deref(), opts.wrapper_ref);
     let tmux = Tmux::connect(&opts.server);
 
     if opts.check {
@@ -167,7 +169,7 @@ pub(crate) fn run(opts: InstallOpts) -> ExitCode {
             &manifests,
             &paths,
             &config_dir,
-            &wrapper_path,
+            &wrapper,
             &tmux,
             opts.focus_events,
             opts.agent.as_deref(),
@@ -190,7 +192,7 @@ pub(crate) fn run(opts: InstallOpts) -> ExitCode {
             &manifests,
             &paths,
             &config_dir,
-            &wrapper_path,
+            &wrapper,
             &tmux,
             opts.assume_yes,
         )
@@ -199,7 +201,7 @@ pub(crate) fn run(opts: InstallOpts) -> ExitCode {
             lm,
             &paths,
             &config_dir,
-            &wrapper_path,
+            &wrapper,
             &tmux,
             opts.assume_yes,
             opts.focus_events,
@@ -215,7 +217,7 @@ fn install(
     lm: &LoadedManifest,
     paths: &ConfigPaths,
     config_dir: &Path,
-    wrapper: &Path,
+    wrapper: &Wrapper,
     tmux: &Tmux,
     assume_yes: bool,
     focus_events: bool,
@@ -232,16 +234,26 @@ fn install(
     };
 
     // 1. Write the wrapper alongside the binary so the config entries resolve.
-    if let Err(err) = write_wrapper(wrapper) {
-        eprintln!("tma: cannot write wrapper {}: {err}", wrapper.display());
+    if let Err(err) = write_wrapper(wrapper.write_path()) {
+        eprintln!(
+            "tma: cannot write wrapper {}: {err}",
+            wrapper.write_path().display()
+        );
         return ExitCode::FAILURE;
     }
 
-    // 2. Agent config: wire the wrapper via the agent's own mechanism (the honest split). With
+    // 2. A bare reference is only as good as the `$PATH` the agent inherits, and a wrapper the agent
+    // cannot find fails SILENTLY (the wrapper's own contract). Verify it now, while there is
+    // someone to tell, rather than shipping hooks that never fire.
+    if !bare_reference_ok(wrapper) {
+        return ExitCode::FAILURE;
+    }
+
+    // 3. Agent config: wire the wrapper via the agent's own mechanism (the honest split). With
     // neither statusline flag, a previous opt-in stands, so a plain re-install keeps an asked-for
     // shim current rather than leaving it to rot behind a moved binary.
     let statusline = effective_statusline(statusline, &lm.name, config_dir);
-    if !adapter.install(lm, paths, wrapper, assume_yes, statusline) {
+    if !adapter.install(lm, paths, wrapper.reference(), assume_yes, statusline) {
         return ExitCode::FAILURE;
     }
     // Record the choice only once the write succeeded, and only when the flags stated one: `Keep`
@@ -252,7 +264,7 @@ fn install(
         Statusline::Keep => {}
     }
 
-    // 3. tmux server hooks + record the assigned indexes. The hook set depends on the
+    // 4. tmux server hooks + record the assigned indexes. The hook set depends on the
     // `[focus] events` posture (base always; `pane-focus-in` only when opted in).
     match install_tmux_hooks(tmux, &desired_hooks(focus_events)) {
         Ok(records) => {
@@ -283,7 +295,7 @@ fn uninstall(
     manifests: &[LoadedManifest],
     paths: &ConfigPaths,
     config_dir: &Path,
-    wrapper: &Path,
+    wrapper: &Wrapper,
     tmux: &Tmux,
     assume_yes: bool,
 ) -> ExitCode {
@@ -299,7 +311,7 @@ fn uninstall(
 
     // Agent config: undo the wrapper wiring via the agent's own mechanism (symmetric to
     // install). A no-op change (already absent) is fine — do not fail.
-    if !adapter.uninstall(lm, paths, wrapper, assume_yes) {
+    if !adapter.uninstall(lm, paths, wrapper.reference(), assume_yes) {
         return ExitCode::FAILURE;
     }
 
@@ -325,7 +337,7 @@ fn uninstall(
     println!("tma: uninstalled hooks for {}", lm.name);
     // With the last agent's wiring gone nothing refreshes a stamp again, so leaving them would
     // freeze every `#{@agent_state}` in a user's format at whatever it last read.
-    if !any_agent_still_wired(manifests, paths, wrapper, &lm.name) {
+    if !any_agent_still_wired(manifests, paths, wrapper.reference(), &lm.name) {
         sweep_pane_stamps(tmux);
     }
     ExitCode::SUCCESS
@@ -561,7 +573,12 @@ pub(crate) struct AgentHooks {
 /// server hooks. Same predicates as `install-hooks --check`, never writing.
 #[derive(Debug, Clone)]
 pub(crate) struct HookDiagnosis {
+    /// Where the wrapper script is written on disk.
     pub wrapper_path: PathBuf,
+    /// What the agent configs name it by: [`Self::wrapper_path`] again, or the bare `tma-hook`
+    /// under `[install] wrapper_ref = "bare"`.
+    pub wrapper_ref: PathBuf,
+    /// Whether that reference resolves — the file exists, or the bare name is on `$PATH`.
     pub wrapper_present: bool,
     pub agents: Vec<AgentHooks>,
     /// `(hook name, state)` for the desired tmux server hooks. Empty if the server
@@ -579,10 +596,11 @@ pub(crate) fn diagnose_hooks(
     tmux: &Tmux,
     focus_events: bool,
     statusline: Statusline,
+    wrapper_ref: crate::config::WrapperRef,
 ) -> HookDiagnosis {
     let paths = ConfigPaths::resolve(PathOverrides::default());
     let config_dir = resolve_config_dir(None);
-    let wrapper = resolve_wrapper(None);
+    let wrapper = Wrapper::resolve(None, wrapper_ref);
     build_diagnosis(
         manifests,
         &paths,
@@ -601,14 +619,15 @@ fn build_diagnosis(
     manifests: &[LoadedManifest],
     paths: &ConfigPaths,
     config_dir: &Path,
-    wrapper: &Path,
+    wrapper: &Wrapper,
     tmux: &Tmux,
     focus_events: bool,
     statusline: Statusline,
 ) -> HookDiagnosis {
-    // The config entries invoke the wrapper by path and its death is silent, so its on-disk
-    // presence is part of the diagnosis (a moved/deleted wrapper breaks every wired hook).
-    let wrapper_present = wrapper.is_file();
+    // The config entries invoke the wrapper by the reference below and its death is silent, so
+    // whether that reference still resolves is part of the diagnosis (a moved or deleted wrapper —
+    // or, for a bare reference, a `$PATH` that no longer holds it — breaks every wired hook).
+    let wrapper_present = wrapper.resolves();
 
     let agents = manifests
         .iter()
@@ -619,7 +638,7 @@ fn build_diagnosis(
             wiring: classify_agent(
                 lm,
                 paths,
-                wrapper,
+                wrapper.reference(),
                 effective_statusline(statusline, &lm.name, config_dir),
             ),
         })
@@ -636,7 +655,8 @@ fn build_diagnosis(
         };
 
     HookDiagnosis {
-        wrapper_path: wrapper.to_path_buf(),
+        wrapper_path: wrapper.write_path().to_path_buf(),
+        wrapper_ref: wrapper.reference().to_path_buf(),
         wrapper_present,
         agents,
         tmux_hooks,
@@ -675,7 +695,7 @@ fn run_check(
     manifests: &[LoadedManifest],
     paths: &ConfigPaths,
     config_dir: &Path,
-    wrapper: &Path,
+    wrapper: &Wrapper,
     tmux: &Tmux,
     focus_events: bool,
     agent_filter: Option<&str>,
@@ -693,10 +713,22 @@ fn run_check(
     let mut missing = Vec::new();
 
     if !diag.wrapper_present {
-        missing.push(format!(
-            "wrapper {} missing (config entries reference it; reinstall to restore)",
-            diag.wrapper_path.display()
-        ));
+        missing.push(if wrapper.is_bare() {
+            // A bare reference can go missing without the file going anywhere: the configs name it,
+            // so a `$PATH` that dropped its directory is the same outage as a deleted wrapper.
+            format!(
+                "wrapper `{WRAPPER_NAME}` not on $PATH (config entries name it; add {} to $PATH)",
+                diag.wrapper_path
+                    .parent()
+                    .unwrap_or(Path::new("."))
+                    .display()
+            )
+        } else {
+            format!(
+                "wrapper {} missing (config entries reference it; reinstall to restore)",
+                diag.wrapper_path.display()
+            )
+        });
     }
 
     // Bare `--check` inspects every bundled agent but only reports `Incomplete` (partial/stale)
@@ -910,6 +942,39 @@ fn write_wrapper(wrapper: &Path) -> io::Result<()> {
         std::fs::set_permissions(wrapper, perms)?;
     }
     Ok(())
+}
+
+/// Vet a bare wrapper reference before it goes into a config, returning false to abort the install.
+///
+/// An absolute reference needs no vetting: install just wrote that exact file. A bare one is
+/// resolved by the agent off whatever `$PATH` it inherited, and the wrapper's exit-0-when-missing
+/// contract means a miss produces no error anywhere — hooks simply never fire. So the miss is
+/// caught here, at the one moment there is a person to tell.
+fn bare_reference_ok(wrapper: &Wrapper) -> bool {
+    if !wrapper.is_bare() {
+        return true;
+    }
+    let dir = wrapper.write_path().parent().unwrap_or(Path::new("."));
+    if !wrapper.resolves() {
+        eprintln!(
+            "tma: `{WRAPPER_NAME}` is not on $PATH, and [install] wrapper_ref = \"bare\" writes \
+             that bare name into every agent config.\n      A wrapper an agent cannot find fails \
+             silently, so nothing was wired. Put {} on your $PATH, or drop wrapper_ref to wire the \
+             absolute path.",
+            dir.display()
+        );
+        return false;
+    }
+    // Resolvable, but by someone else's copy: still functional (any tma-hook wrapper runs), yet the
+    // binary it finds may not be the one just installed, so say which copy actually answers.
+    if let Some(other) = wrapper.shadowed_by() {
+        eprintln!(
+            "tma: warning: $PATH answers `{WRAPPER_NAME}` with {}, not the copy written to {}",
+            other.display(),
+            dir.display()
+        );
+    }
+    true
 }
 
 /// The agents that asked for the statusline shim, persisted to `statusline-state.toml`.

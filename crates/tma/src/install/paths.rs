@@ -4,6 +4,8 @@
 
 use std::path::{Path, PathBuf};
 
+use crate::config::WrapperRef;
+
 /// The agent-config write targets (the honest split), resolved up front so `--check`, install, and
 /// uninstall share one set of paths.
 pub(super) struct ConfigPaths {
@@ -185,13 +187,99 @@ fn resolve_pi_extension(override_path: Option<&Path>) -> PathBuf {
     home_join(".pi/agent/extensions/tma.js")
 }
 
-pub(super) fn resolve_wrapper(override_path: Option<&Path>) -> PathBuf {
+/// The wrapper's bare file name, and what `WrapperRef::Bare` puts in an agent config.
+pub(super) const WRAPPER_NAME: &str = "tma-hook";
+
+/// The two wrapper paths, which are not the same question: where the script FILE is written, and
+/// what an agent config REFERENCES. They coincide under [`WrapperRef::Absolute`] and diverge under
+/// `Bare`, where the config names the wrapper and lets the agent's own `$PATH` find it.
+pub(super) struct Wrapper {
+    write_path: PathBuf,
+    reference: PathBuf,
+}
+
+impl Wrapper {
+    pub(super) fn resolve(override_path: Option<&Path>, how: WrapperRef) -> Wrapper {
+        let write_path = resolve_wrapper(override_path);
+        let reference = match how {
+            WrapperRef::Absolute => write_path.clone(),
+            WrapperRef::Bare => PathBuf::from(WRAPPER_NAME),
+        };
+        Wrapper {
+            write_path,
+            reference,
+        }
+    }
+
+    /// Where `install-hooks` writes the script.
+    pub(super) fn write_path(&self) -> &Path {
+        &self.write_path
+    }
+
+    /// What goes into the agent configs (and what drift is compared against).
+    pub(super) fn reference(&self) -> &Path {
+        &self.reference
+    }
+
+    /// Whether the configs name the wrapper rather than spell out its path.
+    pub(super) fn is_bare(&self) -> bool {
+        self.reference.parent().map(Path::as_os_str) == Some("".as_ref())
+    }
+
+    /// Whether the reference an agent config carries would actually resolve at hook time. The
+    /// wrapper dies silently by design, so this is the only thing standing between a bad reference
+    /// and hooks that quietly never fire.
+    pub(super) fn resolves(&self) -> bool {
+        if self.is_bare() {
+            // The agent resolves it the way `execvp` and a shell both do.
+            return on_path(&self.reference).is_some();
+        }
+        self.reference.is_file()
+    }
+
+    /// The `$PATH` entry that actually answers for a bare reference, when one does. A directory
+    /// other than [`Self::write_path`]'s parent means a second install shadows the one being
+    /// written, which is worth saying out loud rather than silently obeying.
+    pub(super) fn shadowed_by(&self) -> Option<PathBuf> {
+        let found = on_path(&self.reference)?;
+        (Some(found.parent()?) != self.write_path.parent()).then_some(found)
+    }
+}
+
+fn resolve_wrapper(override_path: Option<&Path>) -> PathBuf {
     resolve(override_path, "TMA_WRAPPER_PATH", || {
         tma_bin()
             .parent()
-            .map(|d| d.join("tma-hook"))
-            .unwrap_or_else(|| PathBuf::from("tma-hook"))
+            .map(|d| d.join(WRAPPER_NAME))
+            .unwrap_or_else(|| PathBuf::from(WRAPPER_NAME))
     })
+}
+
+/// The first executable named `name` on `$PATH`, the lookup `execvp` and `command -v` perform.
+fn on_path(name: &Path) -> Option<PathBuf> {
+    on_path_in(name, &std::env::var_os("PATH")?)
+}
+
+/// [`on_path`] over an explicit `PATH` value, so the search is testable without mutating the
+/// environment of a parallel suite. An empty entry means the current directory to a shell; it is
+/// skipped, since a wrapper answered by whatever directory the agent started in is not a wiring
+/// worth blessing.
+fn on_path_in(name: &Path, path: &std::ffi::OsStr) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty())
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+#[cfg(unix)]
+fn is_executable_file(path: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+#[cfg(not(unix))]
+fn is_executable_file(path: &Path) -> bool {
+    path.is_file()
 }
 
 /// The tma binary path referenced by the tmux hook command (`$TMA_BIN`, else the running
@@ -310,6 +398,77 @@ mod tests {
     fn touch(path: &Path) {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, "set -g mouse on\n").unwrap();
+    }
+
+    /// Write an executable file (the wrapper's on-disk shape), so the `$PATH` search sees what it
+    /// would see in a real install.
+    fn touch_exe(path: &Path) {
+        touch(path);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perms = std::fs::metadata(path).unwrap().permissions();
+            perms.set_mode(0o755);
+            std::fs::set_permissions(path, perms).unwrap();
+        }
+    }
+
+    /// The `$PATH` search is `execvp`'s: first match wins, non-executables are not matches, and an
+    /// empty entry (which a shell reads as the current directory) is skipped rather than obeyed.
+    #[test]
+    fn path_search_matches_execvp() {
+        let dir = scratch("on_path");
+        let (early, late) = (dir.join("early"), dir.join("late"));
+        touch(&early.join(WRAPPER_NAME)); // present but not executable
+        touch_exe(&late.join(WRAPPER_NAME));
+        let name = Path::new(WRAPPER_NAME);
+
+        let joined = std::env::join_paths([&early, &late]).unwrap();
+        assert_eq!(
+            on_path_in(name, &joined),
+            Some(late.join(WRAPPER_NAME)),
+            "a non-executable file is not a match"
+        );
+
+        touch_exe(&early.join(WRAPPER_NAME));
+        assert_eq!(
+            on_path_in(name, &joined),
+            Some(early.join(WRAPPER_NAME)),
+            "first executable match wins"
+        );
+
+        let with_empty = std::env::join_paths([Path::new(""), &dir]).unwrap();
+        assert_eq!(
+            on_path_in(name, &with_empty),
+            None,
+            "an empty entry is not the current directory"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The two wrapper paths answer different questions. Absolute: one path, present iff the file
+    /// is. Bare: the file still lands next to the binary, but the configs name it, so presence is a
+    /// `$PATH` question the file's existence cannot answer.
+    #[test]
+    fn wrapper_splits_the_write_path_from_the_reference() {
+        let dir = scratch("wrapper");
+        let installed = dir.join("bin").join(WRAPPER_NAME);
+
+        let abs = Wrapper::resolve(Some(&installed), WrapperRef::Absolute);
+        assert_eq!(abs.write_path(), installed);
+        assert_eq!(abs.reference(), installed);
+        assert!(!abs.is_bare());
+        assert!(!abs.resolves(), "nothing written yet");
+        touch_exe(&installed);
+        assert!(abs.resolves());
+
+        let bare = Wrapper::resolve(Some(&installed), WrapperRef::Bare);
+        assert_eq!(bare.write_path(), installed, "the file goes where it went");
+        assert_eq!(bare.reference(), Path::new(WRAPPER_NAME));
+        assert!(bare.is_bare());
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     /// The first existing candidate wins, in tmux's own order. The `~/.tmux.conf` arm doubles as

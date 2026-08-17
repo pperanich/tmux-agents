@@ -202,6 +202,7 @@ fn install_opts(opts: &InitOpts, agent: &str) -> install::InstallOpts {
         gemini_settings: None,
         config_dir: opts.config_dir.clone(),
         wrapper_path: None,
+        wrapper_ref: opts.config.install.wrapper_ref,
         opencode_plugin: None,
         codex_config: None,
         codex_hooks: None,
@@ -327,6 +328,7 @@ pub(crate) fn run(opts: InitOpts) -> ExitCode {
         windows: opts.config.telemetry.windows.clone(),
         api: opts.config.api.clone(),
         agents: opts.config.agent_overrides.clone(),
+        wrapper_ref: opts.config.install.wrapper_ref,
     });
 
     if failed {

@@ -10,6 +10,18 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- `[install] wrapper_ref = "bare"` (or `tma install-hooks --wrapper-ref bare`) writes the wrapper's
+  name, `tma-hook`, into your agent configs instead of its absolute path, so one
+  `~/.claude/settings.json` works on both a Mac and a Linux box rather than naming a home directory
+  that exists on only one of them. `$HOME` is not offered because three of the six wiring mechanisms
+  spawn the wrapper as argv with no shell (Codex's `notify`, the OpenCode plugin, the pi extension)
+  and would pass it through literally; a bare name is resolved by all six. Since a wrapper an agent
+  cannot find fails silently, install refuses when `tma-hook` is not on the `$PATH` it can see, and
+  `tma doctor` now reports the reference and whether `$PATH` still answers it (`wrapper: tma-hook ✓
+  on $PATH (…)`, plus a `"reference"` key in `--json`). The default is unchanged.
+
 ## [0.3.0] - 2026-08-17
 
 ### Breaking

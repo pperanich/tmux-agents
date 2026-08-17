@@ -276,6 +276,48 @@ set -g status-right '#(tma status)'
 tma never wrote that line, so it never edits it; the uninstall prints a reminder
 and leaves your config alone.
 
+## Sharing one agent config between machines
+
+By default every wiring names the wrapper by its absolute path:
+
+```json
+"command": "/Users/you/.local/bin/tma-hook claude Stop"
+```
+
+That path is correct on the machine that wrote it and wrong on any other, so a
+`~/.claude/settings.json` you sync between a Mac and a Linux box points at a home
+directory that does not exist on one of them. Switch to the portable form:
+
+```toml
+# ~/.config/tma/config.toml
+[install]
+wrapper_ref = "bare"
+```
+
+Then re-run `tma install-hooks <agent>` for each wired agent and the entries
+become `tma-hook claude Stop`, which every machine resolves off its own `$PATH`.
+`--wrapper-ref bare` does the same for a single run without touching config.
+
+`$HOME` is deliberately not an option here. Half the wiring never reaches a
+shell: Codex's `notify` is an argv array, and the OpenCode plugin and pi extension
+call `spawn()` directly, so `$HOME/.local/bin/tma-hook` would be taken as a
+literal filename with a dollar sign in it. A bare name works everywhere because
+`execvp` searches `$PATH` the same way a shell does.
+
+What you give up is the guarantee that the wrapper is findable. A GUI-launched
+editor often inherits a narrower `$PATH` than your shell, and a wrapper an agent
+cannot find fails silently by design. Two things guard that: `install-hooks`
+refuses to wire anything when `tma-hook` is not on the `$PATH` it can see, and
+`tma doctor` reports the reference rather than the file:
+
+```
+wrapper: tma-hook ✓ on $PATH (/home/you/.local/bin/tma-hook)
+```
+
+A `✗ not on $PATH` there means the wiring is intact and inert. Put the wrapper's
+directory on the agent's `$PATH`, or switch back to `wrapper_ref = "absolute"` and
+re-install.
+
 ## Agents that run in a container
 
 Install the hooks where the agent's config lives, which is inside the container,

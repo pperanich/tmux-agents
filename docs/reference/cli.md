@@ -730,6 +730,7 @@ with `--check`.
 | `--gemini-settings <PATH>` | Override Gemini's `settings.json` path (env `TMA_GEMINI_SETTINGS`). Defaults to `~/.gemini/settings.json`. |
 | `--config-dir <DIR>` | Override the tma config dir holding the per-server `hooks-state-<server>.toml` (env `TMA_CONFIG_DIR`). |
 | `--wrapper-path <PATH>` | Override where the `tma-hook` wrapper is written (env `TMA_WRAPPER_PATH`). |
+| `--wrapper-ref <HOW>` | How the agent configs name the wrapper: `absolute` (default) writes its full path, `bare` writes `tma-hook` for the agent to resolve off `$PATH`, which keeps one config working on every machine. Overrides `[install] wrapper_ref` for this run; with `bare`, install refuses when the name is not findable. See [Configuration](configuration.md#install-how-agent-configs-name-the-wrapper). |
 | `--opencode-plugin <PATH>` | Override where the OpenCode plugin is written (env `TMA_OPENCODE_PLUGIN`). |
 | `--codex-config <PATH>` | Override Codex's `config.toml` path (env `TMA_CODEX_CONFIG`). Defaults to `$CODEX_HOME/config.toml`, else `~/.codex/config.toml`. |
 | `--codex-hooks <PATH>` | Override Codex's `hooks.json` path (env `TMA_CODEX_HOOKS`). Defaults to `$CODEX_HOME/hooks.json`, else `~/.codex/hooks.json`. |

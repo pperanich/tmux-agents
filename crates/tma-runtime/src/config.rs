@@ -31,6 +31,8 @@ pub struct Config {
     #[serde(default)]
     pub focus: FocusSection,
     #[serde(default)]
+    pub install: InstallSection,
+    #[serde(default)]
     pub telemetry: TelemetrySection,
     #[serde(default)]
     pub tmux: TmuxSection,
@@ -491,6 +493,37 @@ impl NotifySection {
 pub struct FocusSection {
     #[serde(default)]
     pub events: bool,
+}
+
+// ---- [install] ---------------------------------------------------------------------------
+
+/// How an agent config should NAME the `tma-hook` wrapper it invokes.
+///
+/// Three of the six wiring mechanisms spawn the wrapper as argv with no shell (Codex's
+/// `notify` array, the OpenCode plugin's and pi's `spawn`), so a `$HOME`-relative string is not an
+/// option: it would be passed through literally. The choice is therefore between an absolute path
+/// and a bare name resolved off `$PATH`, both of which every mechanism handles.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum WrapperRef {
+    /// The wrapper's absolute path. Found whatever `$PATH` the agent inherits, which is why it is
+    /// the default; machine-specific, so a synced config points at another machine's home.
+    #[default]
+    Absolute,
+    /// The bare name `tma-hook`, resolved off `$PATH` when the hook fires. One string on every
+    /// machine, at the cost of needing the wrapper's directory on the `$PATH` each agent inherits
+    /// (a GUI-launched agent often has a narrower one than your shell).
+    Bare,
+}
+
+/// `[install]` posture for `install-hooks`. Config rather than an env var because `--check` and
+/// `tma doctor` have to resolve the same reference install wrote: disagree, and every check reports
+/// drift against a wiring that is in fact correct.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InstallSection {
+    #[serde(default)]
+    pub wrapper_ref: WrapperRef,
 }
 
 // ---- [telemetry] -------------------------------------------------------------------------
@@ -1109,6 +1142,16 @@ mod tests {
             (
                 "focus.events".to_string(),
                 toml::Value::Boolean(c.focus.events),
+            ),
+            (
+                "install.wrapper_ref".to_string(),
+                toml::Value::String(
+                    match c.install.wrapper_ref {
+                        WrapperRef::Absolute => "absolute",
+                        WrapperRef::Bare => "bare",
+                    }
+                    .to_string(),
+                ),
             ),
             (
                 "notify.from_event".to_string(),

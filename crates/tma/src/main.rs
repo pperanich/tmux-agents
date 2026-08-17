@@ -223,6 +223,9 @@ fn main() -> ExitCode {
             gemini_settings: args.gemini_settings,
             config_dir: args.config_dir,
             wrapper_path: args.wrapper_path,
+            wrapper_ref: args
+                .wrapper_ref
+                .map_or(config.install.wrapper_ref, Into::into),
             opencode_plugin: args.opencode_plugin,
             codex_config: args.codex_config,
             codex_hooks: args.codex_hooks,
@@ -250,6 +253,7 @@ fn main() -> ExitCode {
             windows: config.telemetry.windows.clone(),
             api: config.api.clone(),
             agents: config.agent_overrides,
+            wrapper_ref: config.install.wrapper_ref,
         }),
         Some(Command::Reload) => run_reload(&server),
         Some(Command::ClearAttention(args)) => run_clear_attention(args, &server),

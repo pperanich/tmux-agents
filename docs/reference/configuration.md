@@ -59,6 +59,9 @@ osc = false                  # also post an OSC 9 desktop notification to the pa
 [focus]                      # attention-clear posture
 events = false               # set true to also install a pane-focus-in hook (needs `focus-events on`)
 
+[install]                    # what install-hooks writes into your agent configs
+wrapper_ref = "absolute"     # "bare" writes just `tma-hook`, resolved off $PATH (portable)
+
 [tmux]                       # which tmux-compatible binary tma spawns
 # bin = "tmate"              # default: plain `tmux` off PATH; env TMA_TMUX_BIN overrides this
 
@@ -162,6 +165,39 @@ exists so a test or CI run can flip the fire path without writing a config file.
 | key | default | meaning |
 |---|---|---|
 | `events` | `false` | Set `true` to also install a pane-focus-in hook. Requires tmux `focus-events on`. |
+
+## `[install]`: how agent configs name the wrapper
+
+| key | default | meaning |
+|---|---|---|
+| `wrapper_ref` | `"absolute"` | `"absolute"` writes the wrapper's full path into each agent config. `"bare"` writes the name `tma-hook` and lets the agent resolve it off `$PATH`. |
+
+The default is machine-specific by construction: `/Users/you/.local/bin/tma-hook`
+on macOS is `/home/you/.local/bin/tma-hook` on Linux, so a `~/.claude/settings.json`
+synced between the two carries a path that only works on one. `"bare"` writes one
+string that works on both.
+
+A `$HOME`-relative string is not offered, because it would only work for half the
+agents. Three of the six wiring mechanisms spawn the wrapper as argv with no shell
+involved (Codex's `notify` array, the OpenCode plugin's and pi's `spawn`), and
+those would pass `$HOME/.local/bin/tma-hook` through as a literal filename. A bare
+name is resolved by all six, since `execvp` searches `$PATH` exactly like a shell
+does.
+
+The cost of `"bare"` is that the wrapper's directory has to be on the `$PATH` each
+agent inherits, which for a GUI-launched editor is often narrower than your
+shell's. `tma install-hooks` refuses to wire anything when `tma-hook` is not
+findable, and `tma doctor` reports the reference and whether `$PATH` still answers
+it:
+
+```
+wrapper: tma-hook ✓ on $PATH (/home/you/.local/bin/tma-hook)
+```
+
+Set the key before installing, or pass `--wrapper-ref bare` for one run. The two
+postures write different strings, so after switching, re-run `tma install-hooks
+<agent>` for each wired agent: until you do, `--check` correctly reports the old
+wiring as drift.
 
 ## `[tmux]`: which tmux binary to spawn
 

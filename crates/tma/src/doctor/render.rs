@@ -169,13 +169,17 @@ pub(super) fn render_text(r: &Report) -> String {
             }
         }
     }
+    // Under a bare reference the file and the name the configs use are different facts, and only
+    // the second one is what an agent resolves — so lead with it and keep the file as the aside.
+    let bare = r.wrapper_ref != r.wrapper_path;
     out.push_str(&format!(
         "wrapper: {} {}\n",
-        r.wrapper_path.display(),
-        if r.wrapper_present {
-            "\u{2713}"
-        } else {
-            "\u{2717} missing"
+        r.wrapper_ref.display(),
+        match (r.wrapper_present, bare) {
+            (true, false) => "\u{2713}".to_string(),
+            (false, false) => "\u{2717} missing".to_string(),
+            (true, true) => format!("\u{2713} on $PATH ({})", r.wrapper_path.display()),
+            (false, true) => format!("\u{2717} not on $PATH ({})", r.wrapper_path.display()),
         }
     ));
 
@@ -418,6 +422,8 @@ pub(super) fn render_json(r: &Report) -> String {
     j.key("wrapper");
     j.begin_object();
     j.string("path", &r.wrapper_path.display().to_string());
+    // What the agent configs actually name; equal to `path` unless `wrapper_ref = "bare"`.
+    j.string("reference", &r.wrapper_ref.display().to_string());
     j.bool("present", r.wrapper_present);
     j.end_object();
 
@@ -752,6 +758,7 @@ mod tests {
                 "process_name_issues",
                 "process_walk",
                 "reason",
+                "reference",
                 "remote_panes",
                 "running",
                 "schema",

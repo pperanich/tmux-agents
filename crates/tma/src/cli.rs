@@ -182,6 +182,10 @@ pub(crate) struct InstallHooksArgs {
     /// Override where the `tma-hook` wrapper is written (env `TMA_WRAPPER_PATH`).
     #[arg(long = "wrapper-path", value_name = "PATH")]
     pub(crate) wrapper_path: Option<PathBuf>,
+    /// How the agent configs name the wrapper: its absolute path, or the bare `tma-hook` off
+    /// `$PATH` (portable between machines). Overrides `[install] wrapper_ref` for this run.
+    #[arg(long = "wrapper-ref", value_name = "HOW")]
+    pub(crate) wrapper_ref: Option<WrapperRefArg>,
     /// Override where the OpenCode plugin is written (test isolation; env `TMA_OPENCODE_PLUGIN`).
     #[arg(long = "opencode-plugin", value_name = "PATH")]
     pub(crate) opencode_plugin: Option<PathBuf>,
@@ -205,6 +209,26 @@ pub(crate) struct InstallHooksArgs {
     /// `$PI_CODING_AGENT_DIR/extensions/tma.js`, else `~/.pi/agent/extensions/tma.js`.
     #[arg(long = "pi-extension", value_name = "PATH")]
     pub(crate) pi_extension: Option<PathBuf>,
+}
+
+/// `--wrapper-ref`: the CLI face of `[install] wrapper_ref`. A separate enum because clap's derive
+/// wants its own `ValueEnum`, and the config type is a plain deserialize target.
+#[derive(Clone, Copy, PartialEq, Eq, clap::ValueEnum)]
+pub(crate) enum WrapperRefArg {
+    /// Write the wrapper's absolute path (the default): found whatever `$PATH` the agent has.
+    Absolute,
+    /// Write the bare name `tma-hook`, resolved off `$PATH` at hook time. One config that works on
+    /// every machine, as long as the wrapper's directory is on the `$PATH` each agent inherits.
+    Bare,
+}
+
+impl From<WrapperRefArg> for crate::config::WrapperRef {
+    fn from(a: WrapperRefArg) -> Self {
+        match a {
+            WrapperRefArg::Absolute => Self::Absolute,
+            WrapperRefArg::Bare => Self::Bare,
+        }
+    }
 }
 
 /// Args for `tma install-keys`. Mirrors the `install-hooks` flag naming (`--uninstall`/`--check`/

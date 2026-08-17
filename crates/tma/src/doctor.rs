@@ -18,7 +18,7 @@ use tma_core::{AgentState, Provenance, ReadResult, StampedState};
 use tma_runtime::{actions, identity, ipc, notify};
 
 use crate::cli_support;
-use crate::config::{AgentConfig, ApiSection, WindowsSection};
+use crate::config::{AgentConfig, ApiSection, WindowsSection, WrapperRef};
 use crate::install::{self, HookWiring, TmuxHookState};
 use crate::manifests::{LoadedManifest, ManifestFailure};
 use crate::tmux::{self, Tmux, TmuxError};
@@ -47,6 +47,9 @@ pub(crate) struct DoctorOpts {
     /// `[api.<name>]` API config, so doctor can flag an OpenCode pane with a pending permission
     /// request but no resolvable endpoint.
     pub api: ApiSection,
+    /// `[install] wrapper_ref`: how the agent configs name the wrapper, so doctor checks the same
+    /// reference install wrote instead of reporting a bare wiring as a missing file.
+    pub wrapper_ref: WrapperRef,
 }
 
 // --- tier derivation (pure; unit-tested) -----------------------------------------
@@ -352,6 +355,8 @@ struct Report {
     watch_panes: usize,
     tmux_hooks: Vec<(String, TmuxHookState)>,
     wrapper_path: PathBuf,
+    /// What the agent configs name the wrapper by: the path above, or a bare `tma-hook`.
+    wrapper_ref: PathBuf,
     wrapper_present: bool,
     agents: Vec<AgentReport>,
     /// Count of action manifests that loaded cleanly (bundled + user dir).
@@ -430,6 +435,7 @@ fn gather(
     focus_events: bool,
     windows: &WindowsSection,
     api: &ApiSection,
+    wrapper_ref: WrapperRef,
 ) -> Result<Report, TmuxError> {
     let now = tma_runtime::now_ms();
     let panes = tmux.list_panes()?;
@@ -475,8 +481,13 @@ fn gather(
         .unwrap_or(0);
 
     // Hook wiring diagnosis (the `install-hooks --check` machinery, read-only).
-    let hook_diag =
-        install::diagnose_hooks(manifests, tmux, focus_events, install::Statusline::Keep);
+    let hook_diag = install::diagnose_hooks(
+        manifests,
+        tmux,
+        focus_events,
+        install::Statusline::Keep,
+        wrapper_ref,
+    );
 
     // Identify agent panes the same way the poll cycle's read half does — but never stamp. A `ps`
     // that cannot run costs the identification below (registered panes still resolve) and nothing
@@ -661,6 +672,7 @@ fn gather(
         watch_panes,
         tmux_hooks: hook_diag.tmux_hooks,
         wrapper_path: hook_diag.wrapper_path,
+        wrapper_ref: hook_diag.wrapper_ref,
         wrapper_present: hook_diag.wrapper_present,
         agents,
         action_ok,
@@ -724,6 +736,7 @@ pub(crate) fn run(opts: DoctorOpts) -> ExitCode {
         opts.focus_events,
         &opts.windows,
         &opts.api,
+        opts.wrapper_ref,
     ) {
         Ok(r) => r,
         Err(TmuxError::ServerGone) => return cli_support::no_server(),
@@ -902,6 +915,7 @@ mod tests {
             watch_panes: 1,
             tmux_hooks: vec![("after-select-pane".to_string(), TmuxHookState::Present)],
             wrapper_path: PathBuf::from("/usr/local/bin/tma-hook"),
+            wrapper_ref: PathBuf::from("/usr/local/bin/tma-hook"),
             wrapper_present: true,
             agents: vec![AgentReport {
                 pane: "%1".to_string(),
