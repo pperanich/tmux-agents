@@ -102,6 +102,37 @@ pub(crate) fn display_index(groups: &[Group], sel: usize) -> usize {
     sel
 }
 
+/// The inverse of [`display_index`]: the flat row index a draw line holds, or `None` when that line
+/// is a group header (nothing to select) or past the end. What a mouse click needs — it lands on a
+/// drawn line and has to name the row under it.
+pub(crate) fn row_at_display(groups: &[Group], flat_len: usize, line: usize) -> Option<usize> {
+    if groups.is_empty() {
+        return (line < flat_len).then_some(line);
+    }
+    let mut cursor = 0;
+    for g in groups {
+        if line == cursor {
+            return None; // the group's own header line
+        }
+        cursor += 1;
+        if line < cursor + g.members.len() {
+            return Some(line - cursor + g.members[0]);
+        }
+        cursor += g.members.len();
+    }
+    None
+}
+
+/// The number of lines the grouped display draws: every row plus one header per group. Flat
+/// (no groups) is just the rows.
+pub(crate) fn display_len(groups: &[Group], flat_len: usize) -> usize {
+    if groups.is_empty() {
+        flat_len
+    } else {
+        flat_len + groups.len()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -252,6 +283,64 @@ mod tests {
     #[test]
     fn display_index_no_groups_is_the_flat_index() {
         assert_eq!(display_index(&[], 3), 3);
+    }
+
+    /// Two groups over three rows draw as: ▸app, %0, %1, ▸lib, %2. A click lands on a drawn line,
+    /// so the mapping back to a row has to skip the headers and refuse them.
+    #[test]
+    fn row_at_display_maps_lines_back_to_rows_and_refuses_headers() {
+        let groups = vec![
+            Group {
+                name: "app".to_string(),
+                members: vec![0, 1],
+            },
+            Group {
+                name: "lib".to_string(),
+                members: vec![2],
+            },
+        ];
+        assert_eq!(display_len(&groups, 3), 5);
+        assert_eq!(row_at_display(&groups, 3, 0), None, "▸app");
+        assert_eq!(row_at_display(&groups, 3, 1), Some(0));
+        assert_eq!(row_at_display(&groups, 3, 2), Some(1));
+        assert_eq!(row_at_display(&groups, 3, 3), None, "▸lib");
+        assert_eq!(row_at_display(&groups, 3, 4), Some(2));
+        assert_eq!(row_at_display(&groups, 3, 5), None, "past the last line");
+        // Flat (no groups): a line is its own row.
+        assert_eq!(display_len(&[], 3), 3);
+        assert_eq!(row_at_display(&[], 3, 2), Some(2));
+        assert_eq!(row_at_display(&[], 3, 3), None);
+    }
+
+    /// The two mappings are inverses on every row, which is what keeps a click on the highlighted
+    /// line selecting the row already highlighted.
+    #[test]
+    fn display_index_and_row_at_display_round_trip() {
+        let rows = vec![
+            row("%0", Some("app"), AgentState::Blocked, 5),
+            row("%1", Some("lib"), AgentState::Working, 6),
+            row("%2", Some("app"), AgentState::Idle, 7),
+        ];
+        // Reorder into grouped display order the way the model does, so members are contiguous.
+        let groups = group_rows(&rows);
+        let mut contiguous = Vec::new();
+        let mut cached = Vec::new();
+        for g in groups {
+            let start = contiguous.len();
+            for i in &g.members {
+                contiguous.push(rows[*i].clone());
+            }
+            cached.push(Group {
+                name: g.name,
+                members: (start..contiguous.len()).collect(),
+            });
+        }
+        for r in 0..contiguous.len() {
+            assert_eq!(
+                row_at_display(&cached, contiguous.len(), display_index(&cached, r)),
+                Some(r)
+            );
+        }
     }
 
     // --- properties -----------------------------------------------------------------------------

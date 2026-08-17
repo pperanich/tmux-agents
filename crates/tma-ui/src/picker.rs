@@ -17,7 +17,6 @@ use std::path::PathBuf;
 use std::process;
 
 use nucleo::{Config, Matcher};
-use ratatui::layout::{Constraint, Direction, Layout};
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, ListItem, Paragraph};
@@ -26,6 +25,7 @@ use tma_runtime::config;
 use tma_runtime::cycle;
 use tma_runtime::manifests::LoadedManifest;
 use tma_runtime::{nudge, ui, Server, Tmux};
+use tma_ui_core::layout::picker_geom;
 use tma_ui_core::{Effect, Event, PickerModel, RowPalette};
 
 use tma_ui_core::render::{branch_span, fmt_since, row_style, truncate, BRANCH_W};
@@ -97,18 +97,11 @@ impl Surface for PickerModel {
 }
 
 fn draw(f: &mut Frame, model: &PickerModel, now: u64, palette: &RowPalette) {
-    let (body_area, footer_area) = dash::body_and_footer(f.area());
-    // A popup below the preview gate gives the list the whole body: 45% of a narrow popup is a
-    // preview too narrow to read, and the fold captures nothing for it either.
-    let (list_area, preview_area) = if model.preview_visible() {
-        let cols = Layout::default()
-            .direction(Direction::Horizontal)
-            .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
-            .split(body_area);
-        (cols[0], Some(cols[1]))
-    } else {
-        (body_area, None)
-    };
+    // The core owns the split, because the fold hit-tests clicks against it: a popup below the
+    // preview gate gives the list the whole body (45% of a narrow popup is a preview too narrow to
+    // read, and the fold captures nothing for it either).
+    let geom = picker_geom(f.area(), model.preview_visible());
+    let (list_area, preview_area, footer_area) = (geom.list.rect, geom.preview, geom.footer);
 
     // Same show/hide rule as watch: the branch column appears only when a visible row resolved one.
     let show_branch = model.show_branch();
@@ -134,8 +127,12 @@ fn draw(f: &mut Frame, model: &PickerModel, now: u64, palette: &RowPalette) {
         f,
         list_area,
         items,
-        model.selected_index(),
-        model.visible_count(),
+        &dash::ListSelection {
+            selected: model.selected_index(),
+            hovered: model.hover(),
+            scroll: model.scroll(),
+            count: model.visible_count(),
+        },
     );
 
     // Preview.
@@ -178,9 +175,9 @@ pub(crate) fn unix_now() -> u64 {
 #[cfg(test)]
 mod draw_tests {
     use super::*;
-    use crate::test_render::{lines, render, reversed_rows, row, with_repo};
+    use crate::test_render::{dim_rows, lines, render, reversed_rows, row, with_repo};
     use tma_core::{AgentRow, AgentState};
-    use tma_ui_core::Key;
+    use tma_ui_core::{Key, Mouse, MouseKind};
 
     const NOW: u64 = 100_000;
     const SINCE: u64 = 95_000; // fmt_since(NOW, SINCE) == "5s"
@@ -350,6 +347,33 @@ mod draw_tests {
             !ls[0].contains("proj"),
             "no preview pane to title in a narrow popup: {:?}",
             ls[0]
+        );
+    }
+
+    /// The click the fold resolved and the row the draw painted are the same one: hover the second
+    /// row, click it, and the highlight lands where the pointer was.
+    #[test]
+    fn picker_click_and_hover_land_on_the_row_under_the_pointer() {
+        let mut mtch = matcher();
+        let mut p = model(three_rows(), 100, &mut mtch);
+        let at = |p: &mut PickerModel, kind, row, mtch: &mut Matcher| {
+            p.update(Event::Mouse(Mouse { kind, col: 4, row }), NOW, mtch);
+        };
+        at(&mut p, MouseKind::Moved, 2, &mut mtch);
+        at(&mut p, MouseKind::Down, 2, &mut mtch);
+
+        let palette = RowPalette::default();
+        let buf = render(100, 14, |f| draw(f, &p, NOW, &palette));
+        let ls = lines(&buf);
+        assert!(ls[2].contains("bravo"), "the pointed row: {ls:?}");
+        assert_eq!(
+            dim_rows(&buf),
+            vec![2],
+            "the hovered row is the one under the pointer"
+        );
+        assert!(
+            reversed_rows(&buf).contains(&2),
+            "and the click selected it: {ls:?}"
         );
     }
 

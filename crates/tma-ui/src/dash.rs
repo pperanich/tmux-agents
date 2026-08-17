@@ -7,7 +7,7 @@
 
 use std::time::Duration;
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Span;
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState};
@@ -65,34 +65,57 @@ pub(crate) fn refresh(
         })
 }
 
-/// Split an area into the list body (fills) plus a one-line footer.
-pub(crate) fn body_and_footer(area: Rect) -> (Rect, Rect) {
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Min(1), Constraint::Length(1)])
-        .split(area);
-    (chunks[0], chunks[1])
+/// What the list highlights and where its window sits: the selected draw line, the hovered one (the
+/// pointer's, dimmer), the scroll offset, and the agent count for the title. The fold owns all four
+/// — the offset especially, because the mouse hit-test resolves a click against the same number.
+pub(crate) struct ListSelection {
+    pub(crate) selected: usize,
+    pub(crate) hovered: Option<usize>,
+    pub(crate) scroll: usize,
+    pub(crate) count: usize,
+}
+
+/// Mark the hovered line with a dim reversed background: visibly "the mouse is here" without
+/// competing with the selection's full REVERSED highlight. A hovered line that is also the selected
+/// one keeps the selection style (the widget paints that over this).
+pub(crate) fn with_hover(items: Vec<ListItem<'_>>, hovered: Option<usize>) -> Vec<ListItem<'_>> {
+    let Some(h) = hovered else {
+        return items;
+    };
+    items
+        .into_iter()
+        .enumerate()
+        .map(|(i, item)| {
+            if i == h {
+                item.style(Style::default().add_modifier(Modifier::DIM | Modifier::REVERSED))
+            } else {
+                item
+            }
+        })
+        .collect()
 }
 
 /// Render the bordered "agents (N)" list with the REVERSED highlight. `items` are the per-surface
-/// row spans (which may include interleaved group-header lines); `count` is the agent count for the
-/// title, and `selected` is the draw index (past any headers) highlighted when the list is non-empty.
+/// row spans (which may include interleaved group-header lines); `sel` carries the highlighted and
+/// hovered draw indices, the scroll offset, and the agent count for the title.
 pub(crate) fn render_agent_list(
     f: &mut Frame,
     area: Rect,
     items: Vec<ListItem>,
-    selected: usize,
-    count: usize,
+    sel: &ListSelection,
 ) {
     let mut list_state = ListState::default();
-    if count > 0 {
-        list_state.select(Some(selected));
+    if sel.count > 0 {
+        list_state.select(Some(sel.selected));
     }
-    let list = List::new(items)
+    // The fold's own offset, not one the widget picks per frame: a click is resolved back through
+    // this number, so the two must be the same.
+    *list_state.offset_mut() = sel.scroll;
+    let list = List::new(with_hover(items, sel.hovered))
         .block(
             Block::default()
                 .borders(Borders::ALL)
-                .title(format!(" agents ({count}) ")),
+                .title(format!(" agents ({}) ", sel.count)),
         )
         .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
     f.render_stateful_widget(list, area, &mut list_state);
@@ -140,7 +163,17 @@ mod tests {
         ];
         let buf = render(60, 6, |f| {
             let area = f.area();
-            render_agent_list(f, area, items, 1, 2);
+            render_agent_list(
+                f,
+                area,
+                items,
+                &ListSelection {
+                    selected: 1,
+                    hovered: None,
+                    scroll: 0,
+                    count: 2,
+                },
+            );
         });
         let ls = lines(&buf);
         // The bordered title reflects the agent count.

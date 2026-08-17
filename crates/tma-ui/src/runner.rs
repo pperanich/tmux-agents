@@ -6,8 +6,12 @@
 use std::collections::VecDeque;
 use std::io;
 use std::path::PathBuf;
+use std::time::Duration;
 
-use crossterm::event::{self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{
+    self, Event as CEvent, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+    MouseEventKind,
+};
 use ratatui::backend::CrosstermBackend;
 use ratatui::{Frame, Terminal};
 use tma_core::{AgentRow, AgentState, Selector};
@@ -15,7 +19,7 @@ use tma_runtime::config;
 use tma_runtime::manifests::LoadedManifest;
 use tma_runtime::{nudge, ui, Server, Tmux};
 use tma_ui_core::palette::{RowPalette, RowStyles};
-use tma_ui_core::{Effect, Event, Key};
+use tma_ui_core::{Effect, Event, Key, Mouse, MouseKind};
 
 use crate::dash;
 use crate::jump;
@@ -199,18 +203,68 @@ fn drain<S: Surface, X: ExecuteEffect>(
     None
 }
 
-/// Poll input for one `POLL_INTERVAL`: a mapped key or a resize, `Tick` on timeout or an unmapped
-/// event, `None` for a key that maps to nothing (a release, or ctrl + an unbound char).
+/// Poll input for one `POLL_INTERVAL`: a mapped key, mouse report, or resize, `Tick` on timeout or
+/// an unmapped event, `None` for an event that maps to nothing (a key release, a drag, ctrl + an
+/// unbound char).
+///
+/// All-motion mouse tracking emits one report per cell the pointer crosses, so a single flick can
+/// queue dozens. They are drained here and only the last one is folded: hover is a position, not a
+/// history, and redrawing once per crossed cell would make a fast sweep feel like lag.
 fn poll_event() -> io::Result<Option<Event>> {
-    if event::poll(dash::POLL_INTERVAL)? {
-        match event::read()? {
-            CEvent::Key(k) => Ok(map_key(k)),
-            CEvent::Resize(width, height) => Ok(Some(Event::Resize { width, height })),
-            _ => Ok(Some(Event::Tick)),
-        }
-    } else {
-        Ok(Some(Event::Tick))
+    if !event::poll(dash::POLL_INTERVAL)? {
+        return Ok(Some(Event::Tick));
     }
+    let mapped = match event::read()? {
+        CEvent::Key(k) => map_key(k),
+        CEvent::Mouse(m) => map_mouse(m),
+        CEvent::Resize(width, height) => Some(Event::Resize { width, height }),
+        _ => Some(Event::Tick),
+    };
+    let Some(Event::Mouse(first)) = mapped else {
+        return Ok(mapped);
+    };
+    if first.kind != MouseKind::Moved {
+        return Ok(mapped);
+    }
+    let mut last = first;
+    while event::poll(Duration::ZERO)? {
+        match event::read()? {
+            CEvent::Mouse(m) => match map_mouse(m) {
+                Some(Event::Mouse(next)) if next.kind == MouseKind::Moved => last = next,
+                // A press or a wheel notch behind the motion run is the real gesture: it wins the
+                // poll and the swallowed motion costs nothing, since the pointer's next move
+                // re-establishes the hover anyway.
+                Some(other) => return Ok(Some(other)),
+                None => {}
+            },
+            CEvent::Key(k) => {
+                if let Some(ev) = map_key(k) {
+                    return Ok(Some(ev));
+                }
+            }
+            CEvent::Resize(width, height) => return Ok(Some(Event::Resize { width, height })),
+            _ => {}
+        }
+    }
+    Ok(Some(Event::Mouse(last)))
+}
+
+/// Map a crossterm mouse report onto the core's alphabet: left press, plain motion (hover), and the
+/// wheel. Drags, other buttons, and releases are dropped — the surfaces are a list, and a gesture
+/// they do not model is better ignored than approximated.
+fn map_mouse(m: MouseEvent) -> Option<Event> {
+    let kind = match m.kind {
+        MouseEventKind::Down(MouseButton::Left) => MouseKind::Down,
+        MouseEventKind::Moved => MouseKind::Moved,
+        MouseEventKind::ScrollUp => MouseKind::ScrollUp,
+        MouseEventKind::ScrollDown => MouseKind::ScrollDown,
+        _ => return None,
+    };
+    Some(Event::Mouse(Mouse {
+        kind,
+        col: m.column,
+        row: m.row,
+    }))
 }
 
 /// Map a crossterm key press onto the core's `Key` alphabet, keeping the input backend out of the
@@ -575,5 +629,46 @@ mod tests {
             "the Resize is the first (and only) event folded, got {:?}",
             surface.seen
         );
+    }
+
+    /// The gestures the folds model are mapped; everything else is dropped here rather than
+    /// approximated into one of them (a drag is not a click, and a right-press is not a left one).
+    #[test]
+    fn map_mouse_carries_press_hover_and_wheel_and_drops_the_rest() {
+        let ev = |kind| MouseEvent {
+            kind,
+            column: 7,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(
+            matches!(
+                map_mouse(ev(MouseEventKind::Down(MouseButton::Left))),
+                Some(Event::Mouse(Mouse {
+                    kind: MouseKind::Down,
+                    col: 7,
+                    row: 3
+                }))
+            ),
+            "a left press carries its own cell"
+        );
+        for (kind, want) in [
+            (MouseEventKind::Moved, MouseKind::Moved),
+            (MouseEventKind::ScrollUp, MouseKind::ScrollUp),
+            (MouseEventKind::ScrollDown, MouseKind::ScrollDown),
+        ] {
+            assert!(
+                matches!(map_mouse(ev(kind)), Some(Event::Mouse(m)) if m.kind == want),
+                "{kind:?} maps to {want:?}"
+            );
+        }
+        for kind in [
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Drag(MouseButton::Left),
+            MouseEventKind::ScrollLeft,
+        ] {
+            assert!(map_mouse(ev(kind)).is_none(), "{kind:?} is not modelled");
+        }
     }
 }

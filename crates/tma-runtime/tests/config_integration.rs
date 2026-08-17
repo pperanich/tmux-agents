@@ -26,6 +26,9 @@ fn tma(s: &Scratch, config: &Path, args: &[&str]) -> Output {
         .arg(s.manifest_dir())
         .arg("--config")
         .arg(config)
+        // Pinned into the scratch so `tma status`'s sidebar-icon gate reads this suite's (absent)
+        // keybindings file rather than the developer's own install.
+        .env("TMA_CONFIG_DIR", s.workdir.join("cfg"))
         .output()
         .expect("spawn tma")
 }
@@ -92,9 +95,9 @@ fn zero_config_status_matches_documented_defaults() {
     assert!(out.status.success());
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "#[range=user|tma:idle]#[fg=green]○1#[norange] \
-         #[range=user|tma:sidebar]#[fg=colour244]☰#[norange]",
-        "zero-config renders the default green ○ for an idle agent, then the sidebar icon"
+        "#[range=user|tma:idle]#[fg=green]○1#[norange]",
+        "zero-config renders the default green ○ for an idle agent (and no sidebar icon: \
+         a scratch server has `mouse` off, so nothing could click it)"
     );
 }
 
@@ -113,8 +116,7 @@ fn status_glyph_and_color_override_is_honored() {
     assert!(out.status.success());
     assert_eq!(
         String::from_utf8_lossy(&out.stdout),
-        "#[range=user|tma:idle]#[fg=colour40]I1#[norange] \
-         #[range=user|tma:sidebar]#[fg=colour244]☰#[norange]",
+        "#[range=user|tma:idle]#[fg=colour40]I1#[norange]",
         "the config glyph + color override is rendered"
     );
 }
@@ -578,14 +580,12 @@ fn pinned_empty_config_shields_status_from_hostile_default_config() {
 
     assert_eq!(
         status(true),
-        "#[range=user|tma:idle]#[fg=green]○1#[norange] \
-         #[range=user|tma:sidebar]#[fg=colour244]☰#[norange]",
+        "#[range=user|tma:idle]#[fg=green]○1#[norange]",
         "the empty-config pin shields status from the hostile default config"
     );
     assert_eq!(
         status(false),
-        "#[range=user|tma:idle]#[fg=red]X1#[norange] \
-         #[range=user|tma:sidebar]#[fg=colour244]☰#[norange]",
+        "#[range=user|tma:idle]#[fg=red]X1#[norange]",
         "without the pin the hostile default config is read (so the pin is what isolates)"
     );
 }

@@ -4,14 +4,20 @@
 
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Matcher, Utf32Str};
+use ratatui::layout::Rect;
 use ratatui::text::Text;
 use tma_core::{sort_rank, AgentRow};
 
 use crate::common::{preview_fits, Common};
 use crate::effect::Effect;
-use crate::event::Event;
+use crate::event::{Event, Mouse, MouseKind};
 use crate::key::Key;
+use crate::layout::picker_geom;
 use crate::selection::Selection;
+use crate::view::{Click, View};
+
+/// Rows one wheel notch moves the selection, matching the sidebar's.
+const WHEEL_STEP: i32 = 3;
 
 /// The picker's model: rows, the fuzzy filter/scope, selection, the refresh gate, and the preview
 /// cache. Derives `Debug` so an event-script test can assert a model projection.
@@ -37,6 +43,12 @@ pub struct PickerModel {
     /// The last body width seen (from a Resize), which gates the preview pane; 0 until the shell's
     /// initial Resize lands, so nothing is captured before the first real frame.
     width: u16,
+    /// The last height seen (from a Resize). With `width` it is the frame the mouse hit-test and
+    /// the scroll window are measured against — the same frame the draw lays out.
+    height: u16,
+    /// Scroll offset + hover + click timing, in draw-line space (the picker never groups, so a
+    /// draw line is a visible row).
+    view: View,
     /// The refresh deadline and preview cache both surfaces share.
     common: Common,
 }
@@ -58,6 +70,8 @@ impl PickerModel {
             visible: Vec::new(),
             show_branch: false,
             width: 0,
+            height: 0,
+            view: View::default(),
             common: Common::new(now),
         };
         m.recompute(matcher);
@@ -71,13 +85,17 @@ impl PickerModel {
         }
         match ev {
             Event::Key(k) => self.on_key(k, matcher),
+            Event::Mouse(m) => self.on_mouse(m, now),
             // Width is model state: a popup narrower than the gate carries no preview, so crossing
-            // the gate either way drops what is cached before the capture decision below.
-            Event::Resize { width, .. } => {
+            // the gate either way drops what is cached before the capture decision below. Height
+            // rides along for the scroll window and the hit-test.
+            Event::Resize { width, height } => {
                 if preview_fits(width) != self.preview_visible() {
                     self.common.drop_preview();
                 }
                 self.width = width;
+                self.height = height;
+                self.sync_view();
                 self.selection_preview_effect()
             }
             Event::RowsRefreshed(rows) => {
@@ -142,6 +160,62 @@ impl PickerModel {
         }
     }
 
+    /// Fold one mouse report. The picker is modal and exists to pick one row, so a press selects
+    /// and a second press on that row is the jump — the mouse spelling of "highlight, then Enter",
+    /// deliberately two clicks so a stray one cannot teleport the client. Hover only highlights.
+    fn on_mouse(&mut self, m: Mouse, now: u64) -> Vec<Effect> {
+        let line = self.line_at(m.col, m.row);
+        match m.kind {
+            MouseKind::Moved => {
+                self.view.set_hover(line);
+                vec![]
+            }
+            MouseKind::Down => {
+                let Some(row) = line else {
+                    return vec![]; // the border, the preview, the query line
+                };
+                let click = self.view.click(row, now);
+                self.sel.index = row;
+                self.sync_view();
+                match click {
+                    Click::Double => self.focus_batch(),
+                    Click::Single => self.selection_preview_effect(),
+                }
+            }
+            MouseKind::ScrollUp => {
+                self.step(-WHEEL_STEP);
+                self.selection_preview_effect()
+            }
+            MouseKind::ScrollDown => {
+                self.step(WHEEL_STEP);
+                self.selection_preview_effect()
+            }
+        }
+    }
+
+    /// The visible-row index under a point, `None` outside the list (or past its last row).
+    fn line_at(&self, col: u16, row: u16) -> Option<usize> {
+        picker_geom(self.area(), self.preview_visible())
+            .list
+            .index_at(self.view.scroll(), col, row)
+            .filter(|&l| l < self.visible.len())
+    }
+
+    /// Move the selection without wrapping (the wheel's semantics; the arrow keys still wrap).
+    fn step(&mut self, delta: i32) {
+        self.sel.step(self.visible.len(), delta);
+        self.sync_view();
+    }
+
+    /// Re-derive the scroll window from the current selection, row count, and viewport, so the
+    /// highlight is always on screen and the hit-test always reads the window the draw painted.
+    fn sync_view(&mut self) {
+        let viewport = picker_geom(self.area(), self.preview_visible())
+            .list
+            .viewport();
+        self.view.sync(self.visible.len(), viewport, self.sel.index);
+    }
+
     /// The Enter/quick-select jump batch: focus the highlighted agent, clear its attention, quit.
     /// `Quit` is present, so the shell defers the whole batch until the terminal is restored.
     fn focus_batch(&self) -> Vec<Effect> {
@@ -185,6 +259,7 @@ impl PickerModel {
         let scope = self.scoped.then_some(self.current_session.as_str());
         self.visible = compute_visible(&self.all, &self.query, scope, matcher);
         self.sel.clamp(self.visible.len());
+        self.sync_view();
         // The branch column keys off the visible rows (not `all`), so recompute it here, wherever
         // scope + fuzzy filter change `visible`.
         self.show_branch = self
@@ -200,6 +275,7 @@ impl PickerModel {
 
     fn move_by(&mut self, delta: i32) {
         self.sel.move_by(self.visible.len(), delta);
+        self.sync_view();
     }
 
     /// Digit quick-select on the default (unfiltered) list: `1`-`9` select rows one through nine,
@@ -251,6 +327,29 @@ impl PickerModel {
     /// the body iff this holds, matching the fold's capture gate.
     pub fn preview_visible(&self) -> bool {
         preview_fits(self.width)
+    }
+
+    /// The frame the fold last saw (from `Resize`) — what the draw lays out and the mouse hit-test
+    /// measures against.
+    pub fn area(&self) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: self.height,
+        }
+    }
+
+    /// The first visible row: handed to the list widget so the window the draw paints is the window
+    /// the hit-test assumed.
+    pub fn scroll(&self) -> usize {
+        self.view.scroll()
+    }
+
+    /// The row the pointer is over, `None` when it is elsewhere. Drawn dimmer than the selection:
+    /// it says what a click would take, not what is current.
+    pub fn hover(&self) -> Option<usize> {
+        self.view.hover()
     }
 
     /// The cached preview text for the highlighted pane (empty until a capture lands).
@@ -353,9 +452,91 @@ mod tests {
         p
     }
 
-    /// The shell's Resize at `width` (height is unused by the picker).
+    /// The shell's Resize at `width`; the height sizes the popup's scroll window.
     fn resize(width: u16) -> Event {
         Event::Resize { width, height: 40 }
+    }
+
+    /// A mouse event at a point, folded like the runner would.
+    fn mouse(
+        p: &mut PickerModel,
+        kind: MouseKind,
+        col: u16,
+        row: u16,
+        now: u64,
+        m: &mut Matcher,
+    ) -> Vec<Effect> {
+        p.update(Event::Mouse(Mouse { kind, col, row }), now, m)
+    }
+
+    #[test]
+    fn a_click_selects_and_a_second_one_jumps_and_closes() {
+        let mut mtch = matcher();
+        let rows = vec![
+            row("s", 0, 0, "alpha", AgentState::Blocked, 10),
+            row("s", 0, 1, "bravo", AgentState::Working, 10),
+            row("s", 0, 2, "charlie", AgentState::Idle, 10),
+        ];
+        let mut p = model(rows, "s", &mut mtch);
+        // Screen row 2 is the second list row (row 0 is the popup's top border).
+        mouse(&mut p, MouseKind::Down, 4, 2, 1_000, &mut mtch);
+        assert_eq!(p.selected_row().unwrap().agent, "bravo");
+        // A press elsewhere in the popup (the preview half) leaves the selection alone.
+        mouse(&mut p, MouseKind::Down, 80, 2, 1_100, &mut mtch);
+        assert_eq!(p.selected_row().unwrap().agent, "bravo");
+
+        let fx = mouse(&mut p, MouseKind::Down, 4, 2, 1_300, &mut mtch);
+        assert!(
+            matches!(
+                fx.as_slice(),
+                [Effect::Focus(r), Effect::ClearAttention { .. }, Effect::Quit]
+                    if r.agent == "bravo"
+            ),
+            "the picker is modal: its double-click jumps and closes, got {fx:?}"
+        );
+    }
+
+    #[test]
+    fn hover_highlights_without_selecting_and_the_wheel_moves_the_selection() {
+        let mut mtch = matcher();
+        let rows = (0..5)
+            .map(|p| row("s", 0, p, "claude", AgentState::Working, 10 + p as u64))
+            .collect();
+        let mut p = model(rows, "s", &mut mtch);
+
+        mouse(&mut p, MouseKind::Moved, 4, 3, 0, &mut mtch);
+        assert_eq!(p.hover(), Some(2));
+        assert_eq!(p.selected_index(), 0, "hover never moves the selection");
+        mouse(&mut p, MouseKind::Moved, 4, 0, 0, &mut mtch);
+        assert_eq!(p.hover(), None, "the border is not a row");
+
+        mouse(&mut p, MouseKind::ScrollDown, 4, 3, 0, &mut mtch);
+        assert_eq!(p.selected_index(), 3);
+        mouse(&mut p, MouseKind::ScrollDown, 4, 3, 0, &mut mtch);
+        assert_eq!(p.selected_index(), 4, "the last row holds — no wrap");
+    }
+
+    /// The fuzzy filter shortens the list under the pointer; a hover left pointing past the end is
+    /// stale, and a click there must not select a row that is no longer drawn.
+    #[test]
+    fn a_filter_that_shortens_the_list_drops_a_stale_hover() {
+        let mut mtch = matcher();
+        let rows = vec![
+            row("s", 0, 0, "alpha", AgentState::Blocked, 10),
+            row("s", 0, 1, "bravo", AgentState::Working, 10),
+            row("s", 0, 2, "charlie", AgentState::Idle, 10),
+        ];
+        let mut p = model(rows, "s", &mut mtch);
+        mouse(&mut p, MouseKind::Moved, 4, 3, 0, &mut mtch);
+        assert_eq!(p.hover(), Some(2));
+        // "alpha" leaves one visible row.
+        for c in "alpha".chars() {
+            p.update(Event::Key(Key::Char(c)), 0, &mut mtch);
+        }
+        assert_eq!(p.visible_count(), 1);
+        assert_eq!(p.hover(), None, "the hovered row is gone");
+        mouse(&mut p, MouseKind::Down, 4, 3, 1_000, &mut mtch);
+        assert_eq!(p.selected_index(), 0, "the empty space selects nothing");
     }
 
     // --- ports of the existing selection/filter unit tests --------------------------------------

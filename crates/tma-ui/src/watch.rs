@@ -16,7 +16,6 @@ use std::io;
 use std::path::PathBuf;
 use std::process;
 
-use ratatui::layout::{Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
@@ -26,6 +25,7 @@ use tma_runtime::config;
 use tma_runtime::cycle;
 use tma_runtime::manifests::LoadedManifest;
 use tma_runtime::{nudge, Server, Tmux};
+use tma_ui_core::layout::{watch_geom, WatchGeom};
 use tma_ui_core::render::{branch_span, fmt_since, row_style, truncate};
 use tma_ui_core::watch::{
     table_header, table_row, table_title_width, DisplayItem, WatchLayout, WidePref,
@@ -110,8 +110,17 @@ impl Surface for WatchModel {
 /// clip) with (for the wide arm) a live preview beside it; the table arm reclaims the preview's width
 /// for the full-width status columns.
 fn draw(f: &mut Frame, model: &WatchModel, now: u64, palette: &RowPalette) {
-    let (body_area, footer_area) = dash::body_and_footer(f.area());
     let layout = model.layout();
+    // The geometry comes from the core, which is also what the fold hit-tests a click against: the
+    // click must resolve to the row the draw painted under the pointer, so there is one split.
+    let geom = watch_geom(f.area(), layout);
+    let footer_area = geom.footer;
+    let sel = dash::ListSelection {
+        selected: model.draw_selection(),
+        hovered: model.hover(),
+        scroll: model.scroll(),
+        count: model.row_count(),
+    };
 
     match layout {
         // The narrow MVP stays a FLAT labeled list: header lines would spend scarce vertical rows.
@@ -121,33 +130,12 @@ fn draw(f: &mut Frame, model: &WatchModel, now: u64, palette: &RowPalette) {
                 .rows()
                 .map(|r| compact_row(r, now, palette, show_branch))
                 .collect();
-            dash::render_agent_list(
-                f,
-                body_area,
-                items,
-                model.selected_index(),
-                model.row_count(),
-            );
+            dash::render_agent_list(f, geom.list.rect, items, &sel);
         }
         WatchLayout::ListAndPreview => {
-            // Fixed list width + preview remainder: the row is designed for ~32 columns, so a
-            // fixed `Length(34)` holds it steady while the preview takes whatever the terminal
-            // adds. The picker's 55/45 percentages fit its wider default popup, but here they would
-            // shrink the list below its design width on a merely-wide terminal and stretch it
-            // uselessly on a very wide one.
-            let cols = Layout::default()
-                .direction(Direction::Horizontal)
-                .constraints([Constraint::Length(34), Constraint::Min(0)])
-                .split(body_area);
             let show_branch = model.show_branch();
             let items = display_list(model, |r| compact_row(r, now, palette, show_branch));
-            dash::render_agent_list(
-                f,
-                cols[0],
-                items,
-                model.display_selection(),
-                model.row_count(),
-            );
+            dash::render_agent_list(f, geom.list.rect, items, &sel);
 
             // Preview title mirrors the picker's (`picker.rs`): highlighted locator, `" preview "`
             // fallback when the list is empty.
@@ -157,9 +145,11 @@ fn draw(f: &mut Frame, model: &WatchModel, now: u64, palette: &RowPalette) {
                 .unwrap_or_else(|| " preview ".to_string());
             let preview_widget = Paragraph::new(model.preview_text().clone())
                 .block(Block::default().borders(Borders::ALL).title(preview_title));
-            f.render_widget(preview_widget, cols[1]);
+            if let Some(area) = geom.preview {
+                f.render_widget(preview_widget, area);
+            }
         }
-        WatchLayout::Table => draw_table(f, body_area, model, now, palette),
+        WatchLayout::Table => draw_table(f, &geom, model, now, palette, &sel),
     }
 
     // The `p` hint reflects what the toggle would do from the current wide body; below the width
@@ -230,38 +220,42 @@ fn display_list(
 /// as a borderless list with the shared REVERSED highlight (so selection and Enter-jump carry over
 /// from the list arms). The model column appears only when a visible row carries `@agent_model`; the
 /// pure column/header builders live in [`tma_ui_core::watch`].
-fn draw_table(f: &mut Frame, area: Rect, model: &WatchModel, now: u64, palette: &RowPalette) {
+fn draw_table(
+    f: &mut Frame,
+    geom: &WatchGeom,
+    model: &WatchModel,
+    now: u64,
+    palette: &RowPalette,
+    sel: &dash::ListSelection,
+) {
     let show_model = model.show_model();
     let show_branch = model.show_branch();
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([Constraint::Length(1), Constraint::Min(0)])
-        .split(area);
+    if let Some(area) = geom.table_header {
+        f.render_widget(Paragraph::new(table_header(show_model, show_branch)), area);
+    }
 
-    f.render_widget(
-        Paragraph::new(table_header(show_model, show_branch)),
-        chunks[0],
-    );
-
-    let title_w = table_title_width(chunks[1].width, show_model, show_branch);
+    let rows_area = geom.list.rect;
+    let title_w = table_title_width(rows_area.width, show_model, show_branch);
     // The `▸ repo` headers are draw-only, so Enter-jump still reads the model's flat selection.
     let items = display_list(model, |r| {
         ListItem::new(table_row(palette, r, now, show_model, show_branch, title_w))
     });
     let mut list_state = ListState::default();
-    if model.row_count() > 0 {
-        list_state.select(Some(model.display_selection()));
+    if sel.count > 0 {
+        list_state.select(Some(sel.selected));
     }
-    let list = List::new(items).highlight_style(Style::default().add_modifier(Modifier::REVERSED));
-    f.render_stateful_widget(list, chunks[1], &mut list_state);
+    *list_state.offset_mut() = sel.scroll;
+    let list = List::new(dash::with_hover(items, sel.hovered))
+        .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
+    f.render_stateful_widget(list, rows_area, &mut list_state);
 }
 
 #[cfg(test)]
 mod draw_tests {
     use super::*;
-    use crate::test_render::{lines, render, reversed_rows, row, with_repo};
+    use crate::test_render::{dim_rows, lines, render, reversed_rows, row, with_repo};
     use tma_core::AgentState;
-    use tma_ui_core::Key;
+    use tma_ui_core::{Key, Mouse, MouseKind};
 
     const NOW: u64 = 100_000;
     const SINCE: u64 = 95_000; // fmt_since(NOW, SINCE) == "5s"
@@ -442,6 +436,84 @@ mod draw_tests {
         assert!(
             ls.iter().any(|l| l.contains("5s")),
             "the fixed since renders deterministically as 5s: {ls:?}"
+        );
+    }
+
+    /// Hover paints the line the pointer is on, dim, while the selection keeps its own highlight —
+    /// and the draw puts them on exactly the screen rows the fold's hit-test named.
+    #[test]
+    fn watch_hover_marks_the_pointed_row_beside_the_selection() {
+        let mut m = WatchModel::new(three_rows(), WidePref::Preview, NOW);
+        m.update(
+            Event::Resize {
+                width: 32,
+                height: 10,
+            },
+            NOW,
+            &mut (),
+        );
+        assert_eq!(m.layout(), WatchLayout::ListOnly);
+        // Pointer on the third list row (screen row 3, the border being row 0).
+        m.update(
+            Event::Mouse(Mouse {
+                kind: MouseKind::Moved,
+                col: 4,
+                row: 3,
+            }),
+            NOW,
+            &mut (),
+        );
+        let palette = RowPalette::default();
+        let buf = render(32, 10, |f| draw(f, &m, NOW, &palette));
+        assert_eq!(dim_rows(&buf), vec![3], "the hovered row is dimmed");
+        assert!(
+            reversed_rows(&buf).contains(&1),
+            "the selection keeps its own highlight on the first row"
+        );
+    }
+
+    /// A list taller than its pane draws the fold's own window, so the row a click resolves to is
+    /// the row the user sees under the pointer.
+    #[test]
+    fn watch_draws_the_window_the_fold_scrolled_to() {
+        let rows: Vec<AgentRow> = (0..8)
+            .map(|i| {
+                let mut r = row("%r", "s", i, 0, AgentState::Working, SINCE);
+                r.agent = format!("agent{i}");
+                r.pane_id = format!("%{i}");
+                r
+            })
+            .collect();
+        let mut m = WatchModel::new(rows, WidePref::Preview, NOW);
+        // 32x6: one footer line, a bordered list with three visible rows.
+        m.update(
+            Event::Resize {
+                width: 32,
+                height: 6,
+            },
+            NOW,
+            &mut (),
+        );
+        for _ in 0..7 {
+            key(&mut m, Key::Down);
+        }
+        assert_eq!(m.selected_index(), 7);
+        assert_eq!(m.scroll(), 5, "the window followed the selection down");
+
+        let palette = RowPalette::default();
+        let buf = render(32, 6, |f| draw(f, &m, NOW, &palette));
+        let ls = lines(&buf);
+        assert!(
+            ls[1].contains("agent5"),
+            "the window starts at row 5: {ls:?}"
+        );
+        assert!(
+            ls[3].contains("agent7"),
+            "and ends at the selection: {ls:?}"
+        );
+        assert!(
+            !ls.iter().any(|l| l.contains("agent0")),
+            "the scrolled-past rows are not drawn: {ls:?}"
         );
     }
 

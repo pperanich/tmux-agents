@@ -40,6 +40,19 @@ pub(crate) fn reversed_rows(buf: &Buffer) -> Vec<usize> {
         .collect()
 }
 
+/// The row indices carrying at least one DIM cell: the hover highlight, which is deliberately the
+/// dim sibling of the selection's REVERSED (a hovered row carries both).
+pub(crate) fn dim_rows(buf: &Buffer) -> Vec<usize> {
+    (0..buf.area.height as usize)
+        .filter(|&y| {
+            (0..buf.area.width).any(|x| {
+                buf.cell((x, y as u16))
+                    .is_some_and(|c| c.modifier.contains(Modifier::DIM))
+            })
+        })
+        .collect()
+}
+
 /// A minimal agent row for the draw tests; callers mutate `agent`/`title`/`repo` as needed.
 pub(crate) fn row(
     pane: &str,

@@ -4,21 +4,24 @@
 //! Resize, so the threshold-cross cache drop is assertable without a terminal. `Res = ()`:
 //! `watch` needs no scratch resource. No terminal, no tmux handle; the fold performs no I/O.
 
+use ratatui::layout::Rect;
 use ratatui::style::{Color, Style};
 use ratatui::text::{Line, Span, Text};
 use tma_core::AgentRow;
 
 use crate::common::{preview_fits, Common};
 use crate::effect::Effect;
-use crate::event::Event;
-use crate::group::{display_index, group_rows, Group};
+use crate::event::{Event, Mouse, MouseKind};
+use crate::group::{display_index, display_len, group_rows, row_at_display, Group};
 use crate::key::Key;
+use crate::layout::watch_geom;
 use crate::palette::RowPalette;
 use crate::picker::sorted;
 use crate::render::{
     fmt_since, row_style, truncate, truncate_locator, AGENT_W, BRANCH_W, LOCATOR_W, TIME_W,
 };
 use crate::selection::Selection;
+use crate::view::{Click, View};
 
 /// Fixed table column widths (chars). Agent, locator, and time reuse the shared grid constants so
 /// the table lines up with the list surfaces; state, context, and model are the table-only extras.
@@ -27,6 +30,10 @@ use crate::selection::Selection;
 const STATE_W: usize = 20;
 const CONTEXT_W: usize = 4;
 const MODEL_W: usize = 14;
+
+/// Rows one wheel notch moves the selection. Three is the terminal convention for a wheel line
+/// scroll, and the selection moves with it so the highlight never leaves the window.
+const WHEEL_STEP: i32 = 3;
 
 /// A context gauge older than this (by `@agent_context_at`) renders grey: the reading is stale (a
 /// quiet pane re-stamps the gauge only when its token count changes), so the value may lag reality.
@@ -124,9 +131,14 @@ pub struct WatchModel {
     pref: WidePref,
     /// The last width seen (from a Resize); `last_layout` is derived from it plus `pref`.
     width: u16,
+    /// The last height seen (from a Resize). With `width` it is the frame the mouse hit-test and
+    /// the scroll window are computed against — the same frame the draw lays out.
+    height: u16,
     /// The layout the current `width`/`pref` derive; a change drops the preview cache.
     /// Invariant: `last_layout == watch_layout(width, pref)`, re-derived only by `relayout_and_preview`.
     last_layout: WatchLayout,
+    /// Scroll offset + hover + click timing, in draw-line space.
+    view: View,
     /// The refresh deadline and preview cache both surfaces share.
     common: Common,
 }
@@ -145,7 +157,9 @@ impl WatchModel {
             show_model: false,
             pref,
             width: 0,
+            height: 0,
             last_layout: watch_layout(0, pref),
+            view: View::default(),
             common: Common::new(now),
         };
         m.regroup();
@@ -160,10 +174,13 @@ impl WatchModel {
         }
         match ev {
             Event::Key(k) => self.on_key(k),
+            Event::Mouse(m) => self.on_mouse(m, now),
             // Width is model state: record it, then re-derive the layout through the shared
             // threshold-cross path (also the `p` toggle's path), which drops the cache on a change.
-            Event::Resize { width, .. } => {
+            // Height rides along for the scroll window and the hit-test.
+            Event::Resize { width, height } => {
                 self.width = width;
+                self.height = height;
                 self.relayout_and_preview()
             }
             Event::RowsRefreshed(rows) => {
@@ -231,6 +248,90 @@ impl WatchModel {
         }
     }
 
+    /// Fold one mouse report. Hover just moves a highlight (no effects, so a pointer crossing the
+    /// sidebar costs nothing but a redraw); a press selects the row it landed on, and a second
+    /// press on that same row jumps, the mouse spelling of "highlight, then Enter". The wheel moves
+    /// the selection rather than the window, so the highlight can never scroll out of sight.
+    fn on_mouse(&mut self, m: Mouse, now: u64) -> Vec<Effect> {
+        let line = self.line_at(m.col, m.row);
+        match m.kind {
+            MouseKind::Moved => {
+                // Only a *row* highlights: group headers and the empty space below the list are
+                // not selectable, so hovering them clears rather than highlights.
+                let hovered = line.filter(|&l| self.row_at_line(l).is_some());
+                self.view.set_hover(hovered);
+                vec![]
+            }
+            MouseKind::Down => {
+                let Some(row) = line.and_then(|l| self.row_at_line(l)) else {
+                    return vec![]; // a header, the border, the preview, the footer
+                };
+                let click = self.view.click(line.unwrap_or(row), now);
+                self.sel.index = row;
+                self.sync_view();
+                match click {
+                    // The sidebar is non-modal, so a jump keeps it open — exactly what Enter does.
+                    Click::Double => match self.selected_row() {
+                        Some(r) => vec![
+                            Effect::Focus(Box::new(r.clone())),
+                            Effect::ClearAttention {
+                                pane: r.pane_id.clone(),
+                            },
+                        ],
+                        None => vec![],
+                    },
+                    Click::Single => self.preview_effect(),
+                }
+            }
+            MouseKind::ScrollUp => {
+                self.step(-WHEEL_STEP);
+                self.preview_effect()
+            }
+            MouseKind::ScrollDown => {
+                self.step(WHEEL_STEP);
+                self.preview_effect()
+            }
+        }
+    }
+
+    /// The draw line under a point, `None` when the point is outside the list.
+    fn line_at(&self, col: u16, row: u16) -> Option<usize> {
+        watch_geom(self.area(), self.last_layout)
+            .list
+            .index_at(self.view.scroll(), col, row)
+            .filter(|&l| l < self.draw_len())
+    }
+
+    /// The row a draw line holds: itself in the flat narrow arm, the header-aware mapping in the
+    /// grouped wide arms, and `None` for a header line.
+    fn row_at_line(&self, line: usize) -> Option<usize> {
+        if self.uses_headers() {
+            row_at_display(&self.groups, self.rows.len(), line)
+        } else {
+            (line < self.rows.len()).then_some(line)
+        }
+    }
+
+    /// Whether the current arm interleaves `▸ repo` header lines. The narrow arm never does — it
+    /// draws the flat rows — so its draw space is the row space.
+    fn uses_headers(&self) -> bool {
+        self.last_layout != WatchLayout::ListOnly && !self.groups.is_empty()
+    }
+
+    /// Move the selection without wrapping (the wheel's semantics; `j`/`k` still wrap).
+    fn step(&mut self, delta: i32) {
+        self.sel.step(self.rows.len(), delta);
+        self.sync_view();
+    }
+
+    /// Re-derive the scroll window from the current selection, list length, and viewport. Every
+    /// selection or layout change runs through here so the highlight is always on screen.
+    fn sync_view(&mut self) {
+        let viewport = watch_geom(self.area(), self.last_layout).list.viewport();
+        self.view
+            .sync(self.draw_len(), viewport, self.draw_selection());
+    }
+
     /// Re-derive the layout from `width`/`pref`; on a change drop the stale preview cache, then
     /// request a capture iff the new layout shows the preview. The single home of the threshold-cross
     /// cache-drop, shared by Resize and the `p` toggle.
@@ -240,6 +341,9 @@ impl WatchModel {
             self.last_layout = layout;
             self.common.drop_preview();
         }
+        // The arm and the frame both decide the scroll window, so re-derive it here too: a resize
+        // or a `p` toggle can leave the highlight outside a window sized for the old one.
+        self.sync_view();
         self.preview_effect()
     }
 
@@ -261,6 +365,7 @@ impl WatchModel {
         self.recompute_columns();
         let ids: Vec<&str> = self.rows.iter().map(|r| r.pane_id.as_str()).collect();
         self.sel.reanchor(&ids, anchor.as_deref());
+        self.sync_view();
     }
 
     /// Recompute the `show_branch`/`show_model` column caches from the current row set. Both predicates
@@ -285,6 +390,7 @@ impl WatchModel {
         self.regroup();
         let ids: Vec<&str> = self.rows.iter().map(|r| r.pane_id.as_str()).collect();
         self.sel.reanchor(&ids, anchor.as_deref());
+        self.sync_view();
     }
 
     /// When grouped, reorder the (already state-sorted) `rows` into grouped display order: groups by
@@ -321,6 +427,7 @@ impl WatchModel {
 
     fn move_by(&mut self, delta: i32) {
         self.sel.move_by(self.rows.len(), delta);
+        self.sync_view();
     }
 
     // --- draw accessors -------------------------------------------------------------------------
@@ -360,6 +467,48 @@ impl WatchModel {
         self.sel.index
     }
 
+    /// The frame the fold last saw (from `Resize`) — what the draw lays out and the mouse hit-test
+    /// measures against.
+    pub fn area(&self) -> Rect {
+        Rect {
+            x: 0,
+            y: 0,
+            width: self.width,
+            height: self.height,
+        }
+    }
+
+    /// The first visible draw line: handed to the list widget so the window the draw paints is the
+    /// window the hit-test assumed.
+    pub fn scroll(&self) -> usize {
+        self.view.scroll()
+    }
+
+    /// The draw line the pointer is over, `None` when it is elsewhere. Rendered dimmer than the
+    /// selection: it says "this is what a click would take", not "this is current".
+    pub fn hover(&self) -> Option<usize> {
+        self.view.hover()
+    }
+
+    /// The highlighted line in the current arm's draw space: the flat row index in the narrow arm,
+    /// the header-shifted index in the grouped wide arms.
+    pub fn draw_selection(&self) -> usize {
+        if self.uses_headers() {
+            display_index(&self.groups, self.sel.index)
+        } else {
+            self.sel.index
+        }
+    }
+
+    /// How many lines the current arm draws (rows, plus a header per group where they show).
+    pub fn draw_len(&self) -> usize {
+        if self.uses_headers() {
+            display_len(&self.groups, self.rows.len())
+        } else {
+            self.rows.len()
+        }
+    }
+
     /// The wide arms' display order: when grouped, a header above each group's rows; when flat, the
     /// rows alone. Yields borrowed rows, so the draw never indexes across `rows` and `groups`.
     pub fn display_items(&self) -> impl Iterator<Item = DisplayItem<'_>> {
@@ -371,12 +520,6 @@ impl WatchModel {
                 std::iter::once(DisplayItem::Header(&g.name))
                     .chain(g.members.iter().map(|&i| DisplayItem::Row(&self.rows[i])))
             }))
-    }
-
-    /// The highlighted row's index among [`display_items`](Self::display_items): the flat index
-    /// shifted past every header rendered at or before it.
-    pub fn display_selection(&self) -> usize {
-        display_index(&self.groups, self.sel.index)
     }
 
     /// The cached preview text for the highlighted pane (empty until a capture lands).
@@ -576,6 +719,151 @@ mod tests {
             row("a", 0, 0, AgentState::Blocked, 10),
             row("a", 0, 1, AgentState::Working, 10),
         ]
+    }
+
+    // --- mouse --------------------------------------------------------------------------------
+
+    /// Six rows, so the list outgrows a short frame and the scroll window matters.
+    fn six_rows() -> Vec<AgentRow> {
+        (0..6)
+            .map(|p| row("a", 0, p, AgentState::Working, 10 + p as u64))
+            .collect()
+    }
+
+    /// A mouse event at a point, folded like the runner would.
+    fn mouse(m: &mut WatchModel, kind: MouseKind, col: u16, row: u16, now: u64) -> Vec<Effect> {
+        m.update(Event::Mouse(Mouse { kind, col, row }), now, &mut ())
+    }
+
+    /// The narrow sidebar at 32x10: a bordered list whose first row is screen row 1.
+    fn narrow(rows: Vec<AgentRow>) -> WatchModel {
+        let mut m = WatchModel::new(rows, WidePref::Preview, 0);
+        m.update(
+            Event::Resize {
+                width: 32,
+                height: 10,
+            },
+            0,
+            &mut (),
+        );
+        m
+    }
+
+    #[test]
+    fn a_click_selects_the_row_under_the_pointer() {
+        let mut m = narrow(six_rows());
+        assert_eq!(m.selected_index(), 0);
+        // Screen row 3 is the third list row (row 0 is the border).
+        let fx = mouse(&mut m, MouseKind::Down, 5, 3, 1_000);
+        assert_eq!(m.selected_index(), 2);
+        assert!(fx.is_empty(), "the narrow arm captures no preview: {fx:?}");
+        // The border, and the empty space past the last row, select nothing.
+        mouse(&mut m, MouseKind::Down, 5, 0, 2_000);
+        assert_eq!(m.selected_index(), 2, "the top border is not a row");
+        mouse(&mut m, MouseKind::Down, 5, 8, 3_000);
+        assert_eq!(m.selected_index(), 2, "past the last row is not a row");
+    }
+
+    #[test]
+    fn a_second_click_on_the_selected_row_jumps_without_closing() {
+        let mut m = narrow(six_rows());
+        mouse(&mut m, MouseKind::Down, 5, 2, 1_000);
+        let pane = m.selected_row().unwrap().pane_id.clone();
+        let fx = mouse(&mut m, MouseKind::Down, 5, 2, 1_200);
+        assert!(
+            matches!(
+                fx.as_slice(),
+                [Effect::Focus(r), Effect::ClearAttention { pane: p }]
+                    if r.pane_id == pane && *p == pane
+            ),
+            "the double-click jumps like Enter, got {fx:?}"
+        );
+        assert!(
+            !fx.iter().any(|e| matches!(e, Effect::Quit)),
+            "the sidebar is non-modal: a jump leaves it open"
+        );
+    }
+
+    #[test]
+    fn hover_tracks_rows_and_clears_off_them() {
+        let mut m = narrow(six_rows());
+        assert_eq!(m.hover(), None, "nothing hovered before the pointer moves");
+        mouse(&mut m, MouseKind::Moved, 5, 2, 0);
+        assert_eq!(m.hover(), Some(1));
+        mouse(&mut m, MouseKind::Moved, 5, 9, 0);
+        assert_eq!(m.hover(), None, "the footer is not a row");
+        // Hover never selects: that is what a click is for.
+        assert_eq!(m.selected_index(), 0);
+    }
+
+    #[test]
+    fn the_wheel_moves_the_selection_and_stops_at_the_ends() {
+        let mut m = narrow(six_rows());
+        mouse(&mut m, MouseKind::ScrollDown, 5, 3, 0);
+        assert_eq!(m.selected_index(), 3, "one notch is three rows");
+        mouse(&mut m, MouseKind::ScrollDown, 5, 3, 0);
+        assert_eq!(m.selected_index(), 5, "the last row holds — no wrap");
+        mouse(&mut m, MouseKind::ScrollUp, 5, 3, 0);
+        assert_eq!(m.selected_index(), 2);
+        mouse(&mut m, MouseKind::ScrollUp, 5, 3, 0);
+        mouse(&mut m, MouseKind::ScrollUp, 5, 3, 0);
+        assert_eq!(m.selected_index(), 0, "and so does the first");
+    }
+
+    /// The scroll window is the fold's, so a click after scrolling resolves through the same offset
+    /// the draw painted with — the bug this test exists to prevent is an off-by-`scroll` selection.
+    #[test]
+    fn a_click_after_scrolling_reads_through_the_same_offset() {
+        // 32x7: one footer line, then a bordered list whose interior is four rows, over six rows.
+        let mut m = WatchModel::new(six_rows(), WidePref::Preview, 0);
+        m.update(
+            Event::Resize {
+                width: 32,
+                height: 7,
+            },
+            0,
+            &mut (),
+        );
+        assert_eq!(m.scroll(), 0);
+        mouse(&mut m, MouseKind::ScrollDown, 5, 2, 0);
+        assert_eq!(m.selected_index(), 3);
+        assert_eq!(m.scroll(), 0, "row 3 is the last one already visible");
+        mouse(&mut m, MouseKind::ScrollDown, 5, 2, 0);
+        assert_eq!(
+            (m.selected_index(), m.scroll()),
+            (5, 2),
+            "the window follows the selection to the end of the list"
+        );
+        // Screen row 1 is now the third row of the list, because the window starts at index 2.
+        mouse(&mut m, MouseKind::Down, 5, 1, 1_000);
+        assert_eq!(m.selected_index(), 2);
+    }
+
+    #[test]
+    fn a_click_on_a_group_header_selects_nothing() {
+        let mut m = WatchModel::new(grouped_fixture(), WidePref::Table, 0);
+        m.update(
+            Event::Resize {
+                width: 120,
+                height: 20,
+            },
+            0,
+            &mut (),
+        );
+        // The table arm is borderless under a one-line column header: draw line 0 is screen row 1,
+        // and it is the `▸ app` group header.
+        mouse(&mut m, MouseKind::Down, 5, 1, 1_000);
+        assert_eq!(m.selected_index(), 0, "a header click changes nothing");
+        assert_eq!(m.hover(), None);
+        mouse(&mut m, MouseKind::Moved, 5, 1, 1_000);
+        assert_eq!(m.hover(), None, "and it does not highlight either");
+        // The line under it is the group's first row.
+        mouse(&mut m, MouseKind::Down, 5, 2, 2_000);
+        assert_eq!(m.selected_row().unwrap().pane_id, "%00");
+        // Two headers and two app rows precede the lib row: draw line 4, screen row 5.
+        mouse(&mut m, MouseKind::Down, 5, 5, 3_000);
+        assert_eq!(m.selected_row().unwrap().pane_id, "%01");
+        assert_eq!(m.draw_selection(), 4);
     }
 
     // --- new update coverage (width as model state) ---------------------------------------------
@@ -957,12 +1245,21 @@ mod tests {
     }
 
     #[test]
-    fn display_selection_skips_headers_but_jump_still_targets_the_pane() {
+    fn draw_selection_skips_headers_but_jump_still_targets_the_pane() {
         let mut m = WatchModel::new(grouped_fixture(), WidePref::Table, 0);
+        // Wide enough for the table arm, which is the arm that draws the headers.
+        m.update(
+            Event::Resize {
+                width: 120,
+                height: 20,
+            },
+            0,
+            &mut (),
+        );
         // Grouped rows [%00, %02, %01]; groups app(0,1), lib(2). Select the lib row.
         m.sel.index = 2;
         // Two headers precede it (app's and lib's): draw index 2 + 2 = 4.
-        assert_eq!(m.display_selection(), 4);
+        assert_eq!(m.draw_selection(), 4);
         // Enter reads selected_row() by the flat index — the lib pane, unaffected by the headers.
         let fx = m.update(Event::Key(Key::Enter), 0, &mut ());
         assert!(
@@ -1029,7 +1326,7 @@ mod tests {
         let m = WatchModel::new(vec![], WidePref::Table, 0);
         assert!(m.grouped());
         assert!(display_shape(&m).is_empty());
-        assert_eq!(m.display_selection(), 0);
+        assert_eq!(m.draw_selection(), 0);
     }
 
     #[test]

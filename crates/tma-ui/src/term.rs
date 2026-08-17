@@ -9,6 +9,7 @@
 
 use std::io;
 
+use crossterm::event::{DisableMouseCapture, EnableMouseCapture};
 use crossterm::execute;
 use crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
@@ -32,7 +33,11 @@ impl<'a> TerminalGuard<'a> {
         advertise_pid: Option<u32>,
     ) -> io::Result<TerminalGuard<'a>> {
         enable_raw_mode()?;
-        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen) {
+        // Mouse capture goes on with the alternate screen and comes off with it. It is what makes
+        // click/hover/wheel reach the fold at all; tmux scopes the grab to this pane (or popup),
+        // so every other pane keeps its native selection and copy-mode drag.
+        if let Err(e) = execute!(io::stdout(), EnterAlternateScreen, EnableMouseCapture) {
+            let _ = execute!(io::stdout(), DisableMouseCapture, LeaveAlternateScreen);
             let _ = disable_raw_mode();
             return Err(e);
         }
@@ -56,8 +61,10 @@ impl Drop for TerminalGuard<'_> {
             let _ = ui::unadvertise_watch_pid(self.tmux, pane);
         }
         // Best-effort full restore: every step runs regardless of the previous one's result, so a
-        // failure in one does not strand the terminal in raw mode or the alternate screen.
+        // failure in one does not strand the terminal in raw mode, the alternate screen, or (worse,
+        // because it outlives the process visibly) mouse-reporting mode.
         let _ = disable_raw_mode();
+        let _ = execute!(io::stdout(), DisableMouseCapture);
         let _ = execute!(io::stdout(), LeaveAlternateScreen);
         let _ = execute!(io::stdout(), crossterm::cursor::Show);
     }

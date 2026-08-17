@@ -69,6 +69,19 @@ the list, so jumping to where you already are is not offered.
 they are ordinary filter characters. The status line shows `a=act` exactly when
 the key would fire.
 
+The mouse works inside the popup too, with `set -g mouse on` (no `install-keys`
+needed — the surface asks the terminal for reports itself):
+
+| gesture | does |
+|---|---|
+| move the pointer over a row | Highlight it dimly: what a click would take. |
+| click a row | Select it, the same as moving the highlight there with `↑`/`↓`. |
+| click the selected row again | Jump to it and close, the same as `enter`. Two clicks, so a stray one cannot move your client. |
+| wheel up / down | Move the selection three rows, stopping at each end rather than wrapping. |
+
+A press anywhere else in the popup (the border, the preview half, the query line)
+does nothing.
+
 The live preview needs a popup at least 76 columns wide, the same threshold `tma
 watch` uses. Narrower than that, the list takes the whole popup and nothing is
 captured.
@@ -90,6 +103,16 @@ Below that the body is a single flat list and neither key changes what you see.
 Note that `a` targets the pane under the cursor, not the pane the sidebar lives
 in, which is what lets a screenful of blocked agents be answered from one place.
 See [Author a custom action](../how-to/custom-actions.md).
+
+The sidebar takes the same mouse gestures as the picker (hover to highlight,
+click to select, click again to jump — the sidebar stays open, exactly as `enter`
+does; wheel to move three rows). Group headers are not selectable, so hovering or
+clicking a `▸ repo` line does nothing.
+
+While `tma watch` is running, that pane's mouse belongs to tma: tmux's own
+drag-to-select and scroll-into-copy-mode do not apply inside it (hold `shift` for
+your terminal's native selection). Every other pane is untouched — tmux routes a
+mouse event by where the pointer is, and only the pane under it decides.
 
 ## Keys inside `tma jump --menu`
 

@@ -17,6 +17,16 @@ impl Selection {
         self.index = (((self.index as i32 + delta) % len + len) % len) as usize;
     }
 
+    /// Move the selection by `delta` without wrapping: the wheel's semantics, where running off
+    /// the end should stop at the end rather than teleport to the other one.
+    pub(crate) fn step(&mut self, len: usize, delta: i32) {
+        if len == 0 {
+            return;
+        }
+        let last = len as i32 - 1;
+        self.index = (self.index as i32 + delta).clamp(0, last) as usize;
+    }
+
     /// Keep the index inside `[0, len)` (an empty list pins it to 0).
     pub(crate) fn clamp(&mut self, len: usize) {
         if len == 0 {
@@ -50,6 +60,19 @@ mod tests {
         s.move_by(2, 1);
         assert_eq!(s.index, 0);
         s.move_by(0, 1);
+        assert_eq!(s.index, 0, "empty list is a no-op");
+    }
+
+    #[test]
+    fn step_clamps_at_both_ends_instead_of_wrapping() {
+        let mut s = Selection { index: 1 };
+        s.step(5, 3);
+        assert_eq!(s.index, 4);
+        s.step(5, 3);
+        assert_eq!(s.index, 4, "the end holds");
+        s.step(5, -9);
+        assert_eq!(s.index, 0, "and so does the top");
+        s.step(0, 1);
         assert_eq!(s.index, 0, "empty list is a no-op");
     }
 
