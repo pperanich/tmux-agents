@@ -36,6 +36,8 @@
             tmux
             mise
             mdbook
+            # Drafts the CHANGELOG entry from the commit log (`mise run changelog`).
+            git-cliff
           ];
         };
       });

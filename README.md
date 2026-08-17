@@ -146,6 +146,8 @@ mdBook site (`mdbook build` from the repo root renders `docs/` into `book/`):
 
 [CONTRIBUTING.md](CONTRIBUTING.md) has the toolchain, the `mise` tasks, the
 crate layout, and the architecture invariants a change has to hold.
+[CHANGELOG.md](CHANGELOG.md) records what each release changed, breaking
+changes first.
 
 ## License
 

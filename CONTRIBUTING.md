@@ -86,3 +86,19 @@ design history and is not part of the site.
 Commit messages follow [Conventional Commits](https://www.conventionalcommits.org/).
 Run `mise run lint` and `mise run test` before pushing. Contributions are dual licensed
 under Apache-2.0 and MIT, matching the project.
+
+## Releasing
+
+`CHANGELOG.md` is the source of the release notes: the release workflow reads the section for the
+tag and refuses to build a tag that has none, so nothing ships with an empty release page.
+
+1. `mise run changelog` prints a draft of everything since the last tag, grouped from the commit
+   subjects. It is a starting point — write the entry from it under `## [Unreleased]`, in terms of
+   what a user of tma sees. Machinery commits (`ci`, `chore`, `test`, `refactor`) are dropped from
+   the draft on purpose, and a breaking change earns its own entry saying what to re-run.
+2. `mise run release <version>` bumps the workspace version, stamps `[Unreleased]` into
+   `## [<version>] - <date>`, opens a fresh `[Unreleased]`, runs lint and test, then commits and
+   tags. It refuses to start when `[Unreleased]` is empty. Nothing is pushed.
+3. `git push --follow-tags` builds the tarballs and publishes the release.
+
+While the major version is 0, a breaking change bumps the minor.

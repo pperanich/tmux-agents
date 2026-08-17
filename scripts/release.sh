@@ -30,6 +30,31 @@ sed_i() {
 	sed "$script" "$file" >"$tmp" && mv "$tmp" "$file"
 }
 
+# Stamp CHANGELOG.md for a release: `## [Unreleased]` becomes `## [<new>] - <today>` with a fresh
+# empty `[Unreleased]` above it, and the link definitions at the foot gain a compare line for the new
+# tag. awk rather than sed: inserting a line needs `\n` in the replacement, which BSD sed rejects.
+stamp_changelog() {
+	new=$1
+	prev=$2
+	tmp=CHANGELOG.md.release.tmp
+	awk -v new="$new" -v prev="$prev" -v today="$(date +%Y-%m-%d)" '
+		/^## \[Unreleased\]$/ {
+			print "## [Unreleased]"
+			print ""
+			print "## [" new "] - " today
+			next
+		}
+		/^\[Unreleased\]: / {
+			base = $2; sub(/\/compare\/.*$/, "", base)
+			print "[Unreleased]: " base "/compare/v" new "...HEAD"
+			print "[" new "]: " base "/compare/v" prev "...v" new
+			next
+		}
+		{ print }
+	' CHANGELOG.md >"$tmp" && mv "$tmp" CHANGELOG.md
+	./scripts/changelog-section.sh "$new" >/dev/null || die 'the changelog stamp did not take'
+}
+
 # The `version = "…"` of [workspace.package], which is the one the whole workspace inherits.
 workspace_version() {
 	awk '/^\[workspace\.package\]/ { in_section = 1; next }
@@ -54,6 +79,11 @@ old=$(workspace_version)
 [ -n "$old" ] || die 'no version found under [workspace.package] in Cargo.toml'
 [ "$old" != "$version" ] || die "the workspace is already at $version"
 
+# Before touching anything: the release workflow refuses a tag whose CHANGELOG section is empty, so
+# find that out here rather than after the commit and tag are already made.
+./scripts/changelog-section.sh Unreleased >/dev/null ||
+	die 'CHANGELOG.md has nothing under [Unreleased]; write the entry first'
+
 say "release.sh: $old -> $version"
 sed_i "/^\[workspace\.package\]/,/^\[/ s/^version = \"$old\"\$/version = \"$version\"/" Cargo.toml
 [ "$(workspace_version)" = "$version" ] || die 'the Cargo.toml bump did not take'
@@ -63,6 +93,8 @@ sed_i "/^\[workspace\.package\]/,/^\[/ s/^version = \"$old\"\$/version = \"$vers
 for doc in docs/tutorial/getting-started.md docs/how-to/install-tma.md; do
 	sed_i "s/^tma $old\$/tma $version/; s/TMA_VERSION=v$old/TMA_VERSION=v$version/" "$doc"
 done
+
+stamp_changelog "$version" "$old"
 
 # Rewrites Cargo.lock's workspace entries without building anything.
 cargo metadata --format-version 1 --no-deps >/dev/null
@@ -74,7 +106,7 @@ else
 	mise run test
 fi
 
-git add Cargo.toml Cargo.lock docs
+git add Cargo.toml Cargo.lock docs CHANGELOG.md
 git commit -m "chore(release): v$version"
 git tag -a "v$version" -m "v$version"
 
