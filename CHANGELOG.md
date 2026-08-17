@@ -12,6 +12,12 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Added
 
+- `tma install-hooks --all` acts on every agent that already carries tma wiring, so one command
+  repoints them all after an `[install] wrapper_ref` change or a moved binary, and
+  `--all --uninstall` unwires every one. It is deliberately not "every agent tma supports": it only
+  rewrites configs that already hold tma's wiring, so it cannot create a `~/.gemini/settings.json`
+  for an agent you have never run. That also makes it broader than a `tma init` re-run, which wires
+  only the agents whose launcher it finds on `$PATH`.
 - `tma completions <shell>` writes a completion script for bash, zsh, fish, elvish, or powershell to
   stdout. It is generated from tma's own argument tree, so it covers every subcommand and flag and
   cannot go stale — worth something on a CLI where `install-hooks` alone carries sixteen. Fixed
@@ -27,6 +33,17 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   gets told about the one `fpath` line its per-user directory needs), and the nix package installs
   them itself. `cargo install` still places a binary and nothing else.
 
+### Fixed
+
+- Re-installing after the wrapper path changes now repoints the existing hook entry instead of
+  adding a second one beside it. Install, uninstall and `--check` all matched an entry by the exact
+  command the running build would write, so wiring installed from another path (a moved binary, a
+  `cargo install` over a `~/.local/bin` copy, a `wrapper_ref` switch) was invisible to all three:
+  install left the stale entry in place and every event fired twice, uninstall walked past it, and
+  `--check` reported a wholly-stale config as simply not installed. An entry is now recognised as
+  tma's by its shape (`tma-hook <agent> <event>`, any path), and `--check` reports a stale one as
+  stale. Claude, Gemini, Cursor and Codex's `hooks.json`; Codex's `notify` already matched this way.
+
 ## [0.3.1] - 2026-08-17
 
 ### Added
@@ -41,23 +58,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   `tma doctor` now reports the reference and whether `$PATH` still answers it (`wrapper: tma-hook ✓
   on $PATH (…)`, plus a `"reference"` key in `--json`). The default is unchanged.
 
-- `tma install-hooks --all` acts on every agent that already carries tma wiring, so one command
-  repoints them all after an `[install] wrapper_ref` change or a moved binary, and
-  `--all --uninstall` unwires every one. It is deliberately not "every agent tma supports": it only
-  rewrites configs that already hold tma's wiring, so it cannot create a `~/.gemini/settings.json`
-  for an agent you have never run. That also makes it broader than a `tma init` re-run, which wires
-  only the agents whose launcher it finds on `$PATH`.
-
 ### Fixed
 
-- Re-installing after the wrapper path changes now repoints the existing hook entry instead of
-  adding a second one beside it. Install, uninstall and `--check` all matched an entry by the exact
-  command the running build would write, so wiring installed from another path (a moved binary, a
-  `cargo install` over a `~/.local/bin` copy, a `wrapper_ref` switch) was invisible to all three:
-  install left the stale entry in place and every event fired twice, uninstall walked past it, and
-  `--check` reported a wholly-stale config as simply not installed. An entry is now recognised as
-  tma's by its shape (`tma-hook <agent> <event>`, any path), and `--check` reports a stale one as
-  stale. Claude, Gemini, Cursor and Codex's `hooks.json`; Codex's `notify` already matched this way.
 - `hooks_state_is_keyed_per_server` no longer fails for anyone who has tma wired for real: its
   `--check` inspects every bundled agent, but only Claude's and Codex's paths were pinned to the
   test's scratch dir, so the developer's own `~/.gemini`, `~/.cursor`, `~/.pi` and OpenCode configs
