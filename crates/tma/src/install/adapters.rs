@@ -1,8 +1,8 @@
 use std::path::Path;
 
 use super::claude_json::{
-    cursor_entry_has_command, edit_hooks_install, edit_hooks_uninstall, edit_settings_install,
-    edit_settings_uninstall, entry_has_command, wrapper_command, CURSOR_SHAPE,
+    edit_hooks_install, edit_hooks_uninstall, edit_settings_install, edit_settings_uninstall,
+    flat_commands, is_wrapper_command, nested_commands, wrapper_command, CURSOR_SHAPE,
 };
 use super::codex_toml::{
     codex_hooks_events, codex_notify_is_ours, codex_notify_ok, edit_codex_install,
@@ -42,13 +42,10 @@ pub(super) trait AgentAdapter {
 
     /// Undo the agent-config wiring, symmetric to [`AgentAdapter::install`]. `true` on success
     /// or an already-absent no-op; `false` (after printing the reason) aborts the uninstall.
-    fn uninstall(
-        &self,
-        lm: &LoadedManifest,
-        paths: &ConfigPaths,
-        wrapper: &Path,
-        assume_yes: bool,
-    ) -> bool;
+    ///
+    /// Takes no wrapper path, unlike `install`: what makes wiring tma's is its shape, so uninstall
+    /// removes every entry of ours rather than only the one this build would have written.
+    fn uninstall(&self, lm: &LoadedManifest, paths: &ConfigPaths, assume_yes: bool) -> bool;
 
     /// Classify this agent's config wiring read-only (the per-agent half of `--check`/`doctor`).
     /// Each adapter parses its own config file, so no pre-parsed root is threaded in.
@@ -103,21 +100,41 @@ fn events_wired(
     agent: &str,
     events: &[String],
     wrapper: &Path,
-    entry_is_ours: fn(&Value, &str) -> bool,
-) -> Vec<bool> {
+    entry_commands: fn(&Value) -> Vec<String>,
+) -> Vec<EventWiring> {
     events
         .iter()
         .map(|event| {
             let cmd = wrapper_command(wrapper, agent, event);
-            root.get("hooks")
+            let commands: Vec<String> = root
+                .get("hooks")
                 .and_then(|h| h.get(event))
                 .and_then(|arr| match arr {
                     Value::Arr(a) => Some(a),
                     _ => None,
                 })
-                .is_some_and(|a| a.iter().any(|e| entry_is_ours(e, &cmd)))
+                .map(|a| a.iter().flat_map(entry_commands).collect())
+                .unwrap_or_default();
+            if commands.contains(&cmd) {
+                EventWiring::Current
+            } else if commands.iter().any(|c| is_wrapper_command(c, agent, event)) {
+                EventWiring::Stale
+            } else {
+                EventWiring::Absent
+            }
         })
         .collect()
+}
+
+/// One declared event's wiring state. `Stale` is the distinction that matters: an entry that is
+/// tma's but names a different wrapper is wiring that exists and is wrong, which reads very
+/// differently from wiring that was never installed — and, collapsed into `Absent`, made a wholly
+/// repointed config report as simply not installed.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum EventWiring {
+    Current,
+    Stale,
+    Absent,
 }
 
 /// One channel of an agent's wiring (its hook events, a statusline shim, codex's `notify` key):
@@ -151,7 +168,7 @@ fn classify_channels(channels: &[Channel]) -> HookWiring {
 ///
 /// Zero declared events is drift, never a pass: `iter().all()` is vacuously true on both the wired
 /// and the unwired branch, so an empty set would otherwise classify as fully wired.
-fn hook_channel(agent: &str, events: &[String], wired: &[bool]) -> Channel {
+fn hook_channel(agent: &str, events: &[String], wired: &[EventWiring]) -> Channel {
     if events.is_empty() {
         return Channel {
             present: true,
@@ -162,8 +179,8 @@ fn hook_channel(agent: &str, events: &[String], wired: &[bool]) -> Channel {
         };
     }
     Channel {
-        present: wired.iter().any(|w| *w),
-        current: wired.iter().all(|w| *w),
+        present: wired.iter().any(|w| *w != EventWiring::Absent),
+        current: wired.iter().all(|w| *w == EventWiring::Current),
         reasons: unwired_reasons(agent, events, wired),
     }
 }
@@ -265,12 +282,18 @@ fn apply_statusline(
 
 /// One "hook `<event>` not wired" reason per unwired event (the drift-report lines `--check`
 /// prints).
-fn unwired_reasons(agent: &str, events: &[String], wired: &[bool]) -> Vec<String> {
+fn unwired_reasons(agent: &str, events: &[String], wired: &[EventWiring]) -> Vec<String> {
     events
         .iter()
         .zip(wired)
-        .filter(|(_, ok)| !**ok)
-        .map(|(event, _)| format!("agent {agent}: hook {event} not wired"))
+        .filter_map(|(event, state)| match state {
+            EventWiring::Current => None,
+            EventWiring::Absent => Some(format!("agent {agent}: hook {event} not wired")),
+            EventWiring::Stale => Some(format!(
+                "agent {agent}: hook {event} names a different tma-hook (stale); re-run \
+                 `tma install-hooks {agent}` to repoint it"
+            )),
+        })
         .collect()
 }
 
@@ -307,19 +330,13 @@ impl AgentAdapter for ClaudeAdapter {
         apply_file(settings, &old, &new, assume_yes, label)
     }
 
-    fn uninstall(
-        &self,
-        lm: &LoadedManifest,
-        paths: &ConfigPaths,
-        wrapper: &Path,
-        assume_yes: bool,
-    ) -> bool {
+    fn uninstall(&self, lm: &LoadedManifest, paths: &ConfigPaths, assume_yes: bool) -> bool {
         let events = manifests::hook_events(&lm.manifest);
         let settings = &paths.settings;
         let Some(old) = reported(read_or_empty_object(settings)) else {
             return false;
         };
-        let without_hooks = match edit_settings_uninstall(&old, wrapper, &lm.name, &events) {
+        let without_hooks = match edit_settings_uninstall(&old, &lm.name, &events) {
             Ok(new) => new,
             Err(err) => {
                 eprintln!("tma: cannot edit {}: {err}", settings.display());
@@ -356,7 +373,7 @@ impl AgentAdapter for ClaudeAdapter {
             Ok(root) => root,
             Err(wiring) => return wiring,
         };
-        let wired = events_wired(&root, &lm.name, &events, wrapper, entry_has_command);
+        let wired = events_wired(&root, &lm.name, &events, wrapper, nested_commands);
         let sl = classify_statusline(&root, &tma_bin(), &paths.settings, &lm.name);
         classify_channels(&[
             hook_channel(&lm.name, &events, &wired),
@@ -405,19 +422,13 @@ impl AgentAdapter for GeminiAdapter {
         }
     }
 
-    fn uninstall(
-        &self,
-        lm: &LoadedManifest,
-        paths: &ConfigPaths,
-        wrapper: &Path,
-        assume_yes: bool,
-    ) -> bool {
+    fn uninstall(&self, lm: &LoadedManifest, paths: &ConfigPaths, assume_yes: bool) -> bool {
         let events = manifests::hook_events(&lm.manifest);
         let settings = &paths.gemini_settings;
         let Some(old) = reported(read_or_empty_object(settings)) else {
             return false;
         };
-        match edit_settings_uninstall(&old, wrapper, &lm.name, &events) {
+        match edit_settings_uninstall(&old, &lm.name, &events) {
             // Only write when our entry was actually present, so an absent file is never created
             // by uninstall (symmetric to the codex adapter's only-write-on-change).
             Ok(new) => {
@@ -450,7 +461,7 @@ impl AgentAdapter for GeminiAdapter {
             Ok(root) => root,
             Err(wiring) => return wiring,
         };
-        let wired = events_wired(&root, &lm.name, &events, wrapper, entry_has_command);
+        let wired = events_wired(&root, &lm.name, &events, wrapper, nested_commands);
         classify_channels(&[hook_channel(&lm.name, &events, &wired)])
     }
 }
@@ -507,19 +518,13 @@ impl AgentAdapter for CursorAdapter {
         )
     }
 
-    fn uninstall(
-        &self,
-        lm: &LoadedManifest,
-        paths: &ConfigPaths,
-        wrapper: &Path,
-        assume_yes: bool,
-    ) -> bool {
+    fn uninstall(&self, lm: &LoadedManifest, paths: &ConfigPaths, assume_yes: bool) -> bool {
         let events = manifests::hook_events(&lm.manifest);
         let hooks = &paths.cursor_hooks;
         let Some(old) = reported(read_or_empty_object(hooks)) else {
             return false;
         };
-        match edit_hooks_uninstall(&old, wrapper, &lm.name, &events, &CURSOR_SHAPE) {
+        match edit_hooks_uninstall(&old, &lm.name, &events, &CURSOR_SHAPE) {
             // Only write when our entry was actually present, so an absent file is never created
             // by uninstall (symmetric to the gemini/codex adapters).
             Ok(new) => {
@@ -574,7 +579,7 @@ impl AgentAdapter for CursorAdapter {
             Ok(root) => root,
             Err(wiring) => return wiring,
         };
-        let wired = events_wired(&root, &lm.name, &events, wrapper, cursor_entry_has_command);
+        let wired = events_wired(&root, &lm.name, &events, wrapper, flat_commands);
         let cfg_root = match classify_root(&lm.name, &paths.cursor_cli_config) {
             Ok(root) => root,
             Err(wiring) => return wiring,
@@ -602,13 +607,7 @@ impl AgentAdapter for OpenCodeAdapter {
         install_opencode_plugin(&paths.opencode_plugin, wrapper, assume_yes)
     }
 
-    fn uninstall(
-        &self,
-        _lm: &LoadedManifest,
-        paths: &ConfigPaths,
-        _wrapper: &Path,
-        assume_yes: bool,
-    ) -> bool {
+    fn uninstall(&self, _lm: &LoadedManifest, paths: &ConfigPaths, assume_yes: bool) -> bool {
         uninstall_opencode_plugin(&paths.opencode_plugin, assume_yes)
     }
 
@@ -660,13 +659,7 @@ impl AgentAdapter for PiAdapter {
         )
     }
 
-    fn uninstall(
-        &self,
-        _lm: &LoadedManifest,
-        paths: &ConfigPaths,
-        _wrapper: &Path,
-        assume_yes: bool,
-    ) -> bool {
+    fn uninstall(&self, _lm: &LoadedManifest, paths: &ConfigPaths, assume_yes: bool) -> bool {
         uninstall_js_bridge(
             &paths.pi_extension,
             PI_EXTENSION_MARKER,
@@ -748,13 +741,7 @@ impl AgentAdapter for CodexAdapter {
         }
     }
 
-    fn uninstall(
-        &self,
-        lm: &LoadedManifest,
-        paths: &ConfigPaths,
-        wrapper: &Path,
-        assume_yes: bool,
-    ) -> bool {
+    fn uninstall(&self, lm: &LoadedManifest, paths: &ConfigPaths, assume_yes: bool) -> bool {
         let cfg = &paths.codex_config;
         let Some(old) = reported(read_codex_config(cfg)) else {
             return false;
@@ -777,7 +764,7 @@ impl AgentAdapter for CodexAdapter {
         let Some(old_hooks) = reported(read_or_empty_object(hooks_path)) else {
             return false;
         };
-        match edit_settings_uninstall(&old_hooks, wrapper, &lm.name, &events) {
+        match edit_settings_uninstall(&old_hooks, &lm.name, &events) {
             Ok(new) => {
                 apply_if_changed(
                     hooks_path,
@@ -821,7 +808,7 @@ impl AgentAdapter for CodexAdapter {
             Ok(root) => root,
             Err(wiring) => return wiring,
         };
-        let wired = events_wired(&hooks_root, &lm.name, &events, wrapper, entry_has_command);
+        let wired = events_wired(&hooks_root, &lm.name, &events, wrapper, nested_commands);
 
         // The notify channel first, so a merged drift report reads config.toml then hooks.json.
         let notify_channel = Channel {
@@ -918,14 +905,14 @@ mod tests {
 
         assert!(matches!(
             classify_channels(&[
-                hook_channel("codex", &ev, &[true, true]),
+                hook_channel("codex", &ev, &[EventWiring::Current, EventWiring::Current]),
                 installed(true, "")
             ]),
             HookWiring::Wired
         ));
         assert!(matches!(
             classify_channels(&[
-                hook_channel("codex", &ev, &[false, false]),
+                hook_channel("codex", &ev, &[EventWiring::Absent, EventWiring::Absent]),
                 Channel {
                     present: false,
                     current: false,
@@ -937,7 +924,7 @@ mod tests {
 
         let HookWiring::Incomplete(reasons) = classify_channels(&[
             installed(false, "notify stale"),
-            hook_channel("codex", &ev, &[true, false]),
+            hook_channel("codex", &ev, &[EventWiring::Current, EventWiring::Absent]),
         ]) else {
             panic!("a half-wired agent is Incomplete");
         };
@@ -1165,7 +1152,7 @@ mod tests {
         );
         let twice = edit_settings_install(&installed, &wrapper(), "codex", &events).unwrap();
         assert_eq!(installed, twice, "re-install must be a no-op (deep dedup)");
-        let removed = edit_settings_uninstall(&installed, &wrapper(), "codex", &events).unwrap();
+        let removed = edit_settings_uninstall(&installed, "codex", &events).unwrap();
         assert_eq!(removed, original, "uninstall must restore byte-for-byte");
     }
 

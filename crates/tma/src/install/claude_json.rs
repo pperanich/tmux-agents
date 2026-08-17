@@ -17,8 +17,10 @@ pub(super) struct HookShape {
     noun: &'static str,
     /// Build our entry for a wrapper command string.
     make_entry: fn(&str) -> Value,
-    /// Whether an existing entry carries our exact wrapper command.
-    entry_is_ours: fn(&Value, &str) -> bool,
+    /// Every command string an entry carries: cursor's single flat `command`, or each `command` in
+    /// Claude's nested `hooks` array. Both predicates below read it, so "is this ours" and "is this
+    /// current" can never disagree about where an entry's command lives.
+    entry_commands: fn(&Value) -> Vec<String>,
     /// Run on the root object BEFORE inserting (cursor sets `version: 1` when absent).
     pre_insert: Option<fn(&mut Value)>,
     /// Run on the root AFTER the `hooks` object is pruned to empty on uninstall (cursor drops a
@@ -30,7 +32,7 @@ pub(super) struct HookShape {
 const CLAUDE_SHAPE: HookShape = HookShape {
     noun: "settings",
     make_entry: command_entry,
-    entry_is_ours: entry_has_command,
+    entry_commands: nested_commands,
     pre_insert: None,
     post_prune: None,
 };
@@ -40,7 +42,7 @@ const CLAUDE_SHAPE: HookShape = HookShape {
 pub(super) const CURSOR_SHAPE: HookShape = HookShape {
     noun: "cursor hooks.json",
     make_entry: cursor_command_entry,
-    entry_is_ours: cursor_entry_has_command,
+    entry_commands: flat_commands,
     pre_insert: Some(cursor_set_version),
     post_prune: Some(cursor_drop_version),
 };
@@ -87,18 +89,21 @@ pub(super) fn edit_hooks_install(
             .unwrap()
             .as_array_mut()
             .ok_or_else(|| format!("{} hooks event entry is not an array", shape.noun))?;
-        if !arr.iter().any(|e| (shape.entry_is_ours)(e, &cmd)) {
+        // Repoint rather than duplicate: drop our own entries that name a different wrapper (a
+        // moved binary, a changed `wrapper_ref`) before inserting, so the event fires once.
+        arr.retain(|e| !entry_is_ours(e, shape, agent, event) || entry_is_current(e, shape, &cmd));
+        if !arr.iter().any(|e| entry_is_current(e, shape, &cmd)) {
             arr.push((shape.make_entry)(&cmd));
         }
     }
     Ok(json_value::to_pretty(&root))
 }
 
-/// Remove exactly our entries, pruning emptied event arrays and then the emptied `hooks` object
+/// Remove every entry of ours, pruning emptied event arrays and then the emptied `hooks` object
 /// (and, per [`HookShape::post_prune`], any tma-added companion key like cursor's `version`).
+/// Takes no wrapper path: what makes an entry ours is its shape, not which wrapper it names.
 pub(super) fn edit_hooks_uninstall(
     old: &str,
-    wrapper: &Path,
     agent: &str,
     events: &[String],
     shape: &HookShape,
@@ -119,14 +124,15 @@ pub(super) fn edit_hooks_uninstall(
     };
 
     for event in events {
-        let cmd = wrapper_command(wrapper, agent, event);
         if let Some(arr) = hooks_obj
             .iter_mut()
             .find(|(k, _)| k == event)
             .map(|(_, v)| v)
             .and_then(Value::as_array_mut)
         {
-            arr.retain(|e| !(shape.entry_is_ours)(e, &cmd));
+            // Every entry of ours, not just the one this build would have written: an uninstall
+            // that leaves a stale wrapper entry behind has not uninstalled anything.
+            arr.retain(|e| !entry_is_ours(e, shape, agent, event));
         }
         // drop the event key if its array is now empty
         let empty = hooks_obj
@@ -162,11 +168,10 @@ pub(super) fn edit_settings_install(
 /// Uninstall counterpart to [`edit_settings_install`] (the Claude/gemini/codex nested shape).
 pub(super) fn edit_settings_uninstall(
     old: &str,
-    wrapper: &Path,
     agent: &str,
     events: &[String],
 ) -> Result<String, String> {
-    edit_hooks_uninstall(old, wrapper, agent, events, &CLAUDE_SHAPE)
+    edit_hooks_uninstall(old, agent, events, &CLAUDE_SHAPE)
 }
 
 // --- Cursor hooks.json adapter ---------------------------------------------------
@@ -179,9 +184,13 @@ fn cursor_command_entry(cmd: &str) -> Value {
     Value::Obj(vec![("command".to_string(), Value::Str(cmd.to_string()))])
 }
 
-/// Whether a cursor hook entry is ours (its `command` equals our exact wrapper invocation).
-pub(super) fn cursor_entry_has_command(entry: &Value, cmd: &str) -> bool {
-    entry.get("command").and_then(Value::as_str) == Some(cmd)
+/// [`HookShape::entry_commands`] for cursor's flat `{command}` entry.
+pub(super) fn flat_commands(entry: &Value) -> Vec<String> {
+    entry
+        .get("command")
+        .and_then(Value::as_str)
+        .map(|c| vec![c.to_string()])
+        .unwrap_or_default()
 }
 
 /// [`HookShape::pre_insert`] for cursor: ensure the required schema `version: 1`, set only when
@@ -213,18 +222,47 @@ fn command_entry(cmd: &str) -> Value {
     )])
 }
 
-/// Whether a settings hook entry contains our exact wrapper command in its `hooks` array.
-pub(super) fn entry_has_command(entry: &Value, cmd: &str) -> bool {
+/// [`HookShape::entry_commands`] for the nested `{hooks:[{type,command}]}` entry.
+pub(super) fn nested_commands(entry: &Value) -> Vec<String> {
     entry
         .get("hooks")
         .and_then(|h| match h {
             Value::Arr(a) => Some(a),
             _ => None,
         })
-        .is_some_and(|a| {
+        .map(|a| {
             a.iter()
-                .any(|c| c.get("command").and_then(Value::as_str) == Some(cmd))
+                .filter_map(|c| c.get("command").and_then(Value::as_str))
+                .map(str::to_string)
+                .collect()
         })
+        .unwrap_or_default()
+}
+
+/// Whether an entry is TMA'S wiring for this agent+event, whatever path names the wrapper, and
+/// whether it is the exact command this build would write.
+///
+/// The two are separate questions, and conflating them was a bug: matching only the exact command
+/// makes a moved binary's (or a changed `[install] wrapper_ref`'s) entries invisible, so install
+/// adds a second entry beside the stale one and every event fires twice, uninstall leaves the stale
+/// one behind, and `--check` reports a wholly-stale config as simply not installed.
+fn entry_is_ours(entry: &Value, shape: &HookShape, agent: &str, event: &str) -> bool {
+    (shape.entry_commands)(entry)
+        .iter()
+        .any(|c| is_wrapper_command(c, agent, event))
+}
+
+fn entry_is_current(entry: &Value, shape: &HookShape, cmd: &str) -> bool {
+    (shape.entry_commands)(entry).iter().any(|c| c == cmd)
+}
+
+/// Whether a command string invokes tma's wrapper for `agent`/`event`, whatever path (or bare name)
+/// precedes it. Parsed from the right so a wrapper living under a path with spaces still matches.
+pub(super) fn is_wrapper_command(cmd: &str, agent: &str, event: &str) -> bool {
+    cmd.strip_suffix(&format!(" {agent} {event}"))
+        .and_then(|prog| Path::new(prog).file_name())
+        .and_then(|n| n.to_str())
+        == Some(super::paths::WRAPPER_NAME)
 }
 
 #[cfg(test)]
@@ -274,7 +312,7 @@ mod tests {
         let installed = edit_settings_install(&original, &wrapper(), "claude", &events).unwrap();
         assert_ne!(installed, original, "install must change the file");
         assert!(installed.contains("/opt/tma/tma-hook claude Notification"));
-        let removed = edit_settings_uninstall(&installed, &wrapper(), "claude", &events).unwrap();
+        let removed = edit_settings_uninstall(&installed, "claude", &events).unwrap();
         assert_eq!(removed, original, "uninstall must restore byte-for-byte");
     }
 
@@ -284,6 +322,82 @@ mod tests {
         let once = edit_settings_install("{}\n", &wrapper(), "claude", &events).unwrap();
         let twice = edit_settings_install(&once, &wrapper(), "claude", &events).unwrap();
         assert_eq!(once, twice, "re-install must be a no-op (deep dedup)");
+    }
+
+    /// Re-installing under a DIFFERENT wrapper reference repoints the entry instead of adding a
+    /// second one beside it. Matching only the exact command left the old entry in place, so a
+    /// moved binary (or a `wrapper_ref` switch) made every event fire twice, once through a path
+    /// that may no longer exist.
+    #[test]
+    fn install_repoints_a_stale_entry_instead_of_duplicating_it() {
+        let events = manifests::hook_events(&claude());
+        let installed = edit_settings_install("{}\n", &wrapper(), "claude", &events).unwrap();
+        let repointed =
+            edit_settings_install(&installed, Path::new("tma-hook"), "claude", &events).unwrap();
+
+        assert!(
+            !repointed.contains("/opt/tma/tma-hook"),
+            "the stale entry is gone: {repointed}"
+        );
+        assert_eq!(
+            repointed.matches("claude Notification").count(),
+            1,
+            "exactly one entry per event, not one per wrapper path: {repointed}"
+        );
+        // And the repointed file is what a fresh install at the new reference produces.
+        let fresh =
+            edit_settings_install("{}\n", Path::new("tma-hook"), "claude", &events).unwrap();
+        assert_eq!(repointed, fresh);
+    }
+
+    /// Uninstall removes tma's entries whatever wrapper they name. Keying off the exact command
+    /// this build would write orphaned every entry installed from another path.
+    #[test]
+    fn uninstall_removes_an_entry_that_names_another_wrapper() {
+        let events = manifests::hook_events(&claude());
+        let installed =
+            edit_settings_install("{}\n", Path::new("/elsewhere/tma-hook"), "claude", &events)
+                .unwrap();
+        let removed = edit_settings_uninstall(&installed, "claude", &events).unwrap();
+        assert_eq!(removed, "{}\n", "nothing of tma's may survive: {removed}");
+    }
+
+    /// The path-insensitive predicate is not a substring match: it holds the agent and event fixed
+    /// and only lets the wrapper's directory vary, so neither another agent's wiring nor a
+    /// same-named script of the user's is mistaken for ours.
+    #[test]
+    fn wrapper_command_match_pins_the_name_agent_and_event() {
+        assert!(is_wrapper_command(
+            "/opt/tma/tma-hook claude Stop",
+            "claude",
+            "Stop"
+        ));
+        assert!(is_wrapper_command("tma-hook claude Stop", "claude", "Stop"));
+        assert!(is_wrapper_command(
+            "/my dir/tma-hook claude Stop",
+            "claude",
+            "Stop"
+        ));
+        assert!(!is_wrapper_command(
+            "/opt/tma/tma-hook gemini Stop",
+            "claude",
+            "Stop"
+        ));
+        assert!(!is_wrapper_command(
+            "/opt/tma/tma-hook claude Notification",
+            "claude",
+            "Stop"
+        ));
+        assert!(!is_wrapper_command(
+            "my-tma-hook claude Stop",
+            "claude",
+            "Stop"
+        ));
+        assert!(!is_wrapper_command(
+            "tma-hook claude Stop --extra",
+            "claude",
+            "Stop"
+        ));
     }
 
     #[test]
@@ -309,7 +423,7 @@ mod tests {
         assert!(installed.contains("my-own-script"), "user hook preserved");
         assert!(installed.contains("/opt/tma/tma-hook claude Stop"));
         // Uninstall leaves the user's own hook intact.
-        let removed = edit_settings_uninstall(&installed, &wrapper(), "claude", &events).unwrap();
+        let removed = edit_settings_uninstall(&installed, "claude", &events).unwrap();
         assert!(removed.contains("my-own-script"));
         assert!(!removed.contains("tma-hook claude Stop"));
     }
@@ -341,7 +455,7 @@ mod tests {
         );
         let twice = edit_settings_install(&installed, &wrapper(), "gemini", &events).unwrap();
         assert_eq!(installed, twice, "re-install must be a no-op (deep dedup)");
-        let removed = edit_settings_uninstall(&installed, &wrapper(), "gemini", &events).unwrap();
+        let removed = edit_settings_uninstall(&installed, "gemini", &events).unwrap();
         assert_eq!(removed, original, "uninstall must restore byte-for-byte");
     }
 
@@ -372,8 +486,7 @@ mod tests {
             edit_hooks_install(&installed, &wrapper(), "cursor", &events, &CURSOR_SHAPE).unwrap();
         assert_eq!(installed, twice, "re-install must be byte-identical");
         // Uninstall drops our hooks AND the tma-added version → back to the empty object.
-        let removed =
-            edit_hooks_uninstall(&installed, &wrapper(), "cursor", &events, &CURSOR_SHAPE).unwrap();
+        let removed = edit_hooks_uninstall(&installed, "cursor", &events, &CURSOR_SHAPE).unwrap();
         assert_eq!(
             removed, empty,
             "uninstall from a versionless file is byte-clean: {removed}"
@@ -394,8 +507,7 @@ mod tests {
         let installed =
             edit_hooks_install(&original, &wrapper(), "cursor", &events, &CURSOR_SHAPE).unwrap();
         assert!(installed.contains("my-formatter.sh"), "user hook preserved");
-        let removed =
-            edit_hooks_uninstall(&installed, &wrapper(), "cursor", &events, &CURSOR_SHAPE).unwrap();
+        let removed = edit_hooks_uninstall(&installed, "cursor", &events, &CURSOR_SHAPE).unwrap();
         assert_eq!(
             removed, original,
             "a user hook + its version survive the uninstall byte-for-byte"

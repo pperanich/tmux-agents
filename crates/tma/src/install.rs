@@ -311,7 +311,7 @@ fn uninstall(
 
     // Agent config: undo the wrapper wiring via the agent's own mechanism (symmetric to
     // install). A no-op change (already absent) is fine — do not fail.
-    if !adapter.uninstall(lm, paths, wrapper.reference(), assume_yes) {
+    if !adapter.uninstall(lm, paths, assume_yes) {
         return ExitCode::FAILURE;
     }
 
