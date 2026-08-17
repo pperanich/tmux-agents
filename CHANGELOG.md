@@ -45,6 +45,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   could not be searched for at all. The action menu moves to `tab`, the digit quick-select is gone,
   and the row index numbers go with it (a number beside a row promised a key that no longer does
   anything). `tma watch` keeps `a` and now takes `tab` too.
+- Releases carry real notes. This file is the source: the release workflow reads the section for the
+  tag and refuses to build one that has no entry.
 
 ### Fixed
 
