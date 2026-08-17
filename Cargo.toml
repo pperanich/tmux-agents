@@ -30,7 +30,15 @@ regex = "1"
 rustix = { version = "1.1", features = ["event", "fs", "net", "pipe", "process", "system"] }
 signal-hook = "0.4"
 # Binary-only deps.
-clap = { version = "4", features = ["derive"] }
+# `string` lets a `Command` be built from owned names, which `tma completions` needs: it rebuilds
+# the derive tree without the `hide`-marked nodes, and every name it copies out of the original is
+# borrowed, not `&'static`.
+clap = { version = "4", features = ["derive", "string"] }
+# `tma completions <shell>`: the ahead-of-time generators only (bash/zsh/fish/elvish/powershell),
+# built from the same derive tree clap already has. Default features on purpose — the dynamic
+# `unstable-dynamic` engine is deliberately not enabled, since it needs `clap/unstable-ext`, which
+# is semver-exempt and can break on a clap patch bump.
+clap_complete = "4"
 # Unified config diffs for the installer's diff-confirm-write path (bin-only). `inline` enables
 # word-level emphasis within replaced lines.
 similar = { version = "3", features = ["inline"] }

@@ -113,8 +113,33 @@ pub(crate) enum Command {
     /// lock and fire the completion notification. Never user-invoked.
     #[command(hide = true)]
     Supervise(SuperviseArgs),
+    /// Print a shell completion script on stdout (`tma completions zsh`). `--help` says where each
+    /// shell wants the file; a release tarball and the nix package ship the same output.
+    #[command(
+        long_about = "Write the completion script for one shell to stdout. It is generated from \
+tma's own argument tree, so it covers every subcommand, flag, and fixed value set (--state, \
+--until, --wrapper-ref, --format) but no runtime value: --agent, --session, --repo, --branch, and \
+an action name are not completed.\n\n\
+Where each shell reads it from, for a per-user install:\n  \
+bash    ~/.local/share/bash-completion/completions/tma\n  \
+zsh     a directory on your $fpath, named _tma (e.g. ~/.local/share/zsh/site-functions/_tma)\n  \
+fish    ~/.config/fish/completions/tma.fish\n  \
+elvish  sourced from ~/.config/elvish/rc.elv\n\n\
+Or skip the file and evaluate it at shell startup, at the cost of one tma run per new shell:\n  \
+bash/zsh   eval \"$(tma completions zsh)\"\n  \
+fish       tma completions fish | source"
+    )]
+    Completions(CompletionsArgs),
     /// Manifest-authoring and inspection tools.
     Debug(DebugArgs),
+}
+
+/// Args for `tma completions <shell>`.
+#[derive(clap::Args)]
+pub(crate) struct CompletionsArgs {
+    /// The shell to generate for.
+    #[arg(value_name = "SHELL")]
+    pub(crate) shell: clap_complete::Shell,
 }
 
 /// Args for `tma init`. The target server and the manifest dir come from the globals; the two
@@ -372,7 +397,7 @@ pub(crate) struct SelectorArgs {
     pub(crate) agent: Option<String>,
     /// Only agents in one of these states, comma-separated: `idle`, `working`, `blocked`,
     /// `unknown`, and `done` (idle + attention, the finished-and-unreviewed surface).
-    #[arg(long, value_name = "STATES", value_parser = parse_state_filter)]
+    #[arg(long, value_name = "STATES", value_parser = cli_support::StateListParser(parse_state_filter))]
     pub(crate) state: Option<StateSet>,
 }
 
@@ -492,7 +517,7 @@ pub(crate) struct WaitArgs {
     /// The state(s) to wait for, comma-separated: `idle`, `working`, `blocked`, `unknown`, and
     /// `done` (idle + attention, the finished-and-unreviewed surface). At least one required;
     /// `wait` returns as soon as a cycle observes the target in ANY of them.
-    #[arg(long, value_name = "STATES", value_parser = wait::parse_until)]
+    #[arg(long, value_name = "STATES", value_parser = cli_support::StateListParser(wait::parse_until))]
     pub(crate) until: wait::UntilSet,
     /// Only a state that BEGAN after this epoch-ms timestamp satisfies (the row's `since_ms` must
     /// be strictly greater). The escape hatch from level-triggering for supervisor loops.

@@ -110,6 +110,7 @@ your other sessions exactly as an unscoped one does.
 | `install-hooks` | Install, uninstall, or verify the agent and tmux hook wiring. |
 | `install-keys` | Install, uninstall, or verify tma's tmux keybindings. |
 | `doctor` | Diagnose each agent pane's effective tier and why. |
+| `completions` | Print a shell completion script on stdout (`tma completions zsh`). |
 | `debug` | Manifest-authoring and inspection tools. |
 | `event` | Internal, unstable: bridge one agent hook event to a stamp. |
 | `clear-attention` | Internal: clear a pane's attention flag and nudge any resident `tma watch`; invoked by the auto-installed tmux focus hooks. |
@@ -846,6 +847,52 @@ tier:
 
 Reading the report section by section, and the `--exit-code` CI recipe, are in
 [Diagnose with `tma doctor`](../how-to/diagnose-with-doctor.md).
+
+## `tma completions`
+
+Write the completion script for one shell to stdout.
+
+```
+Usage: tma completions <SHELL>
+```
+
+`<SHELL>` is one of `bash`, `zsh`, `fish`, `elvish`, `powershell`.
+
+The script is generated from tma's own argument tree, so it covers every
+subcommand, every flag, and every fixed value set — `--state`, `--until`,
+`--wrapper-ref`, `--format`. It completes no runtime value: `--agent`,
+`--session`, `--repo`, `--branch`, and an action name for `tma act` are not
+offered, because a static script cannot know what your tmux server or your
+config holds. The internal verbs (`event`, `clear-attention`, `supervise`) and
+the internal `daemon` flags are left out.
+
+Where each shell reads the file from, for a per-user install:
+
+| shell | path |
+|---|---|
+| bash | `~/.local/share/bash-completion/completions/tma` |
+| zsh | `_tma`, in a directory on your `$fpath` (e.g. `~/.local/share/zsh/site-functions/_tma`) |
+| fish | `~/.config/fish/completions/tma.fish` |
+| elvish | anywhere, sourced from `~/.config/elvish/rc.elv` |
+
+`~/.local/share/zsh/site-functions` is not on zsh's default `$fpath`. Add it
+above `compinit`:
+
+```zsh
+fpath=(~/.local/share/zsh/site-functions $fpath)
+```
+
+Or skip the file and evaluate the script at shell startup, at the cost of one
+`tma` run per new shell:
+
+```bash
+eval "$(tma completions zsh)"     # bash and zsh
+tma completions fish | source     # fish
+```
+
+You may not need any of this. A release tarball ships the four Unix scripts in
+`completions/`, `scripts/install.sh` places them for the shells it finds (set
+`TMA_NO_COMPLETIONS=1` to skip), and the nix package installs them itself.
 
 ## `tma debug`
 

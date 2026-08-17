@@ -32,6 +32,42 @@ pub(crate) fn parse_states(s: &str, flag: &str) -> Result<Vec<StateToken>, Strin
     Ok(out)
 }
 
+/// The clap value parser behind `--state` and `--until`: the wrapped fn does the parsing, and this
+/// adds the one thing a bare `value_parser = <fn>` cannot answer — what the legal values are.
+///
+/// clap asks the value parser for its possible values, and a function parser reports none, so the
+/// vocabulary reached the user only through a rejection message. Reporting it here is what puts
+/// `[possible values: …]` in `--help` and the tokens into the generated completion scripts. It is
+/// not a second validator: clap uses possible values for help, completion, and error text, never to
+/// accept or reject, so the comma-separated grammar the fn implements still governs.
+#[derive(Clone)]
+pub(crate) struct StateListParser<T: 'static>(pub(crate) fn(&str) -> Result<T, String>);
+
+impl<T: Clone + Send + Sync + 'static> clap::builder::TypedValueParser for StateListParser<T> {
+    type Value = T;
+
+    fn parse_ref(
+        &self,
+        cmd: &clap::Command,
+        arg: Option<&clap::Arg>,
+        value: &std::ffi::OsStr,
+    ) -> Result<T, clap::Error> {
+        // Delegated to clap's own blanket impl for `Fn(&str) -> Result<T, E>`, so the error text is
+        // byte-identical to what the plain `value_parser = <fn>` form produced.
+        clap::builder::TypedValueParser::parse_ref(&self.0, cmd, arg, value)
+    }
+
+    fn possible_values(
+        &self,
+    ) -> Option<Box<dyn Iterator<Item = clap::builder::PossibleValue> + '_>> {
+        Some(Box::new(
+            StateToken::ALL
+                .iter()
+                .map(|t| clap::builder::PossibleValue::new(t.token())),
+        ))
+    }
+}
+
 /// Print the standard "no tmux server running" error and yield a FAILURE exit code — the shape
 /// every `TmuxError::ServerGone` arm shares.
 pub(crate) fn no_server() -> ExitCode {

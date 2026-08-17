@@ -30,6 +30,9 @@ tma-daemon = { path = "../tma-daemon" }
 # ratatui/crossterm/nucleo UI stack moved here with it, so the bin no longer names them.
 tma-ui = { path = "../tma-ui" }
 clap.workspace = true
+# `tma completions <shell>` writes the script for one shell to stdout; the release tarball and the
+# nix package generate theirs by running it.
+clap_complete.workspace = true
 thiserror.workspace = true
 # `tma debug redact` compiles user-supplied `--pattern` regexes to redact a capture.
 # regex is already in the build graph via tma-core; declaring it here makes it a direct

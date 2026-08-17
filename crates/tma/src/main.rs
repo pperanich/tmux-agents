@@ -8,6 +8,7 @@ use clap::Parser;
 mod act;
 mod cli;
 mod cli_support;
+mod completions;
 mod debug_cmd;
 mod dispatch;
 mod doctor;
@@ -259,6 +260,7 @@ fn main() -> ExitCode {
         Some(Command::Reload) => run_reload(&server),
         Some(Command::ClearAttention(args)) => run_clear_attention(args, &server),
         Some(Command::Supervise(args)) => run_supervise(args, &server, config),
+        Some(Command::Completions(args)) => completions::run(args),
         Some(Command::Debug(args)) => run_debug(args, &server, manifest_dir, &config),
     }
 }

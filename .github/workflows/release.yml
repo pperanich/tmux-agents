@@ -39,8 +39,33 @@ jobs:
     needs: version
     uses: ./.github/workflows/tests.yml
 
-  build:
+  # Generated once and copied into every tarball. The scripts come from tma's own argument tree, so
+  # they are identical across targets, and three of the four build jobs cross-compile — their
+  # binary cannot be run on the builder to generate its own.
+  completions:
     needs: [version, tests]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Generate
+        run: |
+          set -eu
+          cargo build --release -p tma
+          mkdir -p completions
+          ./target/release/tma completions bash > completions/tma.bash
+          ./target/release/tma completions zsh > completions/_tma
+          ./target/release/tma completions fish > completions/tma.fish
+          ./target/release/tma completions elvish > completions/tma.elv
+      - uses: actions/upload-artifact@v4
+        with:
+          name: completions
+          path: completions
+          if-no-files-found: error
+
+  build:
+    needs: [version, tests, completions]
     strategy:
       fail-fast: false
       matrix:
@@ -71,6 +96,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y musl-tools
       - name: Build
         run: cargo build --release -p tma --target ${{ matrix.target }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: completions
+          path: completions
       - name: Package
         # COPYFILE_DISABLE keeps macOS bsdtar from writing an AppleDouble `._tma` sidecar
         # next to the binary when the build leaves an extended attribute on it.
@@ -82,6 +111,7 @@ jobs:
           mkdir "$dir"
           cp "target/${{ matrix.target }}/release/tma" "$dir/"
           cp LICENSE-MIT LICENSE-APACHE "$dir/"
+          cp -R completions "$dir/completions"
           tar czf "$dir.tar.gz" "$dir"
       - uses: actions/upload-artifact@v4
         with:

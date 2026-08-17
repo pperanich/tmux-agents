@@ -10,6 +10,23 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- `tma completions <shell>` writes a completion script for bash, zsh, fish, elvish, or powershell to
+  stdout. It is generated from tma's own argument tree, so it covers every subcommand and flag and
+  cannot go stale — worth something on a CLI where `install-hooks` alone carries sixteen. Fixed
+  value sets complete too (`--wrapper-ref`, `--format`, and now `--state`/`--until`, whose parser
+  reported no possible values to clap, so the state vocabulary reached you only by being rejected —
+  it is in `--help` now as well). Runtime values are not completed: `--agent`, `--session`,
+  `--repo`, `--branch`, and an action name need the tmux server and your config, which a static
+  script cannot read. The internal verbs (`event`, `clear-attention`, `supervise`) and `daemon`'s
+  five test hooks are left out; clap_complete's generators do not skip hidden items on their own, so
+  tma prunes the tree before handing it over.
+- Release tarballs ship the four Unix scripts in `completions/`, `scripts/install.sh` installs them
+  for whichever of bash, zsh, and fish is on the machine (`TMA_NO_COMPLETIONS=1` skips it, and zsh
+  gets told about the one `fpath` line its per-user directory needs), and the nix package installs
+  them itself. `cargo install` still places a binary and nothing else.
+
 ## [0.3.1] - 2026-08-17
 
 ### Added

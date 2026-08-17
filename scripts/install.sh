@@ -59,6 +59,39 @@ checksum() {
 	esac | cut -d' ' -f1
 }
 
+# Copy one completion script into place. Never fatal: the binary is already installed by the time
+# these run, and an unwritable completion directory is not a reason to fail the install.
+install_completion() {
+	[ -f "$1" ] || return 0
+	if mkdir -p "$(dirname "$2")" 2>/dev/null && cp "$1" "$2" 2>/dev/null; then
+		say "Installed completions to $2"
+	else
+		say "Could not write $2 (skipped)"
+	fi
+}
+
+# Completions for the shells that are actually on this machine, in each one's per-user directory.
+# Tarballs cut before completions existed carry none, so an absent directory is a silent no-op.
+install_completions() {
+	[ -z "${TMA_NO_COMPLETIONS:-}" ] || return 0
+	src="$workdir/$name/completions"
+	[ -d "$src" ] || return 0
+	data="${XDG_DATA_HOME:-$HOME/.local/share}"
+	if command -v bash >/dev/null 2>&1; then
+		install_completion "$src/tma.bash" "$data/bash-completion/completions/tma"
+	fi
+	if command -v fish >/dev/null 2>&1; then
+		install_completion "$src/tma.fish" "${XDG_CONFIG_HOME:-$HOME/.config}/fish/completions/tma.fish"
+	fi
+	command -v zsh >/dev/null 2>&1 || return 0
+	fdir="$data/zsh/site-functions"
+	install_completion "$src/_tma" "$fdir/_tma"
+	# zsh reads a completion file only from a directory on $fpath, and this one is not there by
+	# default. Say so rather than leaving a file that silently does nothing.
+	zsh -c 'print -l -- $fpath' 2>/dev/null | grep -qxF "$fdir" ||
+		say "zsh: for these to load, add to ~/.zshrc above compinit: fpath=($fdir \$fpath)"
+}
+
 command -v tar >/dev/null 2>&1 || die "tar is required but not on PATH"
 
 if command -v curl >/dev/null 2>&1; then
@@ -107,6 +140,7 @@ chmod +x "$INSTALL_DIR/tma.new"
 mv -f "$INSTALL_DIR/tma.new" "$INSTALL_DIR/tma"
 
 say "Installed $("$INSTALL_DIR/tma" --version) to $INSTALL_DIR/tma"
+install_completions
 case ":$PATH:" in
 *":$INSTALL_DIR:"*) ;;
 *) say "$INSTALL_DIR is not on your PATH. Add: export PATH=\"$INSTALL_DIR:\$PATH\"" ;;

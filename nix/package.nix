@@ -1,6 +1,8 @@
 {
   lib,
+  installShellFiles,
   rustPlatform,
+  stdenv,
   tmux,
   unixtools,
 }:
@@ -33,12 +35,23 @@ rustPlatform.buildRustPackage (finalAttrs: {
     "tma"
   ];
 
+  nativeBuildInputs = [ installShellFiles ];
+
   # Tests spawn a scratch tmux server and `tma doctor` shells out to `ps`. No locale on
   # purpose: the scrubbed sandbox env regression-tests tmux's utf8_sanitize vs `tmux -u`.
   nativeCheckInputs = [
     tmux
     unixtools.ps
   ];
+
+  # The completion scripts come out of the binary itself, so they cannot be generated when the
+  # build is cross-compiling and the host cannot run what it just built.
+  postInstall = lib.optionalString (stdenv.buildPlatform.canExecute stdenv.hostPlatform) ''
+    installShellCompletion --cmd tma \
+      --bash <($out/bin/tma completions bash) \
+      --fish <($out/bin/tma completions fish) \
+      --zsh <($out/bin/tma completions zsh)
+  '';
 
   meta = {
     description = "tmux-agents CLI: agent state monitor, picker, jump, and stamping for tmux";

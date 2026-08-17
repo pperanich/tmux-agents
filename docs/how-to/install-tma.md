@@ -36,12 +36,20 @@ you at the cargo path below.
 
 Two environment variables change what it does:
 
+It also installs shell completions, for whichever of bash, zsh, and fish it
+finds on your machine, into that shell's per-user directory. zsh needs one more
+line in your `~/.zshrc` for its directory to be searched at all, which the
+script prints when it applies.
+
+Three environment variables change what it does:
+
 | variable | effect |
 |---|---|
 | `TMA_VERSION` | Install this tag instead of the latest release. |
 | `TMA_INSTALL_DIR` | Install here instead of `~/.local/bin`. Created if it does not exist. |
+| `TMA_NO_COMPLETIONS` | Set to anything to install only the binary. |
 
-Both belong on the `sh`, not on the `curl`, or the pipeline hands them to the
+They belong on the `sh`, not on the `curl`, or the pipeline hands them to the
 wrong process:
 
 ```
@@ -72,6 +80,11 @@ tma 0.3.1
 
 To upgrade, `git pull` and run the same `cargo install` again; it replaces the
 binary in place.
+
+`cargo install` places a binary and nothing else, so wire the completions
+yourself — `tma completions <shell>` writes the script for one shell to stdout,
+and [`tma completions`](../reference/cli.md#tma-completions) says where each
+shell wants it. The install script and the Nix package both do this for you.
 
 ## From the Nix flake
 

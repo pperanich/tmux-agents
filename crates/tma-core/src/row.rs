@@ -112,6 +112,18 @@ impl StateToken {
     /// The tokens a user may write, for an error message naming the valid set.
     pub const VOCABULARY: &'static str = "idle, working, blocked, unknown, done";
 
+    /// The same vocabulary as values, in the order [`StateToken::VOCABULARY`] prints them. The
+    /// surfaces that enumerate rather than describe read this: `--state`/`--until` report it to
+    /// clap as their possible values, which is what puts it in `--help` and in a generated shell
+    /// completion script.
+    pub const ALL: [StateToken; 5] = [
+        StateToken::Closed(AgentState::Idle),
+        StateToken::Closed(AgentState::Working),
+        StateToken::Closed(AgentState::Blocked),
+        StateToken::Closed(AgentState::Unknown),
+        StateToken::Done,
+    ];
+
     /// The row's one class in the DISJOINT reading of the vocabulary: `Done` for a finished,
     /// unreviewed pane, else its stored state. The inverse of [`StateToken::matches`], whose `idle`
     /// deliberately also covers a done pane; the surfaces that partition panes (the `tma status`
@@ -376,6 +388,15 @@ mod tests {
             assert_eq!(t.parse::<StateToken>().unwrap().token(), t);
             assert!(StateToken::VOCABULARY.contains(t), "vocabulary names {t}");
         }
+    }
+
+    /// `ALL` is what `--state`/`--until` hand clap as their possible values, and `VOCABULARY` is
+    /// what the parse errors name. A state added to one and not the other would leave `--help` and
+    /// the generated completion scripts disagreeing with the error message.
+    #[test]
+    fn state_token_all_matches_the_vocabulary_string() {
+        let listed: Vec<&str> = StateToken::ALL.iter().map(|t| t.token()).collect();
+        assert_eq!(listed.join(", "), StateToken::VOCABULARY);
     }
 
     #[test]
