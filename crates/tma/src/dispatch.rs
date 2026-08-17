@@ -327,6 +327,20 @@ pub(crate) fn run_ls(
     }
 }
 
+/// Whether the status line's sidebar-toggle icon can actually be clicked: the `--mouse` binding
+/// group is installed AND the server's global `mouse` option is on. Both halves are needed for a
+/// click to reach the binding, and the icon is nothing but a click target — an unclickable one is
+/// an instruction the user cannot follow. Same pair `tma doctor` reports; a failed read reads as
+/// off, so the icon is dropped rather than promised.
+fn sidebar_clickable(tmux: &tmux::Tmux) -> bool {
+    crate::install_keys::mouse_bindings_installed(None)
+        && tmux
+            .get_global_option("mouse")
+            .ok()
+            .flatten()
+            .is_some_and(|v| v == "on")
+}
+
 pub(crate) fn run_status(
     args: StatusArgs,
     server: &tmux::Server,
@@ -335,8 +349,9 @@ pub(crate) fn run_status(
     config: &config::Config,
 ) -> ExitCode {
     match run_cycle_for(server, manifest_dir, debug_timing, config) {
-        // `status` never serializes rows, so it needs no server/host resolve: the handle is dropped.
-        Ok((_tmux, mut report)) => {
+        // `status` never serializes rows, so it needs no server/host resolve. The handle is kept
+        // only for the sidebar-icon gate below, which reads the server's `mouse` option.
+        Ok((tmux, mut report)) => {
             // The counts are over the selected rows only; the cycle above still stamped every pane,
             // so a per-session status driver stays a full ambient driver. Repo labels are resolved
             // only when the selector needs them — an unscoped status stays the spawn-free hot path.
@@ -348,9 +363,10 @@ pub(crate) fn run_status(
             match args.format {
                 // A trailing newline would widen the status segment; print the bare string. `plain`
                 // shares that rule — it feeds the same kind of one-line bar segment.
-                StatusFormat::Tmux => {
-                    print!("{}", surfaces::render_status(&report, &config.status))
-                }
+                StatusFormat::Tmux => print!(
+                    "{}",
+                    surfaces::render_status(&report, &config.status, sidebar_clickable(&tmux))
+                ),
                 StatusFormat::Plain => {
                     print!("{}", surfaces::render_status_plain(&report, &config.status))
                 }

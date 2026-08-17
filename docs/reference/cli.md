@@ -179,8 +179,11 @@ no markup at all.
 
 That form ends with one more segment, `tma:sidebar`, holding the `☰` icon that
 toggles a `tma watch` sidebar. It carries no count, so it is present even when
-every class is zero — the `tmux` form is empty only when `[status] sidebar` sets
-an empty glyph. The other formats never carry it.
+every class is zero — but only when a click can actually reach it: the `--mouse`
+binding group installed and the server's `mouse` option on. With either missing
+(or `[status] sidebar` set to an empty glyph) the icon is dropped, so an
+unclickable icon never advertises a toggle you cannot use. The other formats
+never carry it.
 
 The counts are over the selected rows, which is what makes a per-session status
 line possible: `#(tma status --session #{session_name})`. See

@@ -111,8 +111,10 @@ surface split changes.
 state class: it is the trailing `☰` icon that toggles a `tma watch` sidebar when
 clicked (`tma watch --toggle`, see [Clickable status
 segments](../how-to/install-the-keybindings.md#clickable-status-segments)). It has
-no count behind it, so it renders even with no agents. Setting `glyph = ""` drops
-the segment and its click target; `[picker]` has no such entry.
+no count behind it, so it renders even with no agents — but only where the click
+can land: `tma install-keys --mouse` installed *and* the server's `mouse` option
+on. Without both it is dropped, since unlike the counts it means nothing on its
+own. Setting `glyph = ""` drops it outright; `[picker]` has no such entry.
 
 ## `[notify]`: notifications
 

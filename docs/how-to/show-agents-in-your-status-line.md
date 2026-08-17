@@ -26,7 +26,9 @@ $ tma status
 
 The order is fixed (`blocked working done idle unknown`), zero-count classes are
 omitted, and the trailing `☰` is the sidebar toggle, which has no count behind it
-and so renders even with no agents at all. The `#[range=…]` markers are what make
+and so renders even with no agents at all — as long as it is clickable, meaning
+`tma install-keys --mouse` and `set -g mouse on`. Without both, `tma status`
+leaves it out (the example above assumes them). The `#[range=…]` markers are what make
 each segment clickable; tmux draws nothing for them, and without the opt-in mouse
 bindings nothing acts on them ([Install the
 keybindings](install-the-keybindings.md#clickable-status-segments)). Glyphs and

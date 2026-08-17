@@ -253,8 +253,14 @@ impl StatusCounts {
 ///
 /// A trailing `tma:sidebar` segment carries the `tma watch --toggle` icon. It is the one segment
 /// with no count behind it, so it renders even with zero agents — the toggle stays reachable on an
-/// otherwise empty status line. `[status] sidebar = { glyph = "" }` drops it.
-pub fn render_status(report: &CycleReport, styles: &StatusStyles) -> String {
+/// otherwise empty status line. Unlike the counts, it is *only* a click target: it says nothing on
+/// its own, so `sidebar_clickable` (the mouse bindings installed against a server with `mouse on`)
+/// gates it rather than merely styling it. `[status] sidebar = { glyph = "" }` drops it outright.
+pub fn render_status(
+    report: &CycleReport,
+    styles: &StatusStyles,
+    sidebar_clickable: bool,
+) -> String {
     let counts = StatusCounts::of(&report.rows);
     let mut parts: Vec<String> = counts
         .styled(styles)
@@ -265,7 +271,7 @@ pub fn render_status(report: &CycleReport, styles: &StatusStyles) -> String {
         })
         .collect();
     let (glyph, color) = styles.resolved_sidebar();
-    if !glyph.is_empty() {
+    if sidebar_clickable && !glyph.is_empty() {
         parts.push(format!(
             "#[range=user|tma:sidebar]#[fg={color}]{glyph}#[norange]"
         ));
@@ -707,7 +713,7 @@ mod tests {
             row("%4", "c", AgentState::Working, None),
         ]);
         assert_eq!(
-            render_status(&r, &StatusStyles::default()),
+            render_status(&r, &StatusStyles::default(), true),
             format!(
                 "#[range=user|tma:blocked]#[fg=red]⚑1#[norange] \
                  #[range=user|tma:working]#[fg=yellow]●2#[norange] \
@@ -726,7 +732,7 @@ mod tests {
         ]);
         // Order blocked → working → done → idle → unknown; done uses ✓ magenta, idle keeps ○.
         assert_eq!(
-            render_status(&r, &StatusStyles::default()),
+            render_status(&r, &StatusStyles::default(), true),
             format!(
                 "#[range=user|tma:blocked]#[fg=red]⚑1#[norange] \
                  #[range=user|tma:done]#[fg=magenta]✓2#[norange] \
@@ -740,7 +746,7 @@ mod tests {
     #[test]
     fn status_is_the_sidebar_icon_alone_when_no_agents() {
         assert_eq!(
-            render_status(&report(vec![]), &StatusStyles::default()),
+            render_status(&report(vec![]), &StatusStyles::default(), true),
             SIDEBAR.trim_start()
         );
     }
@@ -753,19 +759,19 @@ mod tests {
             toml::from_str("sidebar = { glyph = \"S\", color = \"blue\" }").unwrap();
         let r = report(vec![row("%1", "c", AgentState::Idle, None)]);
         assert_eq!(
-            render_status(&r, &styles),
+            render_status(&r, &styles, true),
             "#[range=user|tma:idle]#[fg=green]○1#[norange] \
              #[range=user|tma:sidebar]#[fg=blue]S#[norange]"
         );
 
         let off: StatusStyles = toml::from_str("sidebar = { glyph = \"\" }").unwrap();
         assert_eq!(
-            render_status(&r, &off),
+            render_status(&r, &off, true),
             "#[range=user|tma:idle]#[fg=green]○1#[norange]",
             "an empty glyph drops the segment, not just its glyph"
         );
         assert_eq!(
-            render_status(&report(vec![]), &off),
+            render_status(&report(vec![]), &off, true),
             "",
             "with the icon off, zero agents is the empty line it always was"
         );
@@ -773,11 +779,33 @@ mod tests {
         assert_eq!(render_status_plain(&r, &styles), "○1");
     }
 
+    /// The icon is nothing but a click target, so it renders only where a click can reach it. The
+    /// counts are different: they carry their meaning without the mouse and always render.
+    #[test]
+    fn status_sidebar_icon_renders_only_when_it_is_clickable() {
+        let r = report(vec![row("%1", "c", AgentState::Idle, None)]);
+        let counts = "#[range=user|tma:idle]#[fg=green]○1#[norange]";
+        assert_eq!(
+            render_status(&r, &StatusStyles::default(), true),
+            format!("{counts}{SIDEBAR}")
+        );
+        assert_eq!(
+            render_status(&r, &StatusStyles::default(), false),
+            counts,
+            "no reachable click ⇒ the icon is dropped, the counts stay"
+        );
+        assert_eq!(
+            render_status(&report(vec![]), &StatusStyles::default(), false),
+            "",
+            "and with no agents either, the line is empty rather than a dead icon"
+        );
+    }
+
     #[test]
     fn status_unknown_uses_colour244() {
         let r = report(vec![row("%1", "c", AgentState::Unknown, None)]);
         assert_eq!(
-            render_status(&r, &StatusStyles::default()),
+            render_status(&r, &StatusStyles::default(), true),
             format!("#[range=user|tma:unknown]#[fg=colour244]?1#[norange]{SIDEBAR}")
         );
     }
@@ -791,7 +819,7 @@ mod tests {
             row("%1", "c", AgentState::Blocked, None),
             row("%2", "c", AgentState::Working, None),
         ]);
-        let line = render_status(&r, &StatusStyles::default());
+        let line = render_status(&r, &StatusStyles::default(), true);
         // Two classes plus the trailing sidebar icon.
         assert_eq!(line.matches("#[range=user|tma:").count(), 3);
         assert_eq!(
@@ -1005,7 +1033,7 @@ mod tests {
             row("%2", "c", AgentState::Working, None),
         ]);
         assert_eq!(
-            render_status(&r, &styles),
+            render_status(&r, &styles, true),
             format!(
                 "#[range=user|tma:blocked]#[fg=colour196]B1#[norange] \
                  #[range=user|tma:working]#[fg=yellow]●1#[norange]{SIDEBAR}"
