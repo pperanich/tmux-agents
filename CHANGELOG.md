@@ -22,6 +22,13 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   `tma doctor` now reports the reference and whether `$PATH` still answers it (`wrapper: tma-hook ✓
   on $PATH (…)`, plus a `"reference"` key in `--json`). The default is unchanged.
 
+### Fixed
+
+- `hooks_state_is_keyed_per_server` no longer fails for anyone who has tma wired for real: its
+  `--check` inspects every bundled agent, but only Claude's and Codex's paths were pinned to the
+  test's scratch dir, so the developer's own `~/.gemini`, `~/.cursor`, `~/.pi` and OpenCode configs
+  were read and their (correct) wrapper paths reported as drift. Test-only.
+
 ## [0.3.0] - 2026-08-17
 
 ### Breaking

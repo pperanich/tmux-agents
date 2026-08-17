@@ -91,6 +91,13 @@ impl Scratch {
     /// `tma install-hooks …` with every path pinned to the temp workdir and the scratch
     /// socket — never the real config or default server.
     fn install_hooks(&self, extra: &[&str]) -> Output {
+        self.install_hooks_env(extra, &[])
+    }
+
+    /// [`Self::install_hooks`] with extra environment for the child. The `--wrapper-ref bare` tests
+    /// set `PATH`, which they can only do per-spawn: the suite runs in parallel, so mutating this
+    /// process's environment would leak into every other test.
+    fn install_hooks_env(&self, extra: &[&str], env: &[(&str, &str)]) -> Output {
         let settings = self.settings();
         let cfg = self.config_dir();
         let wrapper = self.wrapper();
@@ -121,12 +128,38 @@ impl Scratch {
             "--socket-name".into(),
             self.socket.clone(),
         ]);
-        Command::new(env!("CARGO_BIN_EXE_tma"))
-            .args(&args)
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tma"));
+        cmd.args(&args)
             .env("TMA_BIN", env!("CARGO_BIN_EXE_tma"))
-            .env("TMA_CONFIG", common::empty_config_path())
-            .output()
-            .expect("spawn tma")
+            .env("TMA_CONFIG", common::empty_config_path());
+        for (k, v) in env {
+            cmd.env(k, v);
+        }
+        cmd.output().expect("spawn tma")
+    }
+
+    /// A `PATH` with the wrapper's own directory in front, so a bare reference resolves. The
+    /// inherited `PATH` stays behind it: tma still has to find `tmux`.
+    fn path_with_wrapper_dir(&self) -> String {
+        let dir = self.wrapper().parent().unwrap().display().to_string();
+        match Self::path_without_wrapper() {
+            rest if !rest.is_empty() => format!("{dir}:{rest}"),
+            _ => dir,
+        }
+    }
+
+    /// The inherited `PATH` with every directory holding a `tma-hook` dropped, so a bare reference
+    /// does NOT resolve. A developer running the suite usually has tma installed for real, and that
+    /// copy would otherwise answer for the one under test.
+    fn path_without_wrapper() -> String {
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let kept: Vec<_> = std::env::split_paths(&inherited)
+            .filter(|dir| !dir.join("tma-hook").exists())
+            .collect();
+        std::env::join_paths(kept)
+            .expect("rejoin PATH")
+            .to_string_lossy()
+            .into_owned()
     }
 }
 
@@ -672,6 +705,20 @@ fn hooks_state_is_keyed_per_server() {
             s.codex_config().display().to_string(),
             "--codex-hooks".into(),
             s.codex_hooks().display().to_string(),
+            // The bare `--check` below inspects EVERY bundled agent, so every agent path has to be
+            // pinned to the scratch (SAFETY): unpinned, it reads the developer's own wired
+            // ~/.gemini, ~/.cursor, ~/.pi and opencode configs and reports their (correct,
+            // real-install) wrapper path as drift against this test's.
+            "--gemini-settings".into(),
+            s.gemini_settings().display().to_string(),
+            "--cursor-hooks".into(),
+            s.cursor_hooks().display().to_string(),
+            "--cursor-cli-config".into(),
+            s.cursor_cli_config().display().to_string(),
+            "--pi-extension".into(),
+            s.pi_extension().display().to_string(),
+            "--opencode-plugin".into(),
+            s.opencode_plugin().display().to_string(),
             "--socket-name".into(),
             s.socket.clone(),
         ]);
@@ -965,6 +1012,107 @@ fn check_reports_missing_wrapper() {
     assert!(
         report.contains("wrapper"),
         "report names the missing wrapper: {report}"
+    );
+}
+
+/// `--wrapper-ref bare` writes the NAME `tma-hook` into every mechanism, not the install-time path:
+/// the shell-run command strings (Claude) and the argv arrays (Codex's `notify`) alike, which is the
+/// whole point — a `$HOME`-relative string would be passed through literally by the argv ones.
+/// The wrapper file still lands next to the binary; only what the configs say about it changes.
+#[test]
+fn bare_wrapper_ref_writes_the_name_for_shell_and_argv_agents() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new();
+    assert!(s
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
+        .status
+        .success());
+    std::fs::write(s.settings(), "{}\n").unwrap();
+    let path = s.path_with_wrapper_dir();
+    let on_path = [("PATH", path.as_str())];
+
+    for agent in ["claude", "codex"] {
+        let out = s.install_hooks_env(&[agent, "--yes", "--wrapper-ref", "bare"], &on_path);
+        assert!(
+            out.status.success(),
+            "{agent} install failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    let abs = s.wrapper().display().to_string();
+    assert!(
+        s.wrapper().is_file(),
+        "the file still goes next to the binary"
+    );
+
+    // Claude: a shell-run command string.
+    let settings = std::fs::read_to_string(s.settings()).unwrap();
+    assert!(
+        settings.contains("tma-hook claude Notification") && !settings.contains(&abs),
+        "claude names the wrapper: {settings}"
+    );
+    // Codex: `notify` is argv, spawned with no shell at all.
+    let codex = std::fs::read_to_string(s.codex_config()).unwrap();
+    assert!(
+        codex.contains("\"tma-hook\"") && !codex.contains(&abs),
+        "codex notify names the wrapper: {codex}"
+    );
+
+    // `--check` agrees with what install wrote, given the same posture.
+    assert!(
+        s.install_hooks_env(&["--check", "--wrapper-ref", "bare"], &on_path)
+            .status
+            .success(),
+        "--check must pass right after a bare install"
+    );
+
+    // And it is honest when the posture disagrees: checking for absolute wiring against a bare
+    // install is real drift, since the two write different strings. Re-installing repoints them.
+    let out = s.install_hooks(&["--check"]);
+    assert!(
+        !out.status.success(),
+        "an absolute --check over bare wiring is drift, not a pass"
+    );
+}
+
+/// A bare reference the agent's `$PATH` cannot answer is a silent outage: the wrapper's contract is
+/// to exit 0 when it cannot resolve `tma`, and an unresolvable wrapper never runs at all, so nothing
+/// anywhere reports a failure. Install refuses instead of wiring hooks that will never fire.
+#[test]
+fn bare_wrapper_ref_refuses_when_it_is_not_on_path() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new();
+    assert!(s
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
+        .status
+        .success());
+
+    // The wrapper's directory is a fresh temp dir, and any real tma-hook the developer has
+    // installed is stripped out, so the name resolves nowhere.
+    let path = Scratch::path_without_wrapper();
+    let out = s.install_hooks_env(
+        &["claude", "--yes", "--wrapper-ref", "bare"],
+        &[("PATH", path.as_str())],
+    );
+    assert!(
+        !out.status.success(),
+        "install must refuse an unfindable reference"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("PATH") && err.contains("tma-hook"),
+        "the refusal names the problem: {err}"
+    );
+    assert!(
+        !s.settings().exists(),
+        "nothing may be wired to a reference that does not resolve"
     );
 }
 
