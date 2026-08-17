@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-08-17
+
 ### Fixed
 
 - The daemon's status file no longer reports a `tma wait` subscriber that has already exited. A push
@@ -92,7 +94,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/pperanich/tmux-agents/compare/v0.2.0...v0.2.1
 [0.2.0]: https://github.com/pperanich/tmux-agents/compare/v0.1.1...v0.2.0
 [0.1.1]: https://github.com/pperanich/tmux-agents/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/pperanich/tmux-agents/releases/tag/v0.1.0
