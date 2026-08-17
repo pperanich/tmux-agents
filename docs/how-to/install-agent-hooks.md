@@ -41,9 +41,15 @@ of your own that calls `tma-hook <agent> context` alongside your real statusline
 and leave the shim uninstalled — `tma-hook` is generic over the event name, and
 `tma event` falls back to `$TMUX_PANE` from the environment.
 
-`--check` follows the same three-way split: bare, it reports a shim that is
-installed but was never asked for (naming both remedies); `--check --statusline`
-requires it; `--check --no-statusline` requires its absence.
+You state the choice once. `--statusline` records the agent in
+`statusline-state.toml` in tma's config dir, so a later plain `install-hooks`
+keeps the shim current (re-pointing it at a moved binary) instead of reporting it,
+and `--no-statusline` clears the record along with the shim.
+
+`--check` reads the same record: with no flag it passes for an agent that opted in
+and for one with no shim, and reports only a shim nobody asked for — which is what
+an install from before this release looks like. `--check --statusline` requires the
+shim regardless; `--check --no-statusline` requires its absence.
 
 For which states each agent's hooks cover and why, see
 [Agent coverage](../reference/agent-coverage.md). For every flag and path

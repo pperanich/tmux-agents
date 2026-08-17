@@ -16,8 +16,10 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   touch your `statusLine` command; wire it with `tma install-hooks <agent> --statusline`, or remove
   an existing one with `--no-statusline`. It was the only wiring that edited a value you already own
   rather than adding tma's keys beside it, and it composed your statusline into a generated shell
-  one-liner. An installed shim keeps working and is reported by `--check` and `tma doctor` until you
-  say which way you want it. What the shim buys is the context-window gauge (`@agent_tokens`) and the
+  one-liner. The choice is recorded per agent, so you state it once: after `--statusline`, a later
+  plain `install-hooks` keeps the shim current and `--check` stays quiet. A shim installed before
+  this release has no record, so `--check` and `tma doctor` report it until you say which way you
+  want it. What the shim buys is the context-window gauge (`@agent_tokens`) and the
   compact action that gates on it; hooks cover everything else.
 
 ## [0.2.1] - 2026-08-17

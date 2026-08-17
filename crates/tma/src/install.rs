@@ -237,9 +237,19 @@ fn install(
         return ExitCode::FAILURE;
     }
 
-    // 2. Agent config: wire the wrapper via the agent's own mechanism (the honest split).
+    // 2. Agent config: wire the wrapper via the agent's own mechanism (the honest split). With
+    // neither statusline flag, a previous opt-in stands, so a plain re-install keeps an asked-for
+    // shim current rather than leaving it to rot behind a moved binary.
+    let statusline = effective_statusline(statusline, &lm.name, config_dir);
     if !adapter.install(lm, paths, wrapper, assume_yes, statusline) {
         return ExitCode::FAILURE;
+    }
+    // Record the choice only once the write succeeded, and only when the flags stated one: `Keep`
+    // is "no opinion", which must not overwrite the opinion already on file.
+    match statusline {
+        Statusline::Install => record_statusline(config_dir, &lm.name, true),
+        Statusline::Remove => record_statusline(config_dir, &lm.name, false),
+        Statusline::Keep => {}
     }
 
     // 3. tmux server hooks + record the assigned indexes. The hook set depends on the
@@ -604,7 +614,14 @@ fn build_diagnosis(
         .iter()
         .map(|lm| AgentHooks {
             agent: lm.name.clone(),
-            wiring: classify_agent(lm, paths, wrapper, statusline),
+            // Per agent, because the opt-in is per agent: a `--check`/doctor with no statusline flag
+            // asks the record what this agent wanted, so an opt-in is not re-reported forever.
+            wiring: classify_agent(
+                lm,
+                paths,
+                wrapper,
+                effective_statusline(statusline, &lm.name, config_dir),
+            ),
         })
         .collect();
 
@@ -895,6 +912,72 @@ fn write_wrapper(wrapper: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// The agents that asked for the statusline shim, persisted to `statusline-state.toml`.
+///
+/// Not keyed per server, unlike [`HooksState`]: the shim lives in the agent's own config file
+/// (`~/.claude/settings.json`), which every tmux server on the machine shares.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct StatuslineState {
+    #[serde(default)]
+    agents: Vec<String>,
+}
+
+fn statusline_state_path(config_dir: &Path) -> PathBuf {
+    config_dir.join("statusline-state.toml")
+}
+
+/// Whether `agent` has asked for the statusline shim before. An absent or unparseable file reads as
+/// "never asked", which is the safe direction: the shim is reported rather than silently kept.
+fn statusline_opted_in(config_dir: &Path, agent: &str) -> bool {
+    std::fs::read_to_string(statusline_state_path(config_dir))
+        .ok()
+        .and_then(|text| toml::from_str::<StatuslineState>(&text).ok())
+        .is_some_and(|state| state.agents.iter().any(|a| a == agent))
+}
+
+/// Record (or clear) `agent`'s statusline opt-in. Best-effort: a write failure costs a re-run of the
+/// flag, never the install itself, so it warns rather than aborting.
+fn record_statusline(config_dir: &Path, agent: &str, opted_in: bool) {
+    let mut state = std::fs::read_to_string(statusline_state_path(config_dir))
+        .ok()
+        .and_then(|text| toml::from_str::<StatuslineState>(&text).ok())
+        .unwrap_or_default();
+    let present = state.agents.iter().any(|a| a == agent);
+    if opted_in == present {
+        return;
+    }
+    if opted_in {
+        state.agents.push(agent.to_string());
+        state.agents.sort();
+    } else {
+        state.agents.retain(|a| a != agent);
+    }
+    let header = "# tma statusline-shim opt-in record: the agents that asked for the context shim\n\
+                  # (`install-hooks <agent> --statusline`), so a later plain install keeps it current\n\
+                  # instead of reporting it. `--no-statusline` clears an entry.\n";
+    let written = std::fs::create_dir_all(config_dir).and_then(|()| {
+        let toml = toml::to_string(&state)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
+        std::fs::write(statusline_state_path(config_dir), format!("{header}{toml}"))
+    });
+    if let Err(err) = written {
+        eprintln!(
+            "tma: could not record the statusline choice in {}: {err}",
+            statusline_state_path(config_dir).display()
+        );
+    }
+}
+
+/// The statusline intent this run acts on: what the flags said, or — with neither flag — what the
+/// agent asked for last time. This is what keeps an opt-in from being re-litigated on every later
+/// `install-hooks`, `--check` and `doctor`, while a shim nobody ever asked for still gets reported.
+fn effective_statusline(requested: Statusline, agent: &str, config_dir: &Path) -> Statusline {
+    match requested {
+        Statusline::Keep if statusline_opted_in(config_dir, agent) => Statusline::Install,
+        other => other,
+    }
+}
+
 fn write_hooks_state(config_dir: &Path, tmux: &Tmux, state: &HooksState) -> io::Result<()> {
     std::fs::create_dir_all(config_dir)?;
     let toml = toml::to_string(state)
@@ -911,6 +994,93 @@ fn write_hooks_state(config_dir: &Path, tmux: &Tmux, state: &HooksState) -> io::
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ---- the statusline opt-in record -------------------------------------------
+
+    fn scratch_dir(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tma_sl_state_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// The record is what stops an opt-in being re-litigated: with neither flag, an agent that asked
+    /// for the shim resolves to `Install` (keep it current, and require it in `--check`), while an
+    /// agent that never asked stays `Keep` — the state where a shim nobody requested is reported.
+    /// An explicit flag always wins over the record, since it is the user restating the choice.
+    #[test]
+    fn a_recorded_opt_in_survives_a_later_flagless_run() {
+        let dir = scratch_dir("optin");
+
+        assert!(!statusline_opted_in(&dir, "claude"), "nothing on file yet");
+        assert_eq!(
+            effective_statusline(Statusline::Keep, "claude", &dir),
+            Statusline::Keep
+        );
+
+        record_statusline(&dir, "claude", true);
+        assert!(statusline_opted_in(&dir, "claude"));
+        assert_eq!(
+            effective_statusline(Statusline::Keep, "claude", &dir),
+            Statusline::Install,
+            "a flagless run honors the recorded opt-in rather than reporting the shim"
+        );
+        assert_eq!(
+            effective_statusline(Statusline::Remove, "claude", &dir),
+            Statusline::Remove,
+            "an explicit --no-statusline still wins over the record"
+        );
+        assert_eq!(
+            effective_statusline(Statusline::Keep, "cursor", &dir),
+            Statusline::Keep,
+            "the record is per agent"
+        );
+
+        record_statusline(&dir, "claude", false);
+        assert!(
+            !statusline_opted_in(&dir, "claude"),
+            "--no-statusline clears it"
+        );
+        assert_eq!(
+            effective_statusline(Statusline::Keep, "claude", &dir),
+            Statusline::Keep
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Recording is idempotent and additive across agents, and an unreadable/absent file reads as
+    /// "never asked" rather than erroring — the safe direction, since it only costs a re-run of the
+    /// flag whereas the opposite would silently keep a shim.
+    #[test]
+    fn the_record_holds_several_agents_and_tolerates_a_missing_file() {
+        let dir = scratch_dir("multi");
+        assert!(!statusline_opted_in(&dir.join("nope"), "claude"));
+
+        record_statusline(&dir, "cursor", true);
+        record_statusline(&dir, "claude", true);
+        record_statusline(&dir, "claude", true); // idempotent
+        let text = std::fs::read_to_string(statusline_state_path(&dir)).unwrap();
+        let state: StatuslineState = toml::from_str(&text).unwrap();
+        assert_eq!(
+            state.agents,
+            vec!["claude".to_string(), "cursor".to_string()]
+        );
+
+        record_statusline(&dir, "claude", false);
+        assert!(
+            statusline_opted_in(&dir, "cursor"),
+            "one agent's opt-out leaves the other"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     // ---- tmux hook drift + late binding -----------------------------------------
 

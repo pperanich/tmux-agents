@@ -1136,9 +1136,18 @@ fn cursor_install_uninstall_round_trip_and_scoped_check() {
             .success(),
         "a clobbered statusLine shim must fail `--check --statusline`"
     );
+    // And a bare check catches it too, because the `--statusline` install recorded the opt-in: this
+    // agent asked for the shim, so its disappearance is drift without having to restate the flag.
     assert!(
-        s.install_hooks(&["cursor", "--check"]).status.success(),
-        "with no shim asked for, the user's own statusLine is not drift"
+        !s.install_hooks(&["cursor", "--check"]).status.success(),
+        "an opted-in agent's clobbered shim is drift for a bare --check"
+    );
+    // Disowning it explicitly passes, which is the escape hatch for someone who changed their mind.
+    assert!(
+        s.install_hooks(&["cursor", "--check", "--no-statusline"])
+            .status
+            .success(),
+        "--check --no-statusline is satisfied by the user's own statusLine"
     );
     // Reinstall to restore the shim before uninstall.
     assert!(s
