@@ -148,6 +148,11 @@ pub(crate) struct InitArgs {
 pub(crate) struct InstallHooksArgs {
     /// The agent whose config to wire (e.g. `claude`). Optional only with `--check`.
     pub(crate) agent: Option<String>,
+    /// Act on every agent that already carries tma wiring instead of one named agent: the set bare
+    /// `--check` reports on. Repoints them all after a `[install] wrapper_ref` change or a moved
+    /// binary; with `--uninstall`, unwires every one.
+    #[arg(long)]
+    pub(crate) all: bool,
     /// Remove tma's hook wiring (symmetric to install).
     #[arg(long)]
     pub(crate) uninstall: bool,

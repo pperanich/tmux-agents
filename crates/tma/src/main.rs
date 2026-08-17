@@ -214,6 +214,7 @@ fn main() -> ExitCode {
                 _ => install::Statusline::Keep,
             },
             agent: args.agent,
+            all: args.all,
             uninstall: args.uninstall,
             check: args.check,
             assume_yes: args.yes,

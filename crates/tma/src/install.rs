@@ -66,8 +66,11 @@ fn desired_hooks(focus_events: bool) -> Vec<&'static str> {
 
 /// Options for `tma install-hooks` (parsed from the CLI in `main`).
 pub(crate) struct InstallOpts {
-    /// The agent to (un)install; `None` is only valid with `--check` (checks all agents).
+    /// The agent to (un)install; `None` is only valid with `--check` (checks all agents) or
+    /// [`Self::all`].
     pub agent: Option<String>,
+    /// `--all`: act on every agent that ALREADY carries tma wiring, instead of one named agent.
+    pub all: bool,
     pub uninstall: bool,
     pub check: bool,
     /// What to do about the statusline context shim (`--statusline` / `--no-statusline`); see
@@ -147,6 +150,12 @@ pub(crate) fn run(opts: InstallOpts) -> ExitCode {
     let wrapper = Wrapper::resolve(opts.wrapper_path.as_deref(), opts.wrapper_ref);
     let tmux = Tmux::connect(&opts.server);
 
+    // `--all` names its own set, so naming an agent too says two different things at once.
+    if opts.all && opts.agent.is_some() {
+        eprintln!("tma: --all covers every wired agent; drop the agent name, or drop --all");
+        return ExitCode::FAILURE;
+    }
+
     if opts.check {
         // A named agent that run_check would silently skip deserves the same signal the
         // install path gives loudly: not tma-installable, wire manually.
@@ -177,8 +186,15 @@ pub(crate) fn run(opts: InstallOpts) -> ExitCode {
         );
     }
 
+    if opts.all {
+        return run_all(&manifests, &paths, &config_dir, &wrapper, &tmux, &opts);
+    }
+
     let Some(agent) = opts.agent.as_deref() else {
-        eprintln!("tma: install-hooks needs an agent (e.g. `tma install-hooks claude`)");
+        eprintln!(
+            "tma: install-hooks needs an agent (e.g. `tma install-hooks claude`), or --all for \
+             every agent already wired"
+        );
         return ExitCode::FAILURE;
     };
     let Some(lm) = manifests.iter().find(|m| m.name == agent) else {
@@ -208,6 +224,85 @@ pub(crate) fn run(opts: InstallOpts) -> ExitCode {
             opts.statusline,
         )
     }
+}
+
+/// `--all`: (re)install or uninstall every agent that ALREADY carries tma wiring — the set bare
+/// `--check` reports on, NOT every agent tma ships an adapter for.
+///
+/// The distinction is the whole design: installing every installable agent would create a
+/// `~/.gemini/settings.json` for someone who has never run Gemini. This only rewrites config files
+/// that already hold tma's wiring, which is what a changed `[install] wrapper_ref` or a moved binary
+/// needs — including the agents `tma init` skips, since it wires only what it finds on `$PATH`.
+fn run_all(
+    manifests: &[LoadedManifest],
+    paths: &ConfigPaths,
+    config_dir: &Path,
+    wrapper: &Wrapper,
+    tmux: &Tmux,
+    opts: &InstallOpts,
+) -> ExitCode {
+    // Statusline::Keep: this asks "is there wiring here", a question no statusline flag changes.
+    // Whether each agent's shim is installed stays that agent's recorded choice, applied below.
+    let wired: Vec<&LoadedManifest> = manifests
+        .iter()
+        .filter(|lm| {
+            matches!(
+                classify_agent(lm, paths, wrapper.reference(), Statusline::Keep),
+                HookWiring::Wired | HookWiring::Incomplete(_)
+            )
+        })
+        .collect();
+
+    let verb = if opts.uninstall {
+        "uninstalling"
+    } else {
+        "wiring"
+    };
+    if wired.is_empty() {
+        println!(
+            "tma: no agent is wired, so there is nothing to change; name one \
+             (`tma install-hooks claude`) or run `tma init`"
+        );
+        return ExitCode::SUCCESS;
+    }
+
+    // One agent's failure must not strand the rest half-repointed, so every agent is attempted and
+    // the failures are named at the end.
+    let mut failed: Vec<&str> = Vec::new();
+    for lm in wired {
+        println!("\ntma: {verb} {} ...", lm.name);
+        let code = if opts.uninstall {
+            uninstall(
+                lm,
+                manifests,
+                paths,
+                config_dir,
+                wrapper,
+                tmux,
+                opts.assume_yes,
+            )
+        } else {
+            install(
+                lm,
+                paths,
+                config_dir,
+                wrapper,
+                tmux,
+                opts.assume_yes,
+                opts.focus_events,
+                opts.statusline,
+            )
+        };
+        if !matches!(code, ExitCode::SUCCESS) {
+            failed.push(&lm.name);
+        }
+    }
+
+    if failed.is_empty() {
+        return ExitCode::SUCCESS;
+    }
+    eprintln!("tma: {} did not complete: {}", verb, failed.join(", "));
+    ExitCode::FAILURE
 }
 
 // --- install / uninstall ---------------------------------------------------------

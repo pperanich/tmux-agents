@@ -721,7 +721,8 @@ with `--check`.
 
 | option | meaning |
 |---|---|
-| `--uninstall` | Remove tma's hook wiring (symmetric to install). |
+| `--all` | Act on every agent that already carries tma wiring (the set bare `--check` inspects) instead of one named agent: repoints them all after an `[install] wrapper_ref` change or a moved binary, and with `--uninstall` unwires every one. It never wires an agent that was not wired before, so it cannot create a config for an agent you do not use. Naming an agent as well is a usage error. |
+| `--uninstall` | Remove tma's hook wiring (symmetric to install). Removes every entry of tma's for the wired events, including one left by an older install at a different wrapper path. |
 | `--check` | Verify hook wiring and report drift. Bare (`--check`) inspects every known agent; with an agent named, the drift report and exit code scope to that agent. The shared wrapper and tmux server hooks are always checked. |
 | `--statusline` | Also wire the statusline context shim (Claude, Cursor), which composes tma's context intake into the agent's own `statusLine` command. Opt-in: it edits a command you own. Recorded in `statusline-state.toml`, so later flagless runs keep it current. With `--check`, require it. |
 | `--no-statusline` | Remove the shim, restoring the command it wrapped, and clear the record. With `--check`, require its absence. |

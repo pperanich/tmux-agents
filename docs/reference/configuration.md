@@ -195,9 +195,9 @@ wrapper: tma-hook ✓ on $PATH (/home/you/.local/bin/tma-hook)
 ```
 
 Set the key before installing, or pass `--wrapper-ref bare` for one run. The two
-postures write different strings, so after switching, re-run `tma install-hooks
-<agent>` for each wired agent: until you do, `--check` correctly reports the old
-wiring as drift.
+postures write different strings, so after switching, run `tma install-hooks
+--all` to repoint every agent already wired: until you do, `--check` reports the
+old wiring as stale.
 
 ## `[tmux]`: which tmux binary to spawn
 

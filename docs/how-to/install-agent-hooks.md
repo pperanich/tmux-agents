@@ -294,9 +294,20 @@ directory that does not exist on one of them. Switch to the portable form:
 wrapper_ref = "bare"
 ```
 
-Then re-run `tma install-hooks <agent>` for each wired agent and the entries
-become `tma-hook claude Stop`, which every machine resolves off its own `$PATH`.
-`--wrapper-ref bare` does the same for a single run without touching config.
+Then repoint everything already wired in one command:
+
+```
+tma install-hooks --all
+```
+
+The entries become `tma-hook claude Stop`, which every machine resolves off its
+own `$PATH`. `--wrapper-ref bare` does the same for a single run without touching
+config.
+
+`--all` covers the agents that already carry tma wiring, which is a different set
+from the one `tma init` wires: init only touches agents whose launcher it finds on
+`$PATH`, so an agent you have since removed from `$PATH` keeps its old wiring
+through a re-run of init but is repointed by `--all`.
 
 `$HOME` is deliberately not an option here. Half the wiring never reaches a
 shell: Codex's `notify` is an argv array, and the OpenCode plugin and pi extension

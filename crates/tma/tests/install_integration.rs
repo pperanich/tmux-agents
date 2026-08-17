@@ -1116,6 +1116,127 @@ fn bare_wrapper_ref_refuses_when_it_is_not_on_path() {
     );
 }
 
+/// `--all` acts on the agents that ALREADY carry wiring, which is what makes it the repoint tool: a
+/// `wrapper_ref` switch rewrites every wired config in one command. It must not touch an agent that
+/// was never wired (that would create a config file for an agent you do not use), and `--uninstall`
+/// over the same set unwires exactly those.
+#[test]
+fn all_repoints_every_wired_agent_and_leaves_the_rest_alone() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new();
+    assert!(s
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
+        .status
+        .success());
+    std::fs::write(s.settings(), "{}\n").unwrap();
+
+    // Two agents wired the default way; gemini deliberately left alone.
+    for agent in ["claude", "codex"] {
+        assert!(
+            s.install_hooks(&[agent, "--yes"]).status.success(),
+            "wiring {agent}"
+        );
+    }
+    assert!(!s.gemini_settings().exists(), "gemini starts unwired");
+
+    // The repoint: one command switches both to the portable reference.
+    let path = s.path_with_wrapper_dir();
+    let out = s.install_hooks_env(
+        &["--all", "--yes", "--wrapper-ref", "bare"],
+        &[("PATH", path.as_str())],
+    );
+    assert!(
+        out.status.success(),
+        "--all failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let abs = s.wrapper().display().to_string();
+    let settings = std::fs::read_to_string(s.settings()).unwrap();
+    let codex = std::fs::read_to_string(s.codex_config()).unwrap();
+    assert!(
+        settings.contains("tma-hook claude Notification") && !settings.contains(&abs),
+        "claude repointed: {settings}"
+    );
+    assert!(
+        codex.contains("\"tma-hook\"") && !codex.contains(&abs),
+        "codex repointed: {codex}"
+    );
+    assert!(
+        !s.gemini_settings().exists(),
+        "--all must not wire an agent that was never wired"
+    );
+    assert!(
+        s.install_hooks_env(
+            &["--check", "--wrapper-ref", "bare"],
+            &[("PATH", path.as_str())]
+        )
+        .status
+        .success(),
+        "--check passes over the repointed set"
+    );
+
+    // Symmetric: --all --uninstall clears exactly the wired set.
+    let out = s.install_hooks_env(
+        &["--all", "--uninstall", "--yes", "--wrapper-ref", "bare"],
+        &[("PATH", path.as_str())],
+    );
+    assert!(
+        out.status.success(),
+        "--all --uninstall failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let settings = std::fs::read_to_string(s.settings()).unwrap();
+    assert!(!settings.contains("tma-hook"), "claude unwired: {settings}");
+    let codex = std::fs::read_to_string(s.codex_config()).unwrap();
+    assert!(!codex.contains("tma-hook"), "codex unwired: {codex}");
+}
+
+/// `--all` over an unwired machine is a no-op that says so, not a failure and not a sweep that
+/// wires every agent tma ships an adapter for. And it refuses to be given an agent name, which
+/// would be asking for two different sets at once.
+#[test]
+fn all_is_a_clean_no_op_when_nothing_is_wired_and_refuses_an_agent() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new();
+    assert!(s
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
+        .status
+        .success());
+
+    let out = s.install_hooks(&["--all", "--yes"]);
+    assert!(
+        out.status.success(),
+        "nothing to do is not a failure: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let report = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        report.contains("no agent is wired"),
+        "it says why it did nothing: {report}"
+    );
+    assert!(
+        !s.settings().exists() && !s.gemini_settings().exists(),
+        "--all must never create a config for an agent that was never wired"
+    );
+
+    let out = s.install_hooks(&["claude", "--all", "--yes"]);
+    assert!(
+        !out.status.success(),
+        "--all with an agent is a usage error"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("--all"),
+        "the error names the flag"
+    );
+}
+
 /// `install-hooks gemini` wires the Claude-shape `hooks` block into gemini's OWN settings.json,
 /// byte-identical round-trip, `gemini --check` scoped, proving it targets its own file and prints
 /// the folder-trust next step.

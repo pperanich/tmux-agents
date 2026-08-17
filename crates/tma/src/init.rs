@@ -193,6 +193,7 @@ fn install_opts(opts: &InitOpts, agent: &str) -> install::InstallOpts {
         // owns, so it stays an explicit `install-hooks <agent> --statusline`.
         statusline: install::Statusline::Keep,
         agent: Some(agent.to_string()),
+        all: false,
         uninstall: false,
         check: false,
         assume_yes: opts.assume_yes,
