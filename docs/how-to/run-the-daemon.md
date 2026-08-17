@@ -75,6 +75,8 @@ flag. There is one daemon per tmux server, keyed by socket.
 
 ## Autostart
 
+Two ways, and they answer different questions.
+
 To have the daemon start automatically the first time you use any surface
 (`ls`/`status`/`jump`/picker/`watch`/`wait`/`subscribe`), set it in config:
 
@@ -82,6 +84,27 @@ To have the daemon start automatically the first time you use any surface
 [daemon]
 autostart = true
 ```
+
+To have it start with the tmux server instead, so the first surface you open is
+already tier 3, put the launcher in the managed keybindings file:
+
+```
+$ tma install-keys --daemon
+```
+
+That writes one `run-shell` line, which tmux runs when a server loads its config:
+
+```
+run-shell -b 'tma --socket-path "#{socket_path}" daemon --ensure >/dev/null 2>&1'
+```
+
+`#{socket_path}` is what makes it multi-server-safe: each server starts a daemon
+for itself, never for the default server. It applies to the next server start;
+run `tma daemon --ensure` to catch the one you are in now. Under Home Manager the
+same line comes from `programs.tma.daemon.autostart = true`.
+
+Both are off by default. The daemon is strictly additive, so nothing breaks
+without it: every surface falls back to polling.
 
 The cadence knobs (`sweep_secs`, `quiet_ms`, `demote_edges`, and others) also live
 under `[daemon]`; see

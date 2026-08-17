@@ -114,6 +114,21 @@ from `~/.config/tma/tmux.conf`.
 `--check` accepts a file with or without it, so not opting in is never reported
 as drift.
 
+## Start the daemon with the tmux server
+
+The other opt-in group is one line rather than a binding:
+
+```
+tma install-keys --daemon
+```
+
+It appends a `run-shell` that starts the event-hub daemon for whichever server
+loads the file, so a new tmux server is at tier 3 before you open a surface. It
+is safe on a re-source (`--ensure` takes a single-instance lock) and needs no
+matching stop line, because the daemon exits when its tmux server does. Details
+and the alternatives in [Run the daemon](run-the-daemon.md). `--check --daemon`
+requires it, exactly like `--check --mouse`.
+
 ## Bind them by hand instead
 
 If you would rather not let tma write config, add the bindings to your tmux

@@ -268,12 +268,19 @@ pub(crate) fn run(opts: InitOpts) -> ExitCode {
     report_status_line(&tmux, &conf);
 
     println!();
-    if install_keys::keys_current(opts.config_dir.as_deref(), opts.conf.as_deref()) {
+    if install_keys::keys_current(
+        opts.config_dir.as_deref(),
+        opts.conf.as_deref(),
+        opts.daemon,
+    ) {
         println!("tma: keybindings already installed and current; skipping");
     } else if !ok(install_keys::run(install_keys::InstallKeysOpts {
         uninstall: false,
         check: false,
         mouse: false,
+        // `--daemon` means "I want the daemon": start it below, and persist the launcher so the
+        // next tmux server gets one too.
+        daemon: opts.daemon,
         assume_yes: opts.assume_yes,
         conf: opts.conf.clone(),
         config_dir: opts.config_dir.clone(),

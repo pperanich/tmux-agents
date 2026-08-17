@@ -73,6 +73,18 @@ in
         bindings are defined twice.
       '';
     };
+
+    daemon.autostart = lib.mkOption {
+      type = lib.types.bool;
+      default = false;
+      description = ''
+        Start the event-hub daemon for every tmux server that loads this config
+        (what `tma install-keys --daemon` writes). `#{socket_path}` pins the
+        server doing the loading, so a `tmux -L work` server gets its own
+        daemon rather than the default one, and `--ensure` is idempotent. The
+        daemon exits on its own when its tmux server does.
+      '';
+    };
   };
 
   config = lib.mkIf cfg.enable {
@@ -80,6 +92,10 @@ in
       {
         assertion = cfg.keybindings.enable -> config.programs.tmux.enable;
         message = "programs.tma.keybindings.enable requires programs.tmux.enable";
+      }
+      {
+        assertion = cfg.daemon.autostart -> config.programs.tmux.enable;
+        message = "programs.tma.daemon.autostart requires programs.tmux.enable";
       }
     ];
 
@@ -100,15 +116,22 @@ in
     # Kept verbatim in sync with the BINDINGS table in crates/tma/src/install_keys.rs; a test there
     # reads this file and fails if the two sets diverge. tmux's `#{...}` formats need no escaping
     # here: Nix antiquotation is `${`, not `#{`.
-    programs.tmux.extraConfig = lib.mkIf cfg.keybindings.enable ''
-      # tma keybindings (programs.tma.keybindings.enable)
-      bind-key a display-popup -E -w 80% -h 60% 'tma'
-      bind-key G new-window 'tma watch --table'
-      bind-key j run-shell 'tma jump --attention --client "#{client_name}"'
-      bind-key g run-shell 'tma jump --blocked --client "#{client_name}"'
-      bind-key b run-shell 'tma jump --back --client "#{client_name}"'
-      bind-key h run-shell 'tma jump --home --client "#{client_name}"'
-      bind-key A run-shell 'tma act --menu --pane "#{pane_id}"'
-    '';
+    programs.tmux.extraConfig = lib.mkMerge [
+      (lib.mkIf cfg.keybindings.enable ''
+        # tma keybindings (programs.tma.keybindings.enable)
+        bind-key a display-popup -E -w 80% -h 60% 'tma'
+        bind-key G new-window 'tma watch --table'
+        bind-key j run-shell 'tma jump --attention --client "#{client_name}"'
+        bind-key g run-shell 'tma jump --blocked --client "#{client_name}"'
+        bind-key b run-shell 'tma jump --back --client "#{client_name}"'
+        bind-key h run-shell 'tma jump --home --client "#{client_name}"'
+        bind-key A run-shell 'tma act --menu --pane "#{pane_id}"'
+      '')
+      # Byte-identical to DAEMON_LINE in crates/tma/src/install_keys.rs; the same test pins it.
+      (lib.mkIf cfg.daemon.autostart ''
+        # tma daemon (programs.tma.daemon.autostart)
+        run-shell -b 'tma --socket-path "#{socket_path}" daemon --ensure >/dev/null 2>&1'
+      '')
+    ];
   };
 }

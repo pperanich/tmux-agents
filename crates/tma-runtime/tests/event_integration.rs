@@ -714,9 +714,9 @@ fn wrapper_exits_zero_silently_when_binary_missing() {
     use std::io::Write;
     let s = Scratch::new("event");
     let wrapper = wrapper(&s); // copied into the workdir with no sibling `tma` next to it
-    // A PATH holding `dirname` and nothing else, so the wrapper's own utilities resolve but `tma`
-    // cannot. Symlinked rather than pointed at `/usr/bin:/bin`, which the nix build sandbox does
-    // not mount, and rather than copied, which breaks a multi-call coreutils build.
+                               // A PATH holding `dirname` and nothing else, so the wrapper's own utilities resolve but `tma`
+                               // cannot. Symlinked rather than pointed at `/usr/bin:/bin`, which the nix build sandbox does
+                               // not mount, and rather than copied, which breaks a multi-call coreutils build.
     let path_dir = s.workdir.join("emptypath");
     std::fs::create_dir_all(&path_dir).unwrap();
     let Some(dirname) = which("dirname") else {

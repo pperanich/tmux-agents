@@ -207,6 +207,10 @@ pub(crate) struct InstallKeysArgs {
     /// With `--check`, require them.
     #[arg(long)]
     pub(crate) mouse: bool,
+    /// Also start the event-hub daemon on every tmux server start (a `run-shell` line running
+    /// `tma daemon --ensure` for the server that sources the file). With `--check`, require it.
+    #[arg(long)]
+    pub(crate) daemon: bool,
     /// Apply without the interactive diff confirmation (scripts, tests).
     #[arg(long)]
     pub(crate) yes: bool,

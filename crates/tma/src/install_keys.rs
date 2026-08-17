@@ -118,6 +118,15 @@ const MOUSE_BINDINGS: &[Binding] = &[
 /// took the group: `tma doctor` reads it to pair the bindings against the server's `mouse` option.
 const MOUSE_LINE_PREFIX: &str = "bind-key -n Mouse";
 
+/// The opt-in daemon launcher (`--daemon`). The managed file is sourced from the user's tmux config,
+/// so this fires once per server start. `#{socket_path}` (expanded by `run-shell` at load time)
+/// pins the server doing the sourcing, so a `tmux -L work` server daemonizes itself rather than the
+/// ambient default one; `-b` keeps the spawn off the config-load path, and the redirect keeps a
+/// missing binary from surfacing as a tmux message. `--ensure` is idempotent, so a re-source is a
+/// no-op rather than a second daemon.
+const DAEMON_LINE: &str =
+    "run-shell -b 'tma --socket-path \"#{socket_path}\" daemon --ensure >/dev/null 2>&1'";
+
 /// Whether the managed keybindings file carries the mouse group. File-based, like every other
 /// `install-keys` predicate (the bindings live only in that file), and read-only, for `tma doctor`.
 pub(crate) fn mouse_bindings_installed(config_dir: Option<&Path>) -> bool {
@@ -141,6 +150,9 @@ pub(crate) struct InstallKeysOpts {
     /// Also write the [`MOUSE_BINDINGS`] group (opt-in: it claims tmux's status-line mouse keys and
     /// needs `set -g mouse on`, which tma never sets for you). With `--check`, require them.
     pub mouse: bool,
+    /// Also write the [`DAEMON_LINE`] (opt-in: it starts a resident process for every tmux server
+    /// that sources the file). With `--check`, require it.
+    pub daemon: bool,
     /// Skip the interactive diff confirmation (tests, scripted installs).
     pub assume_yes: bool,
     /// The tmux config to mark with the `source-file` line. Defaults to the first of tmux's own
@@ -169,19 +181,27 @@ pub(crate) fn run(opts: InstallKeysOpts) -> ExitCode {
     let conf = resolve_tmux_conf(opts.conf.as_deref());
 
     if opts.check {
-        return check(&managed, &conf, dir, opts.mouse);
+        return check(&managed, &conf, dir, opts.mouse, opts.daemon);
     }
     if opts.uninstall {
         uninstall(&managed, &conf, opts.assume_yes)
     } else {
-        install(&managed, &conf, dir, opts.assume_yes, opts.mouse)
+        install(
+            &managed,
+            &conf,
+            dir,
+            opts.assume_yes,
+            opts.mouse,
+            opts.daemon,
+        )
     }
 }
 
 /// The managed `tmux.conf` content: a banner then one `bind-key` line per [`BINDINGS`] entry, plus
-/// the root-table [`MOUSE_BINDINGS`] when `mouse`. Deterministic, so a re-install with the same
-/// paths is byte-identical (idempotent).
-fn render_managed(mouse: bool) -> String {
+/// the root-table [`MOUSE_BINDINGS`] when `mouse` and the [`DAEMON_LINE`] when `daemon`. Both
+/// opt-in groups are appended, never woven in. Deterministic, so a re-install with the same paths
+/// is byte-identical (idempotent).
+fn render_managed(mouse: bool, daemon: bool) -> String {
     let mut out = format!(
         "# {MANAGED_MARKER}, managed by `tma install-keys`. Do not hand-edit; re-run to update,\n\
          # or `tma install-keys --uninstall` to remove.\n"
@@ -196,6 +216,13 @@ fn render_managed(mouse: bool) -> String {
         for b in MOUSE_BINDINGS {
             out.push_str(&format!("bind-key -n {} {}\n", b.key, b.command));
         }
+    }
+    if daemon {
+        out.push_str(
+            "# Event-hub daemon, started once per tmux server start (--daemon). Idempotent.\n",
+        );
+        out.push_str(DAEMON_LINE);
+        out.push('\n');
     }
     out
 }
@@ -262,7 +289,14 @@ fn unmark_conf(old: &str) -> Option<String> {
     Some(new)
 }
 
-fn install(managed: &Path, conf: &Path, dir: ConfigDir, assume_yes: bool, mouse: bool) -> ExitCode {
+fn install(
+    managed: &Path,
+    conf: &Path,
+    dir: ConfigDir,
+    assume_yes: bool,
+    mouse: bool,
+    daemon: bool,
+) -> ExitCode {
     // 1. Write the managed bindings file (diff + confirm, idempotent). Refuse to overwrite a
     //    non-empty file at the managed path that we did not write (no banner), even with --yes:
     //    it holds someone's content. This mirrors uninstall, which likewise spares a foreign file.
@@ -275,7 +309,7 @@ fn install(managed: &Path, conf: &Path, dir: ConfigDir, assume_yes: bool, mouse:
         );
         return ExitCode::FAILURE;
     }
-    let new = render_managed(mouse);
+    let new = render_managed(mouse, daemon);
     if !apply_file(managed, &old, &new, assume_yes, "tma keybindings") {
         return ExitCode::FAILURE;
     }
@@ -313,6 +347,12 @@ fn install(managed: &Path, conf: &Path, dir: ConfigDir, assume_yes: bool, mouse:
         println!(
             "tma: the clickable status segments also need `set -g mouse on` (tma does not set it: \
              it changes selection and copy/paste for every pane)."
+        );
+    }
+    if daemon {
+        println!(
+            "tma: the daemon starts with the next tmux server; run `tma daemon --ensure` to start \
+             it for this one now."
         );
     }
     println!(
@@ -379,18 +419,36 @@ fn uninstall(managed: &Path, conf: &Path, assume_yes: bool) -> ExitCode {
 
 /// Whether the keybindings are installed and current, read-only: the `--check` verdict without its
 /// output. `tma init` asks before offering to install, so an already-wired setup is a clean skip
-/// rather than a re-run of the whole diff flow.
-pub(crate) fn keys_current(config_dir: Option<&Path>, conf: Option<&Path>) -> bool {
+/// rather than a re-run of the whole diff flow. `require_daemon` carries `init --daemon` through, so
+/// a file installed without the launcher is not read as current when this run wants one.
+pub(crate) fn keys_current(
+    config_dir: Option<&Path>,
+    conf: Option<&Path>,
+    require_daemon: bool,
+) -> bool {
     let managed = resolve_config_dir(config_dir).join("tmux.conf");
     let dir = config_dir_kind(config_dir);
-    drift(&managed, &resolve_tmux_conf(conf), dir, false).is_empty()
+    drift(
+        &managed,
+        &resolve_tmux_conf(conf),
+        dir,
+        false,
+        require_daemon,
+    )
+    .is_empty()
 }
 
-/// Verify the install. The mouse group is opt-in, so a file WITH it and a file WITHOUT it are both
-/// current: the check accepts either rendering, and only `--check --mouse` insists on the group
-/// (that spelling is how a script asks "are the clickable segments wired?").
-fn check(managed: &Path, conf: &Path, dir: ConfigDir, require_mouse: bool) -> ExitCode {
-    let drift = drift(managed, conf, dir, require_mouse);
+/// Verify the install. Both extra groups are opt-in, so every rendering is current by default:
+/// the check accepts any of the four, and only `--check --mouse` / `--check --daemon` insist on
+/// one (that spelling is how a script asks "are the clickable segments wired?").
+fn check(
+    managed: &Path,
+    conf: &Path,
+    dir: ConfigDir,
+    require_mouse: bool,
+    require_daemon: bool,
+) -> ExitCode {
+    let drift = drift(managed, conf, dir, require_mouse, require_daemon);
     if drift.is_empty() {
         println!("tma: keybindings OK");
         ExitCode::SUCCESS
@@ -406,20 +464,45 @@ fn check(managed: &Path, conf: &Path, dir: ConfigDir, require_mouse: bool) -> Ex
 
 /// Everything about the current install that differs from what a fresh one would write: an empty
 /// list is the whole `--check` verdict, so the printing above and [`keys_current`] cannot diverge.
-fn drift(managed: &Path, conf: &Path, dir: ConfigDir, require_mouse: bool) -> Vec<String> {
+fn drift(
+    managed: &Path,
+    conf: &Path,
+    dir: ConfigDir,
+    require_mouse: bool,
+    require_daemon: bool,
+) -> Vec<String> {
     let mut drift = Vec::new();
 
     match std::fs::read_to_string(managed) {
-        Ok(text) if text == render_managed(true) => {}
-        Ok(text) if text == render_managed(false) && !require_mouse => {}
-        Ok(text) if text == render_managed(false) => drift.push(format!(
-            "keybindings file {} has no mouse bindings; re-run `tma install-keys --mouse`",
-            managed.display()
-        )),
-        Ok(_) => drift.push(format!(
-            "keybindings file {} is stale (differs from what tma would write); reinstall",
-            managed.display()
-        )),
+        // Which of the four renderings this file is, if any: matching none is staleness, matching
+        // one without a required group is a missing group, and the two are different repairs.
+        Ok(text) => {
+            let found = [(false, false), (false, true), (true, false), (true, true)]
+                .into_iter()
+                .find(|&(mouse, daemon)| text == render_managed(mouse, daemon));
+            match found {
+                Some((mouse, daemon)) => {
+                    if require_mouse && !mouse {
+                        drift.push(format!(
+                            "keybindings file {} has no mouse bindings; re-run \
+                             `tma install-keys --mouse`",
+                            managed.display()
+                        ));
+                    }
+                    if require_daemon && !daemon {
+                        drift.push(format!(
+                            "keybindings file {} has no daemon launcher; re-run \
+                             `tma install-keys --daemon`",
+                            managed.display()
+                        ));
+                    }
+                }
+                None => drift.push(format!(
+                    "keybindings file {} is stale (differs from what tma would write); reinstall",
+                    managed.display()
+                )),
+            }
+        }
         Err(_) => drift.push(format!(
             "keybindings file {} missing (never installed)",
             managed.display()
@@ -460,7 +543,7 @@ mod tests {
     /// the ones tmux expands. A change here is a change users must re-run for.
     #[test]
     fn managed_file_emits_exact_binding_lines() {
-        let got = render_managed(false);
+        let got = render_managed(false, false);
         let want = "\
 # tma keybindings, managed by `tma install-keys`. Do not hand-edit; re-run to update,
 # or `tma install-keys --uninstall` to remove.
@@ -482,18 +565,22 @@ bind-key A run-shell 'tma act --menu --pane \"#{pane_id}\"'
     /// The managed file may be sourced TWICE per config load: the default `source-file -q` line
     /// names both the XDG and `$HOME` candidates, and when `XDG_CONFIG_HOME` is `~/.config` they
     /// are the same file. `bind-key` and comments are idempotent under a re-source; anything
-    /// accumulative (`set -ga`, `run-shell` with side effects) would silently double, so the file
-    /// must hold nothing else.
+    /// accumulative (`set -ga`, a `run-shell` that stacks state) would silently double, so the file
+    /// must hold nothing else. The one `run-shell` allowed is [`DAEMON_LINE`], whose `--ensure`
+    /// takes the single-instance flock and exits 0 rather than starting a second daemon.
     #[test]
     fn managed_file_stays_idempotent_under_double_source() {
         for mouse in [false, true] {
-            for line in render_managed(mouse).lines() {
-                assert!(
-                    line.starts_with("bind-key ")
-                        || line.starts_with("bind-key -n ")
-                        || line.starts_with('#'),
-                    "non-idempotent line in the managed file: {line}"
-                );
+            for daemon in [false, true] {
+                for line in render_managed(mouse, daemon).lines() {
+                    assert!(
+                        line.starts_with("bind-key ")
+                            || line.starts_with("bind-key -n ")
+                            || line == DAEMON_LINE
+                            || line.starts_with('#'),
+                        "non-idempotent line in the managed file: {line}"
+                    );
+                }
             }
         }
     }
@@ -505,8 +592,8 @@ bind-key A run-shell 'tma act --menu --pane \"#{pane_id}\"'
     /// `MouseDown1Status` so clicking a window name still switches to it.
     #[test]
     fn mouse_group_emits_exact_binding_lines() {
-        let got = render_managed(true);
-        let base = render_managed(false);
+        let got = render_managed(true, false);
+        let base = render_managed(false, false);
         assert!(
             got.starts_with(&base),
             "the mouse group is appended, not woven in"
@@ -542,7 +629,7 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
             .split_once("# tma keybindings (programs.tma.keybindings.enable)")
             .expect("the module's tma keybindings block")
             .1
-            .split_once("'';")
+            .split_once("'')")
             .expect("the block's closing delimiter")
             .0;
         let module_lines: Vec<&str> = block
@@ -578,6 +665,16 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
         assert!(
             !block.contains("bind-key -n Mouse"),
             "the module deliberately writes no mouse group"
+        );
+        // The module's own daemon option writes the same launcher, so the two cannot drift either.
+        assert!(
+            !block.contains(DAEMON_LINE),
+            "the daemon launcher belongs to its own option, not the keybindings block"
+        );
+        assert!(
+            text.contains(DAEMON_LINE),
+            "{} must carry `{DAEMON_LINE}` verbatim for programs.tma.daemon.autostart",
+            module.display()
         );
     }
 
@@ -741,7 +838,7 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
         std::fs::write(&conf, user_conf).unwrap();
 
         assert!(matches!(
-            install(&managed, &conf, ConfigDir::Pinned, true, false),
+            install(&managed, &conf, ConfigDir::Pinned, true, false, false),
             ExitCode::SUCCESS
         ));
         assert!(managed.exists(), "managed file written");
@@ -752,7 +849,7 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
         // Re-install is a clean no-op on both files.
         let managed_bytes = std::fs::read_to_string(&managed).unwrap();
         assert!(matches!(
-            install(&managed, &conf, ConfigDir::Pinned, true, false),
+            install(&managed, &conf, ConfigDir::Pinned, true, false, false),
             ExitCode::SUCCESS
         ));
         assert_eq!(managed_bytes, std::fs::read_to_string(&managed).unwrap());
@@ -790,18 +887,18 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
 
         assert!(
             matches!(
-                check(&managed, &conf, ConfigDir::Pinned, false),
+                check(&managed, &conf, ConfigDir::Pinned, false, false),
                 ExitCode::FAILURE
             ),
             "nothing installed → drift"
         );
         assert!(matches!(
-            install(&managed, &conf, ConfigDir::Pinned, true, false),
+            install(&managed, &conf, ConfigDir::Pinned, true, false, false),
             ExitCode::SUCCESS
         ));
         assert!(
             matches!(
-                check(&managed, &conf, ConfigDir::Pinned, false),
+                check(&managed, &conf, ConfigDir::Pinned, false, false),
                 ExitCode::SUCCESS
             ),
             "post-install → OK"
@@ -810,7 +907,7 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
         std::fs::write(&managed, "# tma keybindings\nbind-key a detach\n").unwrap();
         assert!(
             matches!(
-                check(&managed, &conf, ConfigDir::Pinned, false),
+                check(&managed, &conf, ConfigDir::Pinned, false, false),
                 ExitCode::FAILURE
             ),
             "a stale managed file → drift"
@@ -844,12 +941,12 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
         .unwrap();
 
         assert!(matches!(
-            install(&managed, &conf, ConfigDir::Default, true, false),
+            install(&managed, &conf, ConfigDir::Default, true, false, false),
             ExitCode::SUCCESS
         ));
         assert!(
             matches!(
-                check(&managed, &conf, ConfigDir::Default, false),
+                check(&managed, &conf, ConfigDir::Default, false, false),
                 ExitCode::SUCCESS
             ),
             "the reinstall healed the drift"
@@ -869,7 +966,7 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
         )
         .unwrap();
         assert!(matches!(
-            check(&managed, &conf, ConfigDir::Default, false),
+            check(&managed, &conf, ConfigDir::Default, false, false),
             ExitCode::FAILURE
         ));
 
@@ -894,7 +991,7 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
         std::fs::create_dir_all(&dir).unwrap();
 
         assert!(matches!(
-            install(&managed, &conf, ConfigDir::Pinned, true, false),
+            install(&managed, &conf, ConfigDir::Pinned, true, false, false),
             ExitCode::SUCCESS
         ));
         let plain = std::fs::read_to_string(&managed).unwrap();
@@ -903,47 +1000,128 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
             "not installed by default"
         );
         assert!(matches!(
-            check(&managed, &conf, ConfigDir::Pinned, false),
+            check(&managed, &conf, ConfigDir::Pinned, false, false),
             ExitCode::SUCCESS
         ));
         assert!(
             matches!(
-                check(&managed, &conf, ConfigDir::Pinned, true),
+                check(&managed, &conf, ConfigDir::Pinned, true, false),
                 ExitCode::FAILURE
             ),
             "--check --mouse insists on the group"
         );
 
         assert!(matches!(
-            install(&managed, &conf, ConfigDir::Pinned, true, true),
+            install(&managed, &conf, ConfigDir::Pinned, true, true, false),
             ExitCode::SUCCESS
         ));
         let with_mouse = std::fs::read_to_string(&managed).unwrap();
         assert_eq!(with_mouse.matches("bind-key -n Mouse").count(), 4);
         assert!(matches!(
-            check(&managed, &conf, ConfigDir::Pinned, true),
+            check(&managed, &conf, ConfigDir::Pinned, true, false),
             ExitCode::SUCCESS
         ));
         assert!(
             matches!(
-                check(&managed, &conf, ConfigDir::Pinned, false),
+                check(&managed, &conf, ConfigDir::Pinned, false, false),
                 ExitCode::SUCCESS
             ),
             "a mouse install is current for a plain --check too"
         );
         // Re-installing with the group is a byte-identical no-op, like the plain install.
         assert!(matches!(
-            install(&managed, &conf, ConfigDir::Pinned, true, true),
+            install(&managed, &conf, ConfigDir::Pinned, true, true, false),
             ExitCode::SUCCESS
         ));
         assert_eq!(with_mouse, std::fs::read_to_string(&managed).unwrap());
 
         // Dropping back to the plain set rewrites the file, and uninstall still removes all of it.
         assert!(matches!(
-            install(&managed, &conf, ConfigDir::Pinned, true, false),
+            install(&managed, &conf, ConfigDir::Pinned, true, false, false),
             ExitCode::SUCCESS
         ));
         assert_eq!(plain, std::fs::read_to_string(&managed).unwrap());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The daemon launcher, verbatim. `#{socket_path}` is the whole point: `run-shell` expands it at
+    /// load time to the socket of the server doing the sourcing, so a `tmux -L work` server starts a
+    /// daemon for ITSELF rather than for the ambient default one a bare `tma daemon --ensure` would
+    /// resolve. A change here is a change users must re-run `tma install-keys --daemon` for.
+    #[test]
+    fn daemon_line_is_emitted_verbatim_and_pins_the_sourcing_server() {
+        let got = render_managed(false, true);
+        let base = render_managed(false, false);
+        assert!(
+            got.starts_with(&base),
+            "the daemon line is appended, not woven in"
+        );
+        let want = "\
+# Event-hub daemon, started once per tmux server start (--daemon). Idempotent.
+run-shell -b 'tma --socket-path \"#{socket_path}\" daemon --ensure >/dev/null 2>&1'
+";
+        assert_eq!(&got[base.len()..], want);
+    }
+
+    /// The daemon line is opt-in in both directions, exactly like the mouse group: absent by default
+    /// and not drift, `--check --daemon` is how you ask whether it is wired, and the two groups
+    /// compose (a mouse+daemon install satisfies a plain `--check`).
+    #[test]
+    fn daemon_line_is_opt_in_and_composes_with_the_mouse_group() {
+        let dir = std::env::temp_dir().join(format!(
+            "tma_keys_daemon_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let managed = dir.join("tma/tmux.conf");
+        let conf = dir.join(".tmux.conf");
+        std::fs::create_dir_all(&dir).unwrap();
+
+        assert!(matches!(
+            install(&managed, &conf, ConfigDir::Pinned, true, false, false),
+            ExitCode::SUCCESS
+        ));
+        assert!(
+            !std::fs::read_to_string(&managed)
+                .unwrap()
+                .contains("tma daemon --ensure"),
+            "not installed by default"
+        );
+        assert!(
+            matches!(
+                check(&managed, &conf, ConfigDir::Pinned, false, true),
+                ExitCode::FAILURE
+            ),
+            "--check --daemon insists on the launcher"
+        );
+
+        // Both groups at once: current for a plain check and for either group's own check.
+        assert!(matches!(
+            install(&managed, &conf, ConfigDir::Pinned, true, true, true),
+            ExitCode::SUCCESS
+        ));
+        let both = std::fs::read_to_string(&managed).unwrap();
+        assert_eq!(both.matches("bind-key -n Mouse").count(), 4);
+        assert_eq!(both.matches(DAEMON_LINE).count(), 1);
+        for (mouse, daemon) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert!(
+                matches!(
+                    check(&managed, &conf, ConfigDir::Pinned, mouse, daemon),
+                    ExitCode::SUCCESS
+                ),
+                "a both-groups install is current for --check mouse={mouse} daemon={daemon}"
+            );
+        }
+        // Re-installing is a byte-identical no-op, so a re-run never doubles the line.
+        assert!(matches!(
+            install(&managed, &conf, ConfigDir::Pinned, true, true, true),
+            ExitCode::SUCCESS
+        ));
+        assert_eq!(both, std::fs::read_to_string(&managed).unwrap());
 
         let _ = std::fs::remove_dir_all(&dir);
     }
@@ -996,7 +1174,7 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(&conf, "set -g mouse on\n").unwrap();
         assert!(matches!(
-            install(&managed, &conf, ConfigDir::Pinned, true, false),
+            install(&managed, &conf, ConfigDir::Pinned, true, false, false),
             ExitCode::SUCCESS
         ));
         let sourcing = std::fs::read_to_string(&conf).unwrap();
@@ -1044,7 +1222,7 @@ bind-key -n MouseDown3StatusRight if-shell -F '#{m:tma:*,#{mouse_status_range}}'
         std::fs::write(&conf, "").unwrap();
 
         assert!(matches!(
-            install(&managed, &conf, ConfigDir::Pinned, true, false),
+            install(&managed, &conf, ConfigDir::Pinned, true, false, false),
             ExitCode::FAILURE
         ));
         assert_eq!(

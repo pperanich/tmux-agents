@@ -230,6 +230,7 @@ fn main() -> ExitCode {
             uninstall: args.uninstall,
             check: args.check,
             mouse: args.mouse,
+            daemon: args.daemon,
             assume_yes: args.yes,
             conf: args.conf,
             config_dir: args.config_dir,
