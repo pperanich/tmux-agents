@@ -23,6 +23,14 @@ fn wrapper(s: &Scratch) -> PathBuf {
     s.workdir.join("bin/tma-hook")
 }
 
+/// First `name` on PATH. Hardcoding `/bin/sleep` would work on macOS and a stock runner, but the nix
+/// Linux build sandbox only mounts `/bin/sh`.
+fn which(name: &str) -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join(name))
+        .find(|p| p.is_file())
+}
+
 /// Run `tma <args>` against the scratch server + temp manifest dir, hook-config paths pinned via env
 /// so both `install-hooks` and `doctor` resolve the same files.
 fn tma(s: &Scratch, args: &[&str]) -> Output {
@@ -314,12 +322,22 @@ fn doctor_names_a_remote_pane_and_its_held_stamp() {
         eprintln!("skipping: tmux not installed");
         return;
     }
-    let s = Scratch::new("remote");
-    // A process whose comm IS `ssh` (what the identity carve-out matches) but that just sleeps,
-    // so the test needs no network and no remote host.
+    let mut s = Scratch::new("remote");
+    let inner = s.nested_socket("remote-inner");
+    // A long-lived process whose comm IS `ssh` (what the identity carve-out matches), so the test
+    // needs no network and no remote host. The blocker is a copy of tmux rather than of `sleep`:
+    // `sleep` is a multi-call binary in some coreutils builds (it dispatches on argv[0] and a copy
+    // named `ssh` exits at once), and where it is a signed system binary macOS kills the copy.
+    let Some(tmux_bin) = which("tmux") else {
+        eprintln!("skipping: no tmux on PATH to copy");
+        return;
+    };
     let fake_ssh = s.workdir.join("ssh");
-    std::fs::copy("/bin/sleep", &fake_ssh).expect("a sleeper named ssh");
-    let cmd = format!("exec {} 100000", fake_ssh.display());
+    std::fs::copy(&tmux_bin, &fake_ssh).expect("a copy of tmux named ssh");
+    let cmd = format!(
+        "exec {} -L {inner} -f /dev/null new-session -A -s in",
+        fake_ssh.display()
+    );
     assert!(s
         .tmux(&["new-session", "-d", "-x", "80", "-y", "24", &cmd])
         .status
