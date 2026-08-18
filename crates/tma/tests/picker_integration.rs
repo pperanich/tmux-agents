@@ -205,11 +205,12 @@ fn picker_enter_jumps_to_highlighted_agent() {
         &format!("picker Enter to jump the client to the blocked agent {work_pane}"),
         || s.display("", "#{pane_id}") == work_pane,
     );
-    // The attention flag for the jumped-to pane is cleared on Enter.
-    assert_eq!(
-        s.display("work", "#{@agent_attention}"),
-        "",
-        "picker jump clears the target's attention flag"
+    // The attention flag for the jumped-to pane is cleared on Enter. The switch-client the poll
+    // above watches for is observable before the clear lands, so this polls rather than asserting
+    // on the next line, which raced and failed on a loaded macOS runner.
+    poll_until(
+        "picker Enter to clear the jumped-to pane's attention flag",
+        || s.display("work", "#{@agent_attention}").is_empty(),
     );
 }
 

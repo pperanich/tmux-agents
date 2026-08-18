@@ -28,6 +28,27 @@ fn wrapper(s: &Scratch) -> PathBuf {
     dst
 }
 
+/// Spawn `cmd`, retrying past `ETXTBSY`. [`wrapper`] re-copies the hook script on every fire, and
+/// file descriptors are process-global: the write fd `fs::copy` holds in one test thread can be
+/// inherited by a child another thread spawns at that instant, and Linux refuses to exec a file
+/// anyone still holds open for writing. macOS does not raise it at all, which is why this only ever
+/// broke the Linux lane.
+fn spawn_wrapper(cmd: &mut Command) -> std::process::Child {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match cmd.spawn() {
+            Ok(child) => return child,
+            Err(e)
+                if e.kind() == std::io::ErrorKind::ExecutableFileBusy
+                    && std::time::Instant::now() < deadline =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            Err(e) => panic!("spawn wrapper: {e:?}"),
+        }
+    }
+}
+
 /// First `name` on PATH, for the one test that has to build a PATH of its own.
 fn which(name: &str) -> Option<PathBuf> {
     std::env::split_paths(&std::env::var_os("PATH")?)
@@ -39,23 +60,23 @@ fn which(name: &str) -> Option<PathBuf> {
 /// `TMUX_PANE` set, and the scratch socket pinned. Notify opt-in is toggled by `notify`.
 fn fire(s: &Scratch, agent: &str, event: &str, pane: &str, payload: &str, notify: bool) {
     use std::io::Write;
-    let mut child = Command::new(wrapper(s))
-        .arg(agent)
-        .arg(event)
-        .env("TMUX_PANE", pane)
-        .env("TMA_HOOK_SOCKET", &s.socket)
-        .env("TMA_BIN", common::tma_bin())
-        // The wrapper passes its env through to the inner `tma event`; pin the config to the
-        // empty default so that process never reads the real `~/.config/tma/config.toml`.
-        .env("TMA_CONFIG", common::empty_config_path())
-        .env("TMA_NOTIFY_FROM_EVENT", if notify { "1" } else { "0" })
-        // The wrapper forwards no manifest flag, so `tma event` uses the bundled claude
-        // manifest — which carries the hook table this test exercises.
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn wrapper");
+    let mut child = spawn_wrapper(
+        Command::new(wrapper(s))
+            .arg(agent)
+            .arg(event)
+            .env("TMUX_PANE", pane)
+            .env("TMA_HOOK_SOCKET", &s.socket)
+            .env("TMA_BIN", common::tma_bin())
+            // The wrapper passes its env through to the inner `tma event`; pin the config to the
+            // empty default so that process never reads the real `~/.config/tma/config.toml`.
+            .env("TMA_CONFIG", common::empty_config_path())
+            .env("TMA_NOTIFY_FROM_EVENT", if notify { "1" } else { "0" })
+            // The wrapper forwards no manifest flag, so `tma event` uses the bundled claude
+            // manifest — which carries the hook table this test exercises.
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    );
     child
         .stdin
         .take()
@@ -70,20 +91,20 @@ fn fire(s: &Scratch, agent: &str, event: &str, pane: &str, payload: &str, notify
 /// file per fire), so a test can assert whether the daemonless direct-fire actually fired.
 fn fire_sink(s: &Scratch, agent: &str, event: &str, pane: &str, payload: &str, sink_cmd: &str) {
     use std::io::Write;
-    let mut child = Command::new(wrapper(s))
-        .arg(agent)
-        .arg(event)
-        .env("TMUX_PANE", pane)
-        .env("TMA_HOOK_SOCKET", &s.socket)
-        .env("TMA_BIN", common::tma_bin())
-        .env("TMA_CONFIG", common::empty_config_path())
-        .env("TMA_NOTIFY_FROM_EVENT", "1")
-        .env("TMA_NOTIFY_CMD", sink_cmd)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn wrapper");
+    let mut child = spawn_wrapper(
+        Command::new(wrapper(s))
+            .arg(agent)
+            .arg(event)
+            .env("TMUX_PANE", pane)
+            .env("TMA_HOOK_SOCKET", &s.socket)
+            .env("TMA_BIN", common::tma_bin())
+            .env("TMA_CONFIG", common::empty_config_path())
+            .env("TMA_NOTIFY_FROM_EVENT", "1")
+            .env("TMA_NOTIFY_CMD", sink_cmd)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    );
     child
         .stdin
         .take()
@@ -97,21 +118,21 @@ fn fire_sink(s: &Scratch, agent: &str, event: &str, pane: &str, payload: &str, s
 /// Fire the wrapper the way Codex's `notify` does: the payload is the third argv
 /// (`tma-hook codex notify <JSON>`), not stdin. Proves the wrapper's argv→stdin forwarding.
 fn fire_argv(s: &Scratch, agent: &str, event: &str, pane: &str, payload_arg: &str) {
-    let mut child = Command::new(wrapper(s))
-        .arg(agent)
-        .arg(event)
-        .arg(payload_arg)
-        .env("TMUX_PANE", pane)
-        .env("TMA_HOOK_SOCKET", &s.socket)
-        .env("TMA_BIN", common::tma_bin())
-        .env("TMA_CONFIG", common::empty_config_path())
-        // Deliberately feed unrelated bytes on stdin: the wrapper must ignore them when the
-        // argv payload is present, so this must not leak into the stamp.
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn wrapper");
+    let mut child = spawn_wrapper(
+        Command::new(wrapper(s))
+            .arg(agent)
+            .arg(event)
+            .arg(payload_arg)
+            .env("TMUX_PANE", pane)
+            .env("TMA_HOOK_SOCKET", &s.socket)
+            .env("TMA_BIN", common::tma_bin())
+            .env("TMA_CONFIG", common::empty_config_path())
+            // Deliberately feed unrelated bytes on stdin: the wrapper must ignore them when the
+            // argv payload is present, so this must not leak into the stamp.
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null()),
+    );
     use std::io::Write;
     child
         .stdin
@@ -725,18 +746,18 @@ fn wrapper_exits_zero_silently_when_binary_missing() {
     };
     std::os::unix::fs::symlink(dirname, path_dir.join("dirname")).unwrap();
 
-    let mut child = Command::new(&wrapper)
-        .arg("claude")
-        .arg("SessionStart")
-        // No $TMA_BIN, and a PATH with no `tma` on it: all three resolution paths fail, so the
-        // wrapper must silently succeed.
-        .env_remove("TMA_BIN")
-        .env("PATH", &path_dir)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped())
-        .spawn()
-        .expect("spawn wrapper");
+    let mut child = spawn_wrapper(
+        Command::new(&wrapper)
+            .arg("claude")
+            .arg("SessionStart")
+            // No $TMA_BIN, and a PATH with no `tma` on it: all three resolution paths fail, so the
+            // wrapper must silently succeed.
+            .env_remove("TMA_BIN")
+            .env("PATH", &path_dir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped()),
+    );
     child
         .stdin
         .take()
