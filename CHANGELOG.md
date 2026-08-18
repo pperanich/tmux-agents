@@ -36,6 +36,10 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   first frame, never a late window.
 - `tma watch --repo`/`--branch` no longer opens on an empty frame. The selector ran against seed
   rows that carried no repo label yet, so it matched nothing until the first refresh replaced them.
+- A `git rev-parse` killed at its deadline no longer caches "this pane is in no repo" for the memo's
+  five seconds. The resolver collapsed a timeout and a real answer into the same unresolved result,
+  so on a filesystem slow enough to hit the bound, one timeout suppressed the retries that would
+  have succeeded. A timeout now leaves the memo untouched and the next refresh resolves again.
 
 ## [0.3.2] - 2026-08-17
 

@@ -79,7 +79,9 @@ struct MemoEntry {
 
 /// Resolve `cwd` to its repo metadata, memoized with the TTL. `None` for an empty
 /// cwd, a non-repo, an unborn or bare repo, a git-binary-missing machine, or any
-/// spawn/deadline failure.
+/// spawn/deadline failure. Only a definite answer is memoized: a git killed at the
+/// deadline leaves the memo untouched, so the next call retries rather than being
+/// served a cached "no repo" for the rest of the TTL.
 pub fn resolve(cwd: &str) -> Option<RepoInfo> {
     if cwd.is_empty() {
         return None;
@@ -95,7 +97,9 @@ pub fn resolve(cwd: &str) -> Option<RepoInfo> {
     ) {
         return hit;
     }
-    let info = resolve_uncached(cwd);
+    let Some(Resolved::Known(info)) = resolve_batch_uncached(&[cwd], DEADLINE).pop() else {
+        return None;
+    };
     memo_put(
         &mut MEMO.lock().unwrap_or_else(|e| e.into_inner()),
         cwd,
@@ -152,13 +156,18 @@ fn prime<'a>(cwds: impl Iterator<Item = &'a str>, budget: Duration) {
     if cold.is_empty() {
         return;
     }
-    // The lock is dropped across the spawns (up to DEADLINE), as in `resolve`.
+    // The lock is dropped across the spawns (up to `budget`), as in `resolve`.
     let cold: Vec<String> = cold.into_iter().collect();
     let refs: Vec<&str> = cold.iter().map(String::as_str).collect();
-    let infos = resolve_batch_uncached(&refs, budget);
+    let resolved = resolve_batch_uncached(&refs, budget);
     let memo = &mut *MEMO.lock().unwrap_or_else(|e| e.into_inner());
-    for (cwd, info) in refs.iter().zip(infos) {
-        memo_put(memo, cwd, now, info);
+    for (cwd, r) in refs.iter().zip(resolved) {
+        // A budget-killed cwd is left out of the memo entirely: caching it would serve "no repo"
+        // for the TTL and suppress the retry the next refresh should make. That matters most on
+        // the seed path, whose whole point is a budget short enough to give up early.
+        if let Resolved::Known(info) = r {
+            memo_put(memo, cwd, now, info);
+        }
     }
 }
 
@@ -180,39 +189,61 @@ fn memo_put(map: &mut HashMap<String, MemoEntry>, cwd: &str, now: Instant, info:
 }
 
 /// One un-memoized resolve: spawn git, parse the output.
-fn resolve_uncached(cwd: &str) -> Option<RepoInfo> {
-    resolve_batch_uncached(&[cwd], DEADLINE).pop()?
+/// What a resolve concluded about one cwd, and therefore whether it belongs in the memo.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum Resolved {
+    /// A definite answer: the labels, or `None` for a non-repo, an unborn or bare repo, a
+    /// git-binary-missing machine, or a spawn failure. Worth caching for the TTL.
+    Known(Option<RepoInfo>),
+    /// No answer: the budget cut git off before it produced one. Says nothing about the cwd, so
+    /// caching it would suppress the retry the next refresh is supposed to make.
+    Unknown,
 }
 
 /// One un-memoized resolve per cwd, all spawned before any is drained. Results are positional.
-fn resolve_batch_uncached(cwds: &[&str], budget: Duration) -> Vec<Option<RepoInfo>> {
+fn resolve_batch_uncached(cwds: &[&str], budget: Duration) -> Vec<Resolved> {
     run_rev_parse_batch(GIT_PROGRAM, cwds, &GIT_MISSING, budget)
         .into_iter()
         .zip(cwds)
-        .map(|(out, cwd)| {
-            let (stdout, exit_ok) = out?;
-            parse_rev_parse(cwd, &stdout, exit_ok)
+        .map(|(out, cwd)| match out {
+            RevParse::Done(stdout, exit_ok) => {
+                Resolved::Known(parse_rev_parse(cwd, &stdout, exit_ok))
+            }
+            RevParse::Failed => Resolved::Known(None),
+            RevParse::TimedOut => Resolved::Unknown,
         })
         .collect()
 }
 
+/// What one rev-parse child ended up saying. [`RevParse::TimedOut`] is kept apart from
+/// [`RevParse::Failed`] because the two mean opposite things for the memo: a spawn or wait failure
+/// is this cwd's answer, while a kill at the budget is the absence of one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum RevParse {
+    /// git ran to completion: its stdout, and whether it exited zero.
+    Done(String, bool),
+    /// No answer, and none is coming: the spawn failed, or `wait` errored.
+    Failed,
+    /// No answer yet: the budget ran out and the child was killed.
+    TimedOut,
+}
+
 /// Run one rev-parse per cwd, spawning every child before draining any, and capture stdout under a
-/// `budget` shared by the batch (they start together). Returns `(stdout, exit_ok)` per input
-/// position, `None` for a spawn/deadline/wait failure at that position. A `NotFound` spawn failure
-/// latches `missing`, which skips the rest of the batch and every later call. `program`/`missing`
-/// are parameters so the NotFound path is testable in isolation (a fake program + a local flag, no
-/// global poisoning).
+/// `budget` shared by the batch (they start together). Results are positional. A `NotFound` spawn
+/// failure latches `missing`, which skips the rest of the batch and every later call.
+/// `program`/`missing` are parameters so the NotFound path is testable in isolation (a fake program
+/// + a local flag, no global poisoning).
 fn run_rev_parse_batch(
     program: &str,
     cwds: &[&str],
     missing: &AtomicBool,
     budget: Duration,
-) -> Vec<Option<(String, bool)>> {
+) -> Vec<RevParse> {
     let mut children: Vec<Option<Child>> = cwds
         .iter()
         .map(|cwd| spawn_rev_parse(program, cwd, missing))
         .collect();
-    let mut out: Vec<Option<(String, bool)>> = vec![None; cwds.len()];
+    let mut out: Vec<RevParse> = vec![RevParse::Failed; cwds.len()];
 
     let deadline = Instant::now() + budget;
     let mut backoff = POLL_MIN;
@@ -228,10 +259,11 @@ fn run_rev_parse_batch(
                     if let Some(mut so) = running.stdout.take() {
                         let _ = so.read_to_string(&mut buf);
                     }
-                    *slot = Some((buf, status.success()));
+                    *slot = RevParse::Done(buf, status.success());
                     *child = None;
                 }
                 Ok(None) => waiting = true,
+                // A wait error leaves the slot `Failed`: no answer, and no child left to ask.
                 Err(_) => *child = None,
             }
         }
@@ -239,9 +271,12 @@ fn run_rev_parse_batch(
             return out;
         }
         if Instant::now() >= deadline {
-            for straggler in children.iter_mut().flatten() {
-                let _ = straggler.kill();
-                let _ = straggler.wait();
+            for (slot, child) in out.iter_mut().zip(children.iter_mut()) {
+                if let Some(straggler) = child {
+                    let _ = straggler.kill();
+                    let _ = straggler.wait();
+                    *slot = RevParse::TimedOut;
+                }
             }
             return out;
         }
@@ -397,7 +432,7 @@ mod tests {
             &missing,
             DEADLINE,
         );
-        assert_eq!(out, vec![None]);
+        assert_eq!(out, vec![RevParse::Failed]);
         assert!(
             missing.load(Ordering::Relaxed),
             "a NotFound spawn must latch the never-spawn-again flag"
@@ -406,7 +441,66 @@ mod tests {
         // of a batch — one missing git must not cost one failed spawn per pane.
         assert_eq!(
             run_rev_parse_batch(GIT_PROGRAM, &["/tmp", "/var"], &missing, DEADLINE),
-            vec![None, None]
+            vec![RevParse::Failed, RevParse::Failed]
+        );
+    }
+
+    /// A child that never exits is killed at the budget and reported as `TimedOut`, not `Failed`:
+    /// the whole point of the split is that the caller must not cache it. `yes` stands in for a
+    /// hung git — it ignores the rev-parse arguments, floods the piped stdout nothing is reading
+    /// yet, and blocks there forever.
+    #[test]
+    fn a_child_that_outlives_the_budget_is_timed_out_not_failed() {
+        let hang = "/usr/bin/yes";
+        if !std::path::Path::new(hang).exists() {
+            eprintln!("skipping: no {hang} to stand in for a hung git");
+            return;
+        }
+        let missing = AtomicBool::new(false);
+        let started = Instant::now();
+        let out = run_rev_parse_batch(hang, &["/tmp"], &missing, Duration::from_millis(50));
+        assert_eq!(out, vec![RevParse::TimedOut]);
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "the budget bounds the batch, not DEADLINE: took {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn only_a_definite_answer_reaches_the_memo() {
+        // `prime`'s caching rule over an explicit map: a `Known` result lands (even `Known(None)`,
+        // so a non-git pane does not re-spawn git every frame), a `TimedOut` one does not, so the
+        // next refresh retries instead of being served a cached "no repo" for the rest of the TTL.
+        let mut map = HashMap::new();
+        let now = Instant::now();
+        let found = RepoInfo {
+            repo_name: "myrepo".into(),
+            branch: "main".into(),
+            is_worktree: false,
+        };
+        for (cwd, r) in [
+            ("/repo", Resolved::Known(Some(found.clone()))),
+            ("/plain", Resolved::Known(None)),
+            ("/slow", Resolved::Unknown),
+        ] {
+            if let Resolved::Known(i) = r {
+                memo_put(&mut map, cwd, now, i);
+            }
+        }
+        assert_eq!(
+            memo_get(&mut map, "/repo", now, MEMO_TTL),
+            Some(Some(found))
+        );
+        assert_eq!(
+            memo_get(&mut map, "/plain", now, MEMO_TTL),
+            Some(None),
+            "a resolved non-repo is cached, so it stops re-spawning git"
+        );
+        assert_eq!(
+            memo_get(&mut map, "/slow", now, MEMO_TTL),
+            None,
+            "a timed-out cwd is a miss, so the next call resolves it again"
         );
     }
 
