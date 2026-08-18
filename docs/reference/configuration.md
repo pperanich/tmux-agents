@@ -172,6 +172,14 @@ exists so a test or CI run can flip the fire path without writing a config file.
 |---|---|---|
 | `wrapper_ref` | `"absolute"` | `"absolute"` writes the wrapper's full path into each agent config. `"bare"` writes the name `tma-hook` and lets the agent resolve it off `$PATH`. |
 
+`"absolute"` writes one path that is not the wrapper's own: when the wrapper
+lives in a package store (`/nix/store`, `/gnu/store`), the config gets the stable
+path that reaches it instead — your profile's `bin`, found by walking `$PATH` for
+a `tma-hook` outside the store that resolves to the same file. A store path names
+one build and is deleted with it, so writing one would break your hooks at the
+next upgrade. `tma doctor` prints the reference first and the file it points at in
+parentheses.
+
 The default is machine-specific by construction: `/Users/you/.local/bin/tma-hook`
 on macOS is `/home/you/.local/bin/tma-hook` on Linux, so a `~/.claude/settings.json`
 synced between the two carries a path that only works on one. `"bare"` writes one

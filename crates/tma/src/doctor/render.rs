@@ -169,18 +169,23 @@ pub(super) fn render_text(r: &Report) -> String {
             }
         }
     }
-    // Under a bare reference the file and the name the configs use are different facts, and only
-    // the second one is what an agent resolves — so lead with it and keep the file as the aside.
-    let bare = r.wrapper_ref != r.wrapper_path;
+    // The file and the name the configs use are different facts whenever the reference is not the
+    // path itself (a bare name, or a store path's stable alias), and only the second one is what an
+    // agent resolves — so lead with it and keep the file as the aside.
+    let mark = match (r.wrapper_present, r.wrapper_bare) {
+        (true, false) => "\u{2713}",
+        (false, false) => "\u{2717} missing",
+        (true, true) => "\u{2713} on $PATH",
+        (false, true) => "\u{2717} not on $PATH",
+    };
+    let aside = if r.wrapper_ref == r.wrapper_path {
+        String::new()
+    } else {
+        format!(" ({})", r.wrapper_path.display())
+    };
     out.push_str(&format!(
-        "wrapper: {} {}\n",
-        r.wrapper_ref.display(),
-        match (r.wrapper_present, bare) {
-            (true, false) => "\u{2713}".to_string(),
-            (false, false) => "\u{2717} missing".to_string(),
-            (true, true) => format!("\u{2713} on $PATH ({})", r.wrapper_path.display()),
-            (false, true) => format!("\u{2717} not on $PATH ({})", r.wrapper_path.display()),
-        }
+        "wrapper: {} {mark}{aside}\n",
+        r.wrapper_ref.display()
     ));
 
     // Agent manifests: the loaded count plus any file the loader had to skip.

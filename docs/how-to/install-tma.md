@@ -127,26 +127,31 @@ here, so the Nix package installs the wrapper itself: `install-hooks` finds its
 own script already in place and writes nothing. Nothing to set, and `tma-hook`
 comes onto your `PATH` with the binary.
 
-On Linux, add one setting:
+What lands in the agent config is a path outside the store: your profile's
+`~/.nix-profile/bin/tma-hook`, or `/etc/profiles/per-user/<user>/bin/tma-hook`
+under Home Manager. tma will not write the store path itself, because that path
+names one build and is deleted when the build is collected, which would break
+your hooks at the next `nix flake update` rather than at anything you did. It
+finds the profile entry by walking `$PATH` for a `tma-hook` outside any store
+that resolves to the same file, so the substitution only happens when the two are
+provably the same install. `tma doctor` shows both, reference first:
 
-```toml
-# $XDG_CONFIG_HOME/tma/config.toml
-[install]
-wrapper_ref = "bare"
+```
+wrapper: /etc/profiles/per-user/you/bin/tma-hook ✓ (/nix/store/<hash>-tma-<version>/bin/tma-hook)
 ```
 
-That writes the bare name `tma-hook` into your agent configs instead of a path.
-It matters because Linux resolves a running binary through `/proc/self/exe`, so
-`tma` sees itself at its `/nix/store/<hash>-tma-<version>/bin` path rather than at
-the profile symlink you invoked; the absolute path baked into an agent config
-would then die at the next upgrade, when that store path is garbage-collected.
-The bare name is answered by your profile's `bin`, which survives. macOS reports
-the profile path as invoked, so the default is already stable there.
+Running straight from the store with no profile install (`nix run`, a `nix build`
+result) has no such stable path to find, so tma wires the store path and warns
+that it will not survive collection.
 
-If you would rather keep the wrapper out of the store, `--wrapper-path <PATH>`
-(env `TMA_WRAPPER_PATH`) names where it is written. `tma install-hooks --check`
-and `tma doctor` resolve it the same way install did, so export the variable
-rather than passing the flag once.
+Two settings change this if you want them. `--wrapper-path <PATH>` (env
+`TMA_WRAPPER_PATH`) keeps the wrapper out of the store entirely by naming where
+it is written; `tma install-hooks --check` and `tma doctor` resolve it the same
+way install did, so export the variable rather than passing the flag once. And
+`[install] wrapper_ref = "bare"` writes the name `tma-hook` with no path at all,
+which is worth it when one agent config is shared between machines — though it
+then depends on the `$PATH` each agent inherits, where an absolute reference does
+not.
 
 ## With the Home Manager module
 
@@ -182,8 +187,7 @@ writes, so the two cannot silently disagree. See
 
 The module installs the binary and writes config. It does not touch your agents'
 own config files, so wiring an agent is still
-[`tma install-hooks`](install-agent-hooks.md), with the `wrapper_ref` note above
-if you are on Linux.
+[`tma install-hooks`](install-agent-hooks.md), which needs nothing set.
 
 ## Next
 

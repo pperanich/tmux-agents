@@ -353,6 +353,7 @@ fn install(
     if !bare_reference_ok(wrapper) {
         return ExitCode::FAILURE;
     }
+    warn_store_reference(wrapper);
 
     // 3. Agent config: wire the wrapper via the agent's own mechanism (the honest split). With
     // neither statusline flag, a previous opt-in stands, so a plain re-install keeps an asked-for
@@ -680,9 +681,13 @@ pub(crate) struct AgentHooks {
 pub(crate) struct HookDiagnosis {
     /// Where the wrapper script is written on disk.
     pub wrapper_path: PathBuf,
-    /// What the agent configs name it by: [`Self::wrapper_path`] again, or the bare `tma-hook`
-    /// under `[install] wrapper_ref = "bare"`.
+    /// What the agent configs name it by: the bare `tma-hook` under `[install] wrapper_ref =
+    /// "bare"`, else an absolute path — [`Self::wrapper_path`], or the stable alias standing in for
+    /// it when that is a store path.
     pub wrapper_ref: PathBuf,
+    /// Whether [`Self::wrapper_ref`] is the bare name. Not inferable from the two paths differing,
+    /// which is also what a store path's stable alias looks like.
+    pub wrapper_bare: bool,
     /// Whether that reference resolves — the file exists, or the bare name is on `$PATH`.
     pub wrapper_present: bool,
     pub agents: Vec<AgentHooks>,
@@ -762,6 +767,7 @@ fn build_diagnosis(
     HookDiagnosis {
         wrapper_path: wrapper.write_path().to_path_buf(),
         wrapper_ref: wrapper.reference().to_path_buf(),
+        wrapper_bare: wrapper.is_bare(),
         wrapper_present,
         agents,
         tmux_hooks,
@@ -1100,6 +1106,23 @@ fn bare_reference_ok(wrapper: &Wrapper) -> bool {
         );
     }
     true
+}
+
+/// Warn when the reference about to be written is a store path with no stable alias — an install
+/// run straight from the store (`nix run`, a `nix build` result) rather than through a profile.
+/// The wiring works now and stops working when that path is collected, which is worth saying at the
+/// moment it is written rather than leaving to be discovered as broken hooks after an upgrade.
+fn warn_store_reference(wrapper: &Wrapper) {
+    if !wrapper.references_store_path() {
+        return;
+    }
+    eprintln!(
+        "tma: warning: the agent configs now name {}, which is a store path: it belongs to this \
+         exact build and is deleted when that build is collected.\n      Install tma into a profile \
+         so a stable path points at it, or pass `--wrapper-path <PATH>` to keep the wrapper \
+         somewhere of your own.",
+        wrapper.reference().display()
+    );
 }
 
 /// The agents that asked for the statusline shim, persisted to `statusline-state.toml`.

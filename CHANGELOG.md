@@ -10,6 +10,20 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- An absolute wrapper reference is no longer a package-store path. `install-hooks` writes the
+  wrapper's own path into each agent config, and under Nix on Linux that path is
+  `/nix/store/<hash>-tma-<version>/bin/tma-hook`: it names one build, so the hooks broke at the next
+  `nix flake update`, when that path was collected. tma now writes the stable path that reaches the
+  same file, found by walking `$PATH` for a `tma-hook` outside any store that resolves to it (your
+  profile's `bin`), so the substitution happens only when the two are provably the same install.
+  Running from a store with no profile install (`nix run`) has no such path, and install says so
+  rather than wiring one that will vanish. `/gnu/store` counts too.
+- `tma doctor` no longer reports a wrapper as `bare` on the strength of the reference and the file
+  differing, which is now also what a store path's stable alias looks like. It carries the answer
+  from the resolver instead, and prints the file as an aside in both cases.
+
 ## [0.3.4] - 2026-08-18
 
 ### Fixed

@@ -196,18 +196,22 @@ pub(super) const WRAPPER_NAME: &str = "tma-hook";
 pub(super) struct Wrapper {
     write_path: PathBuf,
     reference: PathBuf,
+    bare: bool,
 }
 
 impl Wrapper {
     pub(super) fn resolve(override_path: Option<&Path>, how: WrapperRef) -> Wrapper {
         let write_path = resolve_wrapper(override_path);
         let reference = match how {
-            WrapperRef::Absolute => write_path.clone(),
+            // A store path is where the wrapper LIVES, never what an agent config should name; see
+            // [`stable_alias`].
+            WrapperRef::Absolute => stable_alias(&write_path).unwrap_or_else(|| write_path.clone()),
             WrapperRef::Bare => PathBuf::from(WRAPPER_NAME),
         };
         Wrapper {
             write_path,
             reference,
+            bare: matches!(how, WrapperRef::Bare),
         }
     }
 
@@ -223,7 +227,14 @@ impl Wrapper {
 
     /// Whether the configs name the wrapper rather than spell out its path.
     pub(super) fn is_bare(&self) -> bool {
-        self.reference.parent().map(Path::as_os_str) == Some("".as_ref())
+        self.bare
+    }
+
+    /// Whether the configs would be given a store path after all: the wrapper lives in one and
+    /// [`stable_alias`] found nothing outside it pointing back. The reference works today and dies
+    /// at the next garbage collection, which is worth one warning at the moment it is written.
+    pub(super) fn references_store_path(&self) -> bool {
+        !self.bare && in_store(&self.reference, &STORE_ROOTS)
     }
 
     /// Whether the reference an agent config carries would actually resolve at hook time. The
@@ -253,6 +264,46 @@ impl Wrapper {
         };
         (!same).then_some(found)
     }
+}
+
+/// Package-store roots, whose entries name one exact build, are read-only, and are collected once
+/// nothing references them. A fine place to run a binary FROM, and the wrong thing to write into a
+/// config that outlives the build it was installed from.
+const STORE_ROOTS: [&str; 2] = ["/nix/store", "/gnu/store"];
+
+fn in_store(path: &Path, roots: &[&str]) -> bool {
+    roots.iter().any(|root| path.starts_with(root))
+}
+
+/// A stable path naming the same file as `write_path`, when `write_path` is itself a store path.
+///
+/// Nix hands `tma` its own location two different ways: macOS reports the profile path as invoked,
+/// while Linux resolves `/proc/self/exe` down to `/nix/store/<hash>-tma-<version>/bin/tma`. Writing
+/// that second one into an agent config wires a path that the next upgrade garbage-collects, so the
+/// hooks break on a `nix flake update` rather than at anything the user did to tma.
+///
+/// The fix is the profile symlink the store path is reached through (`~/.nix-profile/bin`,
+/// `/etc/profiles/per-user/<user>/bin`), which survives upgrades by being repointed. It is found the
+/// only way that proves it is the same install: a `$PATH` entry outside any store whose `tma-hook`
+/// resolves to the very file we are about to write. An absolute reference beats the bare name here,
+/// since it does not care what `$PATH` the agent inherits.
+fn stable_alias(write_path: &Path) -> Option<PathBuf> {
+    if !in_store(write_path, &STORE_ROOTS) {
+        return None;
+    }
+    stable_alias_in(write_path, &std::env::var_os("PATH")?, &STORE_ROOTS)
+}
+
+/// [`stable_alias`] over an explicit `PATH` and store roots, so it is testable without a real Nix
+/// store. The caller has already established that `write_path` is in one.
+fn stable_alias_in(write_path: &Path, path: &std::ffi::OsStr, roots: &[&str]) -> Option<PathBuf> {
+    let target = write_path.canonicalize().ok()?;
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty() && !in_store(dir, roots))
+        .map(|dir| dir.join(WRAPPER_NAME))
+        .find(|cand| {
+            is_executable_file(cand) && cand.canonicalize().is_ok_and(|real| real == target)
+        })
 }
 
 fn resolve_wrapper(override_path: Option<&Path>) -> PathBuf {
@@ -476,6 +527,73 @@ mod tests {
         assert_eq!(bare.write_path(), installed, "the file goes where it went");
         assert_eq!(bare.reference(), Path::new(WRAPPER_NAME));
         assert!(bare.is_bare());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// A wrapper that lives in a store path is referenced through the profile symlink that reaches
+    /// it, not by the store path itself: the store path names one build and goes away with it,
+    /// while the profile entry is repointed across upgrades. The proof that the two are the same
+    /// install is that the candidate resolves to the very file being written.
+    #[test]
+    fn a_store_path_is_referenced_through_its_stable_alias() {
+        let dir = scratch("alias");
+        let store = dir.join("store/abc123-tma-0.1.0/bin");
+        let profile = dir.join("profile/bin");
+        let roots: [&str; 1] = [store.parent().unwrap().to_str().unwrap()];
+
+        let installed = store.join(WRAPPER_NAME);
+        touch_exe(&installed);
+        std::fs::create_dir_all(&profile).unwrap();
+        std::os::unix::fs::symlink(&installed, profile.join(WRAPPER_NAME)).unwrap();
+
+        let path = std::env::join_paths([&profile]).unwrap();
+        assert_eq!(
+            stable_alias_in(&installed, &path, &roots),
+            Some(profile.join(WRAPPER_NAME)),
+            "the symlink that reaches the same file is the reference"
+        );
+
+        // A second store generation on `$PATH` is not an alias: it is a store path itself, and the
+        // whole point is to name something that outlives one.
+        let older = dir.join("store/older-tma-0.0.9/bin");
+        touch_exe(&older.join(WRAPPER_NAME));
+        let with_store = std::env::join_paths([&older, &profile]).unwrap();
+        assert_eq!(
+            stable_alias_in(&installed, &with_store, &roots),
+            Some(profile.join(WRAPPER_NAME))
+        );
+
+        // Someone else's wrapper at a stable path is not this install, so it is not an alias either.
+        let other = dir.join("other/bin");
+        touch_exe(&other.join(WRAPPER_NAME));
+        let only_other = std::env::join_paths([&other]).unwrap();
+        assert_eq!(
+            stable_alias_in(&installed, &only_other, &roots),
+            None,
+            "a different file is a different install"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Outside a store there is nothing to work around, so the reference stays the path itself and
+    /// no `$PATH` walk happens at all.
+    #[test]
+    fn an_ordinary_prefix_is_referenced_directly() {
+        let dir = scratch("no_alias");
+        let installed = dir.join("bin").join(WRAPPER_NAME);
+        touch_exe(&installed);
+
+        let w = Wrapper::resolve(Some(&installed), WrapperRef::Absolute);
+        assert_eq!(w.reference(), installed);
+        assert!(!w.is_bare());
+        assert!(!w.references_store_path());
+
+        // Bare stays bare, and is reported as bare rather than inferred from the paths differing.
+        let bare = Wrapper::resolve(Some(&installed), WrapperRef::Bare);
+        assert!(bare.is_bare());
+        assert!(!bare.references_store_path());
 
         std::fs::remove_dir_all(&dir).unwrap();
     }

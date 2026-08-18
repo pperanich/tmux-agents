@@ -357,6 +357,9 @@ struct Report {
     wrapper_path: PathBuf,
     /// What the agent configs name the wrapper by: the path above, or a bare `tma-hook`.
     wrapper_ref: PathBuf,
+    /// Whether that reference is the bare name. Carried rather than inferred from the two paths
+    /// differing, which a store path's stable alias also does.
+    wrapper_bare: bool,
     wrapper_present: bool,
     agents: Vec<AgentReport>,
     /// Count of action manifests that loaded cleanly (bundled + user dir).
@@ -673,6 +676,7 @@ fn gather(
         tmux_hooks: hook_diag.tmux_hooks,
         wrapper_path: hook_diag.wrapper_path,
         wrapper_ref: hook_diag.wrapper_ref,
+        wrapper_bare: hook_diag.wrapper_bare,
         wrapper_present: hook_diag.wrapper_present,
         agents,
         action_ok,
@@ -916,6 +920,7 @@ mod tests {
             tmux_hooks: vec![("after-select-pane".to_string(), TmuxHookState::Present)],
             wrapper_path: PathBuf::from("/usr/local/bin/tma-hook"),
             wrapper_ref: PathBuf::from("/usr/local/bin/tma-hook"),
+            wrapper_bare: false,
             wrapper_present: true,
             agents: vec![AgentReport {
                 pane: "%1".to_string(),
