@@ -446,24 +446,38 @@ mod tests {
     }
 
     /// A child that never exits is killed at the budget and reported as `TimedOut`, not `Failed`:
-    /// the whole point of the split is that the caller must not cache it. `yes` stands in for a
-    /// hung git — it ignores the rev-parse arguments, floods the piped stdout nothing is reading
-    /// yet, and blocks there forever.
+    /// the whole point of the split is that the caller must not cache it.
+    ///
+    /// The stand-in for a hung git is a script we write, because the runner hands its program the
+    /// rev-parse arguments and any real command has an opinion about them. A stock utility is not
+    /// portable here: `yes` loops on BSD, which reads `-C` as a string to print, and exits non-zero
+    /// on GNU, which reads it as an invalid option. A `#!/bin/sh` script takes them as ignored
+    /// positional parameters on both.
     #[test]
     fn a_child_that_outlives_the_budget_is_timed_out_not_failed() {
-        let hang = "/usr/bin/yes";
-        if !std::path::Path::new(hang).exists() {
-            eprintln!("skipping: no {hang} to stand in for a hung git");
-            return;
-        }
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = std::env::temp_dir().join(format!("tma-repo-timeout-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hang = dir.join("hang.sh");
+        std::fs::write(&hang, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&hang, std::fs::Permissions::from_mode(0o755)).unwrap();
+
         let missing = AtomicBool::new(false);
         let started = Instant::now();
-        let out = run_rev_parse_batch(hang, &["/tmp"], &missing, Duration::from_millis(50));
+        let out = run_rev_parse_batch(
+            hang.to_str().unwrap(),
+            &["/tmp"],
+            &missing,
+            Duration::from_millis(50),
+        );
+        let elapsed = started.elapsed();
+        let _ = std::fs::remove_dir_all(&dir);
+
         assert_eq!(out, vec![RevParse::TimedOut]);
         assert!(
-            started.elapsed() < Duration::from_secs(1),
-            "the budget bounds the batch, not DEADLINE: took {:?}",
-            started.elapsed()
+            elapsed < Duration::from_secs(1),
+            "the budget bounds the batch, not DEADLINE: took {elapsed:?}"
         );
     }
 
