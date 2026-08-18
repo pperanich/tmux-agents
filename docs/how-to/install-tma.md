@@ -119,20 +119,34 @@ To pull the package into your own flake, use the overlay:
 }
 ```
 
-### Send the hook wrapper somewhere writable
+### The hook wrapper
 
 `tma install-hooks` writes a small `tma-hook` wrapper next to the `tma` binary and
-points the agent's config at that path. Under Nix the neighbouring directory is
-the read-only store, so name a writable one that is on your `PATH`:
+points the agent's config at that path. That directory is the read-only store
+here, so the Nix package installs the wrapper itself: `install-hooks` finds its
+own script already in place and writes nothing. Nothing to set, and `tma-hook`
+comes onto your `PATH` with the binary.
 
-```
-$ export TMA_WRAPPER_PATH=~/.local/bin/tma-hook
-$ tma install-hooks claude
+On Linux, add one setting:
+
+```toml
+# $XDG_CONFIG_HOME/tma/config.toml
+[install]
+wrapper_ref = "bare"
 ```
 
-The `--wrapper-path <PATH>` flag does the same thing for one invocation, but
-`tma install-hooks --check` and `tma doctor` resolve the wrapper the same way
-install did, so exporting the variable keeps all three looking at one file.
+That writes the bare name `tma-hook` into your agent configs instead of a path.
+It matters because Linux resolves a running binary through `/proc/self/exe`, so
+`tma` sees itself at its `/nix/store/<hash>-tma-<version>/bin` path rather than at
+the profile symlink you invoked; the absolute path baked into an agent config
+would then die at the next upgrade, when that store path is garbage-collected.
+The bare name is answered by your profile's `bin`, which survives. macOS reports
+the profile path as invoked, so the default is already stable there.
+
+If you would rather keep the wrapper out of the store, `--wrapper-path <PATH>`
+(env `TMA_WRAPPER_PATH`) names where it is written. `tma install-hooks --check`
+and `tma doctor` resolve it the same way install did, so export the variable
+rather than passing the flag once.
 
 ## With the Home Manager module
 
@@ -168,8 +182,8 @@ writes, so the two cannot silently disagree. See
 
 The module installs the binary and writes config. It does not touch your agents'
 own config files, so wiring an agent is still
-[`tma install-hooks`](install-agent-hooks.md), with `TMA_WRAPPER_PATH` set as
-above.
+[`tma install-hooks`](install-agent-hooks.md), with the `wrapper_ref` note above
+if you are on Linux.
 
 ## Next
 

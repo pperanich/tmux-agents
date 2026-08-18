@@ -334,6 +334,16 @@ fn install(
             "tma: cannot write wrapper {}: {err}",
             wrapper.write_path().display()
         );
+        if matches!(
+            err.kind(),
+            io::ErrorKind::PermissionDenied | io::ErrorKind::ReadOnlyFilesystem
+        ) {
+            eprintln!(
+                "      That directory is read-only, so the wrapper has to live elsewhere: name a \
+                 writable one with `--wrapper-path <PATH>` (env TMA_WRAPPER_PATH), e.g. \
+                 ~/.local/bin/tma-hook."
+            );
+        }
         return ExitCode::FAILURE;
     }
 
@@ -1025,6 +1035,12 @@ pub(crate) fn confirm() -> bool {
 }
 
 fn write_wrapper(wrapper: &Path) -> io::Result<()> {
+    // A wrapper already in place and byte-current needs no write at all, which is what lets
+    // `install-hooks` run when the binary's own directory is read-only and the package installed
+    // the wrapper beside it (the Nix store, a system bindir).
+    if wrapper_is_current(wrapper) {
+        return Ok(());
+    }
     if let Some(parent) = wrapper.parent() {
         std::fs::create_dir_all(parent)?;
     }
@@ -1037,6 +1053,20 @@ fn write_wrapper(wrapper: &Path) -> io::Result<()> {
         std::fs::set_permissions(wrapper, perms)?;
     }
     Ok(())
+}
+
+/// Whether the file at `wrapper` is already the wrapper this build would write, executable and
+/// byte-identical. False for anything else, including a stale copy from an older tma, so an
+/// upgrade still rewrites (and still fails loudly if it cannot).
+fn wrapper_is_current(wrapper: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if !std::fs::metadata(wrapper).is_ok_and(|m| m.permissions().mode() & 0o111 != 0) {
+            return false;
+        }
+    }
+    std::fs::read(wrapper).is_ok_and(|on_disk| on_disk == WRAPPER_SRC.as_bytes())
 }
 
 /// Vet a bare wrapper reference before it goes into a config, returning false to abort the install.
@@ -1307,5 +1337,57 @@ mod tests {
         let back: HooksState = toml::from_str(&toml).unwrap();
         assert_eq!(back.tmux_hooks.len(), 2);
         assert_eq!(back.tmux_hooks[1].index, 2);
+    }
+
+    // ---- the wrapper write ------------------------------------------------------
+
+    /// The write is skipped when the wrapper is already current, and that is the whole reason
+    /// `install-hooks` works from a read-only prefix: a Nix store path ships the wrapper next to
+    /// the binary at mode 555, and asking to write it there is `EACCES`. The read-only file is not
+    /// the assertion (a suite running as root could write it anyway); the assertion is that install
+    /// succeeds without needing to.
+    #[test]
+    fn an_already_current_wrapper_is_not_rewritten() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("wrapper_ro");
+        let wrapper = dir.join("tma-hook");
+        std::fs::write(&wrapper, WRAPPER_SRC).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o555)).unwrap();
+
+        assert!(wrapper_is_current(&wrapper));
+        assert!(
+            write_wrapper(&wrapper).is_ok(),
+            "a current wrapper needs no write, so its mode cannot fail the install"
+        );
+
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// The skip is content-keyed, so an upgrade whose wrapper changed is still written out, and a
+    /// wrapper that is not executable is repaired rather than trusted.
+    #[test]
+    fn a_stale_or_unexecutable_wrapper_is_rewritten() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("wrapper_stale");
+        let wrapper = dir.join("tma-hook");
+
+        std::fs::write(&wrapper, "#!/bin/sh\n# an older tma wrote this\n").unwrap();
+        assert!(!wrapper_is_current(&wrapper));
+        write_wrapper(&wrapper).unwrap();
+        assert_eq!(std::fs::read_to_string(&wrapper).unwrap(), WRAPPER_SRC);
+        assert!(std::fs::metadata(&wrapper).unwrap().permissions().mode() & 0o111 != 0);
+
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(
+            !wrapper_is_current(&wrapper),
+            "right bytes, but an agent cannot exec it"
+        );
+        write_wrapper(&wrapper).unwrap();
+        assert!(std::fs::metadata(&wrapper).unwrap().permissions().mode() & 0o111 != 0);
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

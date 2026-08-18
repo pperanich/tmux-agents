@@ -10,6 +10,19 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- `tma init` and `tma install-hooks` work from a read-only install prefix. Both write the `tma-hook`
+  wrapper next to the binary, which under Nix is the store, so the first step of a wizard run died on
+  `Permission denied` for `/nix/store/…/bin/tma-hook` (or the per-user profile path macOS reports
+  instead). The Nix package now installs that wrapper itself, and the write is skipped when the file
+  on disk is already the script this build would produce, so nothing needs writing. A write that does
+  fail for permissions now names `--wrapper-path`, which was documented as a Nix prerequisite and
+  mentioned nowhere near the error.
+- The bare-wrapper shadow warning stops firing on a symlinked `$PATH` entry that answers with the
+  very file install wrote (a Nix profile's `bin`, a stow tree). The two were compared as directories,
+  so the profile and the store path it points into read as two competing installs.
+
 ## [0.3.3] - 2026-08-17
 
 ### Added

@@ -44,14 +44,22 @@ rustPlatform.buildRustPackage (finalAttrs: {
     unixtools.ps
   ];
 
-  # The completion scripts come out of the binary itself, so they cannot be generated when the
-  # build is cross-compiling and the host cannot run what it just built.
-  postInstall = lib.optionalString (stdenv.buildPlatform.canExecute stdenv.hostPlatform) ''
-    installShellCompletion --cmd tma \
-      --bash <($out/bin/tma completions bash) \
-      --fish <($out/bin/tma completions fish) \
-      --zsh <($out/bin/tma completions zsh)
-  '';
+  # The `tma-hook` wrapper goes in beside the binary, where `tma install-hooks` looks for it and
+  # would otherwise try to write it: this prefix is read-only. It is the script `install-hooks`
+  # embeds, so tma finds its own copy already current and writes nothing.
+  #
+  # The completion scripts, by contrast, come out of the binary itself, so they cannot be generated
+  # when the build is cross-compiling and the host cannot run what it just built.
+  postInstall =
+    ''
+      install -Dm755 crates/tma/assets/tma-hook $out/bin/tma-hook
+    ''
+    + lib.optionalString (stdenv.buildPlatform.canExecute stdenv.hostPlatform) ''
+      installShellCompletion --cmd tma \
+        --bash <($out/bin/tma completions bash) \
+        --fish <($out/bin/tma completions fish) \
+        --zsh <($out/bin/tma completions zsh)
+    '';
 
   meta = {
     description = "tmux-agents CLI: agent state monitor, picker, jump, and stamping for tmux";

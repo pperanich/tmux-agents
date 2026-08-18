@@ -237,12 +237,21 @@ impl Wrapper {
         self.reference.is_file()
     }
 
-    /// The `$PATH` entry that actually answers for a bare reference, when one does. A directory
-    /// other than [`Self::write_path`]'s parent means a second install shadows the one being
-    /// written, which is worth saying out loud rather than silently obeying.
+    /// The `$PATH` entry that actually answers for a bare reference, when it is a different file
+    /// from [`Self::write_path`]. A second install shadowing the one being written is worth saying
+    /// out loud rather than silently obeying.
+    ///
+    /// Compared after resolving symlinks, since a `$PATH` entry that is a symlink farm pointing at
+    /// the very file just written (a Nix profile's `bin`, a stow tree) is the same install, not a
+    /// competing one.
     pub(super) fn shadowed_by(&self) -> Option<PathBuf> {
         let found = on_path(&self.reference)?;
-        (Some(found.parent()?) != self.write_path.parent()).then_some(found)
+        let same = match (found.canonicalize(), self.write_path.canonicalize()) {
+            (Ok(a), Ok(b)) => a == b,
+            // Unresolvable: fall back to comparing the directories as written.
+            _ => found.parent() == self.write_path.parent(),
+        };
+        (!same).then_some(found)
     }
 }
 

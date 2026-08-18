@@ -709,7 +709,8 @@ Usage: tma init [OPTIONS]
 
 The per-agent config paths are not flags here; they resolve through the same
 `TMA_*` environment ladder [`install-hooks`](#tma-install-hooks) documents, so
-`TMA_WRAPPER_PATH` is what a Nix install exports before running init.
+`TMA_WRAPPER_PATH` is how you move the wrapper off a read-only prefix that did
+not ship one (the Nix package does; see [install tma](../how-to/install-tma.md)).
 
 Exit code 1 if a step failed or a confirmation was declined; the closing doctor
 report is informational and never changes it. With no terminal behind stdin and
