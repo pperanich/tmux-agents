@@ -143,13 +143,19 @@ array, so a consumer parses it identically.
 
 Plain output is one tab-separated line per agent pane, in this column order:
 `pane`, `agent`, `state`, `detail`, `since`, `session:window.pane`, `title`,
-`attention`, `muted`. The `attention` column is `1` when the pane still carries
-`@agent_attention` (finished or blocked output unreviewed), empty otherwise; the
-trailing `muted` column is the same marker for a pane whose
-[`tma mute`](#tma-mute) window has not expired. The
-JSON schema is documented in [Pane options and JSON contracts](pane-options-and-json.md),
-where the `--json` rows carry additive `repo`/`branch`/`worktree` labels (`null`
-for a non-git pane); the plain output omits them.
+`attention`, `muted`, `repo`, `branch`, `worktree`. The `attention` column is `1`
+when the pane still carries `@agent_attention` (finished or blocked output
+unreviewed), empty otherwise; the `muted` column is the same marker for a pane
+whose [`tma mute`](#tma-mute) window has not expired.
+
+The last three are the git labels. `repo` is the origin repo's name, so a linked
+worktree reports the same name as its main checkout; `branch` is the current
+branch (the literal `HEAD` when detached); `worktree` is a `1`-or-empty marker,
+set only for a linked worktree. All three are empty for a pane in no git
+checkout, which is the one case they cannot be told apart from a repo whose
+labels failed to resolve — use `--json`, where they are `null`, if you need the
+distinction. The JSON schema is documented in [Pane options and JSON
+contracts](pane-options-and-json.md).
 
 ## `tma status`
 

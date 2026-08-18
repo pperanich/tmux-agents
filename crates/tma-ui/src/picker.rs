@@ -54,6 +54,11 @@ pub fn run_picker(
     // First frame from stamps: instant, stale-tolerant. The next refresh runs a cycle.
     let mut first_rows = cycle::stamp_rows(tmux).unwrap_or_default();
     filter.apply(&mut first_rows);
+    // Label the seed too, so the branch column is populated on the frame you actually see rather
+    // than appearing a refresh later. One batched git per cold checkout, after the filter dropped
+    // the rows we will not draw, and on the seed budget: this runs before the terminal is in raw
+    // mode, so a slow git must cost the column rather than the popup.
+    tma_runtime::repo::annotate_seed_rows(&mut first_rows);
     // Resolve the session scope from the invoking client, not the most-recently-active.
     let current_session = ui::active_session(tmux, acting_client);
     let model = PickerModel::new(first_rows, current_session, unix_now(), &mut matcher);

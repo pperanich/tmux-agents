@@ -10,6 +10,33 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- `tma ls` plain output carries the git labels its `--json` rows already did: `repo`, `branch` and
+  a `worktree` marker, appended as columns ten through twelve so a pipeline reading `$1`-`$9` is
+  unaffected. All three are empty for a pane in no checkout, the one case the plain form cannot
+  distinguish from a failed resolve (`--json` still nulls them). `tma wait`'s matched rows share the
+  renderer, so they gained the same columns.
+
+### Changed
+
+- Repo/branch resolution spawns its `git rev-parse` calls as one batch instead of one after
+  another, and polls for their exit on a 1 ms backoff rather than a flat 10 ms sleep. Each pane used
+  to pay a sleep longer than git's own runtime, serially: `tma ls` over six agents in five checkouts
+  measured 100 ms before and 57 ms after. The bounded 3 s deadline is now shared by the batch, and a
+  cwd repeated across panes is spawned once.
+
+### Fixed
+
+- The picker paints branch labels on its first frame. It seeds from tmux pane options for an instant
+  open, and only the refresh a second later annotated repos, so the branch column arrived visibly
+  after the rest of the row. The seed is annotated now, which the batching above makes cheap enough
+  to sit in the open path. That path runs before the terminal is in raw mode, so it carries a 250 ms
+  budget rather than the resolver's full 3 s: a git slow enough to hit it costs a bare column on the
+  first frame, never a late window.
+- `tma watch --repo`/`--branch` no longer opens on an empty frame. The selector ran against seed
+  rows that carried no repo label yet, so it matched nothing until the first refresh replaced them.
+
 ## [0.3.2] - 2026-08-17
 
 ### Added

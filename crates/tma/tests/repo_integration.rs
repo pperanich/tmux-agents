@@ -231,4 +231,36 @@ fn ls_json_rolls_worktrees_up_and_nulls_non_git() {
         plain_row.contains("\"worktree\":null"),
         "a non-git pane's worktree bool is null: {plain_row}"
     );
+
+    // The same three labels on the plain output's trailing columns, over the same fixture: the text
+    // and JSON surfaces resolve from one annotated row set and must agree about it.
+    let text = String::from_utf8_lossy(&tma(&s, &["ls"]).stdout).to_string();
+    let cols = |pane: &str| -> Vec<String> {
+        let line = text
+            .lines()
+            .find(|l| l.starts_with(&format!("{pane}\t")))
+            .unwrap_or_else(|| panic!("no plain row for {pane}: {text}"));
+        line.split('\t').map(str::to_string).collect()
+    };
+
+    let main_cols = cols(&pane_main);
+    assert_eq!(main_cols.len(), 12, "12 columns: {main_cols:?}");
+    assert_eq!(
+        &main_cols[9..],
+        &["origin".to_string(), "main".to_string(), String::new()],
+        "the main checkout's repo/branch, and an empty worktree marker"
+    );
+
+    let wt_cols = cols(&pane_wt);
+    assert_eq!(
+        &wt_cols[9..],
+        &["origin".to_string(), "feature".to_string(), "1".to_string()],
+        "the linked worktree rolls up under the origin, keeps its branch, and is marked"
+    );
+
+    assert_eq!(
+        &cols(&pane_plain)[9..],
+        &[String::new(), String::new(), String::new()],
+        "a non-git pane leaves all three columns empty"
+    );
 }

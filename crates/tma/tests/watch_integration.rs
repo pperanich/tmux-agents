@@ -438,8 +438,8 @@ fn watch_wide_groups_by_repo_and_g_flattens() {
     );
     s.tmux(&["send-keys", "-t", "home", &launch, "Enter"]);
 
-    // The refresh-path annotation resolves the repo, so the `▸ proj` group header appears within a
-    // couple of refresh ticks (the first stamp frame is unannotated by design).
+    // The seed and the refresh both annotate, so the `▸ proj` group header is there from the first
+    // frame; the poll tolerates a slower host rather than pinning which frame it arrived on.
     assert!(
         wait_capture_contains(&s.socket, "home", "▸ proj", POLL_CEILING),
         "wide grouped watch must render a `▸ proj` repo header"

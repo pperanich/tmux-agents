@@ -94,16 +94,17 @@ list the agent panes:
 
 ```
 $ tma ls
-%1	claude	blocked	permission	1786900866503	s2:0.0	web-ui	1	
-%0	claude	working		1786900866412	s1:0.0	api-server		
+%1	claude	blocked	permission	1786900866503	s2:0.0	web-ui	1		web-ui	main	
+%0	claude	working		1786900866412	s1:0.0	api-server			api	fix/timeout	
 ```
 
 One tab-separated line per agent pane:
-`pane  agent  state  detail  since  session:window.pane  title  attention  muted`.
-Here `%1` is blocked on a permission prompt and `%0` is working. The `1` after the
-blocked row's title is the attention flag (step 8); the empty last column is
-[`tma mute`](../reference/cli.md#tma-mute), which neither pane is under. For a
-machine-readable feed, add `--json`:
+`pane  agent  state  detail  since  session:window.pane  title  attention  muted
+repo  branch  worktree`. Here `%1` is blocked on a permission prompt and `%0` is
+working. The `1` after the blocked row's title is the attention flag (step 8);
+the empty column after it is [`tma mute`](../reference/cli.md#tma-mute), which
+neither pane is under. The last three columns are the pane's git checkout, all
+empty for a pane that is not in one. For a machine-readable feed, add `--json`:
 
 ```
 $ tma ls --json

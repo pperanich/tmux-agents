@@ -58,7 +58,8 @@ pub(crate) fn refresh(
         .ok()
         .map(|r| {
             // Annotate repo/branch on the refresh path so both the watch and the picker get labels;
-            // the memoized resolver runs no git inside `run_cycle` (the first stamp frame stays bare).
+            // the memoized resolver runs no git inside `run_cycle`. Each surface annotates its own
+            // stamp seed too, so this keeps the labels current rather than introducing them.
             let mut rows = r.rows;
             tma_runtime::repo::annotate_rows(&mut rows);
             rows

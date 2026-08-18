@@ -52,10 +52,11 @@ pub fn run_watch(
     start_table: bool,
     selector: Selector,
 ) -> io::Result<()> {
-    // First frame from stamps: instant, stale-tolerant. The next refresh runs a cycle. Stamp rows
-    // carry no repo label yet, so a repo/branch selector shows an empty first frame that the first
-    // refresh fills in.
+    // First frame from stamps: instant, stale-tolerant. The next refresh runs a cycle. Label the
+    // seed before narrowing: stamp rows carry no repo label, so an unlabelled `--repo`/`--branch`
+    // selector would match nothing and open on an empty frame the first refresh then fills in.
     let mut first_rows = cycle::stamp_rows(tmux).unwrap_or_default();
+    tma_runtime::repo::annotate_seed_rows(&mut first_rows);
     selector.retain(&mut first_rows);
     // Wide-mode preference: `--table` opens straight into the table, else the preview. `p` flips it
     // at runtime; it is session-local (never persisted). Below the width threshold it is dormant.

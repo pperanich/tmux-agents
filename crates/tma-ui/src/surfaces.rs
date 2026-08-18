@@ -12,13 +12,20 @@ use tma_runtime::json::{JsonWriter, JSON_SCHEMA};
 use tma_runtime::origin::Origin;
 
 /// One agent row as a `tma ls` tab-separated line (trailing newline), shared with `tma wait` so the
-/// two never drift in column order: `pane<TAB>agent<TAB>state<TAB>detail<TAB>since<TAB>session:window.pane<TAB>title<TAB>attention<TAB>muted`.
+/// two never drift in column order: `pane<TAB>agent<TAB>state<TAB>detail<TAB>since<TAB>session:window.pane<TAB>title<TAB>attention<TAB>muted<TAB>repo<TAB>branch<TAB>worktree`.
 /// The `attention` column is `1` for `@agent_attention` else empty (idle + `1` = "done"); `muted` is
 /// the same marker for a live `@agent_mute_until`; state is the raw token.
+///
+/// The three repo columns are appended last, so a pipeline reading `$1`-`$9` is unaffected. All
+/// three are empty for a pane in no git checkout, and `worktree` is the same `1`-or-empty marker,
+/// set for a linked worktree. They require an [`annotate_rows`](tma_runtime::repo::annotate_rows)
+/// caller: an unannotated row reads as a non-git pane rather than failing loudly, which is why
+/// both call sites annotate first.
 pub fn render_ls_row(r: &AgentRow) -> String {
     let marker = |on: bool| if on { "1" } else { "" };
+    let repo = r.repo.as_ref();
     format!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\n",
         r.pane_id,
         r.agent,
         r.state,
@@ -28,6 +35,9 @@ pub fn render_ls_row(r: &AgentRow) -> String {
         r.title,
         marker(r.attention),
         marker(r.muted),
+        repo.map_or("", |l| l.name.as_str()),
+        repo.map_or("", |l| l.branch.as_str()),
+        marker(repo.is_some_and(|l| l.worktree)),
     )
 }
 
@@ -364,6 +374,7 @@ fn prom_label(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tma_core::RepoLabel;
 
     fn row(pane: &str, agent: &str, state: AgentState, detail: Option<&str>) -> AgentRow {
         AgentRow {
@@ -386,6 +397,25 @@ mod tests {
             cwd: None,
             repo: None,
         }
+    }
+
+    /// The repo labels are appended last so a consumer's `awk -F'\t'` indexes into `$1`-`$9` keep
+    /// reading what they always did; the marker follows the attention/muted convention.
+    #[test]
+    fn ls_row_repo_columns_carry_the_git_labels() {
+        let mut labelled = row("%2", "claude", AgentState::Idle, None);
+        labelled.repo = Some(RepoLabel {
+            name: "myrepo".to_string(),
+            branch: "fix/timeout".to_string(),
+            worktree: true,
+        });
+        let labelled = render_ls_row(&labelled);
+        let cols: Vec<&str> = labelled.trim_end_matches('\n').split('\t').collect();
+        assert_eq!(&cols[9..], &["myrepo", "fix/timeout", "1"]);
+        // The nine original columns are untouched by the addition, so `$1`-`$9` pipelines still read
+        // what they always did.
+        assert_eq!(cols[0], "%2");
+        assert_eq!(cols[8], "", "muted stays the ninth column");
     }
 
     /// An idle pane with `@agent_attention` set: the "done" surface.
@@ -421,7 +451,7 @@ mod tests {
     }
 
     #[test]
-    fn ls_text_is_tab_separated_with_nine_columns() {
+    fn ls_text_is_tab_separated_with_twelve_columns() {
         let r = report(vec![row(
             "%1",
             "claude",
@@ -432,13 +462,18 @@ mod tests {
         // Strip only the newline: `trim_end` would eat the trailing empty attention column
         // (an unset flag is a blank field, as with detail), but a `-F'\t'` split keeps it.
         let cols: Vec<&str> = text.strip_suffix('\n').unwrap().split('\t').collect();
-        assert_eq!(cols.len(), 9);
+        assert_eq!(cols.len(), 12);
         assert_eq!(cols[0], "%1");
         assert_eq!(cols[1], "claude");
         assert_eq!(cols[2], "blocked");
         assert_eq!(cols[3], "permission");
         assert_eq!(cols[7], "", "attention column is empty when unset");
         assert_eq!(cols[8], "", "muted column is empty when unset");
+        assert_eq!(
+            &cols[9..],
+            &["", "", ""],
+            "a pane in no git checkout leaves the three repo columns empty"
+        );
     }
 
     /// The mute marker follows the attention column's convention exactly: `1` when live, an empty

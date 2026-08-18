@@ -2,8 +2,10 @@
 //! branch-label surfaces render. One bounded `git -C <cwd> rev-parse --abbrev-ref
 //! HEAD --git-common-dir --git-dir` per unique working directory, memoized with a
 //! ~5 s TTL so no per-frame path spawns git; failure degrades to absent labels,
-//! never a surfaced error. Only [`annotate_rows`] resolves — the display/serialize
-//! call sites call it, the poll/jump/act/capture paths never do.
+//! never a surfaced error. Only [`annotate_rows`] and its tighter-budget sibling
+//! [`annotate_seed_rows`] resolve — the display/serialize call sites call them, the
+//! poll/jump/act/capture paths never do. Both resolve a whole row set in one batch of
+//! spawns, so the cost is one git's wall clock rather than one per pane.
 //!
 //! The rev-parse output handling and relative-git-path resolution are adapted (MIT)
 //! from tmux-agent-sidebar's `src/group.rs`
@@ -12,10 +14,10 @@
 //! linked worktrees roll up under their origin repo), and worktree detection by
 //! comparing the resolved `--git-common-dir` against the resolved `--git-dir`.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
@@ -30,9 +32,21 @@ const GIT_PROGRAM: &str = "git";
 /// branch switch or a `git worktree add` against the cost of re-spawning git.
 const MEMO_TTL: Duration = Duration::from_secs(5);
 
-/// Wall-clock bound on the one rev-parse call. A hung git (a network filesystem, a
-/// wedged credential helper) must not stall a surface refresh.
+/// Wall-clock bound on a rev-parse batch, shared by every child in it (they are spawned
+/// together). A hung git (a network filesystem, a wedged credential helper) must not stall
+/// a surface refresh.
 const DEADLINE: Duration = Duration::from_secs(3);
+
+/// The bound for [`annotate_seed_rows`], well under [`DEADLINE`]. A surface's stamp seed is drawn
+/// before the terminal is even in raw mode, so a git that would take the full three seconds must
+/// cost a blank branch column, not three seconds of blank screen.
+const SEED_BUDGET: Duration = Duration::from_millis(250);
+
+/// The child-exit poll interval, backing off from `MIN` to `MAX`. git answers a rev-parse in a
+/// few ms, so a flat 10 ms wait would spend more time asleep than git spends running; backing
+/// off keeps the common case tight without spinning for the three seconds a hung one gets.
+const POLL_MIN: Duration = Duration::from_millis(1);
+const POLL_MAX: Duration = Duration::from_millis(10);
 
 /// Resolved git metadata for one working directory.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -91,16 +105,60 @@ pub fn resolve(cwd: &str) -> Option<RepoInfo> {
     info
 }
 
-/// Fill each row's `repo` label from its `cwd` via [`resolve`]. `Some` (name/branch/worktree) for a
-/// resolved checkout, `None` exactly when the repo is unresolved; `worktree` is `false` for a main
+/// Fill each row's `repo` label from its `cwd`. `Some` (name/branch/worktree) for a resolved
+/// checkout, `None` exactly when the repo is unresolved; `worktree` is `false` for a main
 /// checkout, `true` for a linked worktree.
+///
+/// Every cwd the memo cannot already answer is resolved in one batch, so N panes across N
+/// checkouts cost one git's wall clock rather than N sequential spawns.
 pub fn annotate_rows(rows: &mut [AgentRow]) {
+    annotate_within(rows, DEADLINE);
+}
+
+/// [`annotate_rows`] for a surface's first frame, which is drawn before its terminal is in raw
+/// mode: the same labels under a much tighter [`SEED_BUDGET`], so a slow git costs a bare branch
+/// column that the next refresh fills in rather than a visibly late window. A cwd the budget cut
+/// short is memoized as unresolved like any other failure, so that refresh may be the one after
+/// the [`MEMO_TTL`] rather than the next.
+pub fn annotate_seed_rows(rows: &mut [AgentRow]) {
+    annotate_within(rows, SEED_BUDGET);
+}
+
+fn annotate_within(rows: &mut [AgentRow], budget: Duration) {
+    prime(rows.iter().filter_map(|r| r.cwd.as_deref()), budget);
     for row in rows.iter_mut() {
         row.repo = row.cwd.as_deref().and_then(resolve).map(|info| RepoLabel {
             name: info.repo_name,
             branch: info.branch,
             worktree: info.is_worktree,
         });
+    }
+}
+
+/// Resolve every cold cwd in `cwds` in one batch and memoize the results, so the [`resolve`] calls
+/// that follow are all hits. Empty and already-fresh cwds are skipped, and a cwd repeated across
+/// panes (the common case: several agents in one checkout) is spawned once.
+fn prime<'a>(cwds: impl Iterator<Item = &'a str>, budget: Duration) {
+    let now = Instant::now();
+    let mut cold: BTreeSet<String> = BTreeSet::new();
+    {
+        let memo = &mut *MEMO.lock().unwrap_or_else(|e| e.into_inner());
+        for cwd in cwds.filter(|c| !c.is_empty()) {
+            if memo_get(memo, cwd, now, MEMO_TTL).is_none() {
+                cold.insert(cwd.to_string());
+            }
+        }
+    }
+    if cold.is_empty() {
+        return;
+    }
+    // The lock is dropped across the spawns (up to DEADLINE), as in `resolve`.
+    let cold: Vec<String> = cold.into_iter().collect();
+    let refs: Vec<&str> = cold.iter().map(String::as_str).collect();
+    let infos = resolve_batch_uncached(&refs, budget);
+    let memo = &mut *MEMO.lock().unwrap_or_else(|e| e.into_inner());
+    for (cwd, info) in refs.iter().zip(infos) {
+        memo_put(memo, cwd, now, info);
     }
 }
 
@@ -123,20 +181,82 @@ fn memo_put(map: &mut HashMap<String, MemoEntry>, cwd: &str, now: Instant, info:
 
 /// One un-memoized resolve: spawn git, parse the output.
 fn resolve_uncached(cwd: &str) -> Option<RepoInfo> {
-    let (stdout, exit_ok) = run_rev_parse(GIT_PROGRAM, cwd, &GIT_MISSING)?;
-    parse_rev_parse(cwd, &stdout, exit_ok)
+    resolve_batch_uncached(&[cwd], DEADLINE).pop()?
 }
 
-/// Run the one rev-parse call in `cwd`, capturing stdout under [`DEADLINE`]. Returns
-/// `(stdout, exit_ok)`, or `None` on any spawn/deadline/wait failure. A `NotFound`
-/// spawn failure latches `missing`; a latched `missing` short-circuits without
-/// spawning. `program`/`missing` are parameters so the NotFound path is testable in
-/// isolation (a fake program + a local flag, no global poisoning).
-fn run_rev_parse(program: &str, cwd: &str, missing: &AtomicBool) -> Option<(String, bool)> {
+/// One un-memoized resolve per cwd, all spawned before any is drained. Results are positional.
+fn resolve_batch_uncached(cwds: &[&str], budget: Duration) -> Vec<Option<RepoInfo>> {
+    run_rev_parse_batch(GIT_PROGRAM, cwds, &GIT_MISSING, budget)
+        .into_iter()
+        .zip(cwds)
+        .map(|(out, cwd)| {
+            let (stdout, exit_ok) = out?;
+            parse_rev_parse(cwd, &stdout, exit_ok)
+        })
+        .collect()
+}
+
+/// Run one rev-parse per cwd, spawning every child before draining any, and capture stdout under a
+/// `budget` shared by the batch (they start together). Returns `(stdout, exit_ok)` per input
+/// position, `None` for a spawn/deadline/wait failure at that position. A `NotFound` spawn failure
+/// latches `missing`, which skips the rest of the batch and every later call. `program`/`missing`
+/// are parameters so the NotFound path is testable in isolation (a fake program + a local flag, no
+/// global poisoning).
+fn run_rev_parse_batch(
+    program: &str,
+    cwds: &[&str],
+    missing: &AtomicBool,
+    budget: Duration,
+) -> Vec<Option<(String, bool)>> {
+    let mut children: Vec<Option<Child>> = cwds
+        .iter()
+        .map(|cwd| spawn_rev_parse(program, cwd, missing))
+        .collect();
+    let mut out: Vec<Option<(String, bool)>> = vec![None; cwds.len()];
+
+    let deadline = Instant::now() + budget;
+    let mut backoff = POLL_MIN;
+    loop {
+        let mut waiting = false;
+        for (slot, child) in out.iter_mut().zip(children.iter_mut()) {
+            let Some(running) = child else { continue };
+            match running.try_wait() {
+                Ok(Some(status)) => {
+                    // rev-parse output is a few short lines, far under the pipe buffer, so
+                    // draining after exit cannot deadlock.
+                    let mut buf = String::new();
+                    if let Some(mut so) = running.stdout.take() {
+                        let _ = so.read_to_string(&mut buf);
+                    }
+                    *slot = Some((buf, status.success()));
+                    *child = None;
+                }
+                Ok(None) => waiting = true,
+                Err(_) => *child = None,
+            }
+        }
+        if !waiting {
+            return out;
+        }
+        if Instant::now() >= deadline {
+            for straggler in children.iter_mut().flatten() {
+                let _ = straggler.kill();
+                let _ = straggler.wait();
+            }
+            return out;
+        }
+        std::thread::sleep(backoff);
+        backoff = (backoff * 2).min(POLL_MAX);
+    }
+}
+
+/// Spawn the one rev-parse call in `cwd`. `None` on any spawn failure; a `NotFound` latches
+/// `missing`, and a latched `missing` short-circuits without spawning at all.
+fn spawn_rev_parse(program: &str, cwd: &str, missing: &AtomicBool) -> Option<Child> {
     if missing.load(Ordering::Relaxed) {
         return None;
     }
-    let mut child = match Command::new(program)
+    match Command::new(program)
         .args([
             "-C",
             cwd,
@@ -153,36 +273,12 @@ fn run_rev_parse(program: &str, cwd: &str, missing: &AtomicBool) -> Option<(Stri
         .stderr(Stdio::null())
         .spawn()
     {
-        Ok(c) => c,
+        Ok(child) => Some(child),
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
                 missing.store(true, Ordering::Relaxed);
             }
-            return None;
-        }
-    };
-
-    let deadline = Instant::now() + DEADLINE;
-    loop {
-        match child.try_wait() {
-            Ok(Some(status)) => {
-                // rev-parse output is a few short lines, far under the pipe buffer, so
-                // draining after exit cannot deadlock.
-                let mut out = String::new();
-                if let Some(mut so) = child.stdout.take() {
-                    let _ = so.read_to_string(&mut out);
-                }
-                return Some((out, status.success()));
-            }
-            Ok(None) => {
-                if Instant::now() >= deadline {
-                    let _ = child.kill();
-                    let _ = child.wait();
-                    return None;
-                }
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            Err(_) => return None,
+            None
         }
     }
 }
@@ -295,14 +391,36 @@ mod tests {
     fn notfound_spawn_latches_the_flag_and_short_circuits() {
         let missing = AtomicBool::new(false);
         // A path that cannot exist: the spawn fails with NotFound.
-        let out = run_rev_parse("/nonexistent/definitely-not-git", "/tmp", &missing);
-        assert!(out.is_none());
+        let out = run_rev_parse_batch(
+            "/nonexistent/definitely-not-git",
+            &["/tmp"],
+            &missing,
+            DEADLINE,
+        );
+        assert_eq!(out, vec![None]);
         assert!(
             missing.load(Ordering::Relaxed),
             "a NotFound spawn must latch the never-spawn-again flag"
         );
-        // A latched flag returns None without spawning (even a valid program).
-        assert!(run_rev_parse(GIT_PROGRAM, "/tmp", &missing).is_none());
+        // A latched flag returns None without spawning (even a valid program), for every position
+        // of a batch — one missing git must not cost one failed spawn per pane.
+        assert_eq!(
+            run_rev_parse_batch(GIT_PROGRAM, &["/tmp", "/var"], &missing, DEADLINE),
+            vec![None, None]
+        );
+    }
+
+    #[test]
+    fn batch_results_stay_aligned_with_their_inputs() {
+        // The batch drains children as they exit, which is out of input order whenever one git
+        // finishes first, so the positional contract is what the zip in `resolve_batch_uncached`
+        // rests on. Asserted without claiming any of these paths is (or is not) a repo, so it
+        // holds in a sandbox with no git and in a source tree checked out without `.git`.
+        let missing = AtomicBool::new(false);
+        let cwds = ["/tmp", "/", "/tmp"];
+        let out = run_rev_parse_batch(GIT_PROGRAM, &cwds, &missing, DEADLINE);
+        assert_eq!(out.len(), cwds.len());
+        assert_eq!(out[0], out[2], "the same cwd resolves the same way twice");
     }
 
     // ---- memo / TTL (injected now, no sleep) -----------------------------------------------------
