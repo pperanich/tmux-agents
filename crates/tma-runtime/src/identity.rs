@@ -214,7 +214,8 @@ pub fn identify<'a>(
         } else {
             None
         };
-        let foreground_is_agent = names.iter().any(|n| n == foreground);
+        let foreground_is_agent = names.iter().any(|n| n == foreground)
+            && foreground_owns_tty(pane_pid, agent_pid, procs).unwrap_or(true);
         // A registration corroborating this observation upgrades the provenance
         // (marks the pane hook-capable); otherwise it is plain observation.
         let source = if registered_here {
@@ -248,6 +249,26 @@ pub fn identify<'a>(
     }
 
     PaneIdentity::None
+}
+
+/// Is the agent's process group the one holding the pane's terminal? The pane root's `tpgid` IS the
+/// foreground process group of the controlling terminal, so comparing it to the agent's `pgid` asks
+/// the kernel who owns the screen instead of asking a string.
+///
+/// This is a VETO on the name comparison, not a replacement for it, because a process group is
+/// coarser than a process: a child sharing its parent's group (a launcher's real binary, or any
+/// background job started without job control) is indistinguishable from the parent here. What it
+/// does answer precisely is the converse — when the agent's group is NOT the foreground one, the
+/// screen is definitely not the agent's, whatever tmux named. That kills a false positive the name
+/// alone cannot: the three manifests matching a bare `node` (cursor, gemini, pi) otherwise read any
+/// unrelated foreground `node` — a dev server, a build watcher — as their agent being on screen.
+///
+/// `None` when the facts to compare are missing — the pane root or the agent is absent from this
+/// `ps` snapshot, or the root has no controlling terminal — and an absent veto abstains.
+fn foreground_owns_tty(pane_pid: u32, agent_pid: u32, procs: &[ProcInfo]) -> Option<bool> {
+    let tpgid = procs.iter().find(|p| p.pid == pane_pid)?.tpgid?;
+    let agent_pgid = procs.iter().find(|p| p.pid == agent_pid)?.pgid;
+    Some(tpgid == agent_pgid)
 }
 
 /// The carve-out a foreground command falls under, if any (see [`REMOTE_SHELLS`], [`MULTIPLEXERS`]).
@@ -352,12 +373,26 @@ mod tests {
     use super::*;
     use tma_core::Manifest;
 
+    /// A process with no recorded `tpgid`, so `foreground_owns_tty` abstains and the foreground
+    /// test falls back to the name comparison. Most fixtures here are about the walk, not about
+    /// screen ownership, so this keeps them testing what they were written to test; use
+    /// [`proc_tty`] where the foreground answer is the point.
     fn proc(pid: u32, ppid: u32, pgid: u32, comm: &str) -> ProcInfo {
         ProcInfo {
             pid,
             ppid,
             pgid,
+            tpgid: None,
             comm: comm.to_string(),
+        }
+    }
+
+    /// A process on a controlling terminal whose foreground group is `tpgid` — what `ps` reports
+    /// for a real pane. Set it on the PANE ROOT; that is the process `foreground_owns_tty` reads.
+    fn proc_tty(pid: u32, ppid: u32, pgid: u32, tpgid: u32, comm: &str) -> ProcInfo {
+        ProcInfo {
+            tpgid: Some(tpgid),
+            ..proc(pid, ppid, pgid, comm)
         }
     }
 
@@ -414,8 +449,9 @@ mod tests {
 
     #[test]
     fn procps_direct_launch_is_foreground_agent() {
-        // procps `ps -eo pid,ppid,pgid,comm`: comm is a bare token.
-        let procs = vec![proc(200, 100, 200, "claude")];
+        // procps `ps -eo pid,ppid,pgid,tpgid,comm`: comm is a bare token. The pane root IS the
+        // agent and owns the tty, so its tpgid is its own group.
+        let procs = vec![proc_tty(200, 100, 200, 200, "claude")];
         let ms = vec![manifest("claude", "\"claude\"")];
         let id = identify(200, "claude", "", &procs, &ms, None, None);
         let i = agent(&id);
@@ -424,9 +460,47 @@ mod tests {
         assert_eq!(i.source, IdentitySource::Observed);
     }
 
+    /// The live shape from a real claude pane (captured 2026-08-19): the pane root is a shell, the
+    /// agent is a descendant in its OWN process group, and the shell's tpgid names that group. The
+    /// walk finds the agent and the tty says the agent owns the screen — both true at once.
+    #[test]
+    fn nested_agent_owning_the_tty_is_the_foreground() {
+        let procs = vec![
+            proc_tty(100, 1, 100, 200, "-zsh"),
+            proc(200, 100, 200, "claude"),
+        ];
+        let ms = vec![manifest("claude", "\"claude\"")];
+        let id = identify(100, ".claude-wrapped", "", &procs, &ms, None, None);
+        let i = agent(&id);
+        assert_eq!(i.agent_pid, 200);
+        assert!(i.foreground_is_agent, "the agent's group owns the tty");
+    }
+
+    /// What the tty veto buys over the name alone. The agent is a `node` (cursor/gemini/pi all
+    /// match a bare `node`), and the foreground is a DIFFERENT `node` in its own group — a dev
+    /// server the user started. The name comparison says "the foreground is my agent" and is wrong;
+    /// the tty says that group is not the agent's, which is right.
+    #[test]
+    fn a_foreground_namesake_in_another_group_is_not_the_agent() {
+        let procs = vec![
+            proc_tty(100, 1, 100, 300, "-zsh"),
+            proc(200, 100, 200, "node"), // the agent
+            proc(300, 100, 300, "node"), // an unrelated node holding the screen
+        ];
+        let ms = vec![manifest("gemini", "\"node\"")];
+        let id = identify(100, "node", "", &procs, &ms, None, None);
+        let i = agent(&id);
+        assert_eq!(i.agent_pid, 200);
+        assert!(
+            !i.foreground_is_agent,
+            "the name matches but another group owns the tty"
+        );
+    }
+
     #[test]
     fn procps_nested_agent_found_by_walk_not_foreground() {
         // Shell foreground, claude nested (wrapper). The walk finds it; the foreground cap applies.
+        // No tpgid recorded, so this exercises the name-comparison fallback.
         let procs = vec![
             proc(100, 1, 100, "zsh"),
             proc(200, 100, 100, "claude"),
@@ -437,6 +511,29 @@ mod tests {
         let i = agent(&id);
         assert_eq!(i.agent_pid, 200);
         assert!(!i.foreground_is_agent, "foreground is the shell");
+    }
+
+    /// The nix regression: `wrapProgram` makes tmux report `.opencode-wrapp` (truncated
+    /// `.opencode-wrapped`) as `pane_current_command`, while `ps` still shows the wrapper's
+    /// `argv[0]` basename. The tty comparison never reads either name, so it is immune; this pins
+    /// the FALLBACK path (no tpgid) too, where `normalize_comm` has to strip the wrapper suffix.
+    #[test]
+    fn nix_wrapped_foreground_is_the_agent() {
+        let ms = vec![manifest("opencode", "\"opencode\"")];
+        let comm = "/etc/profiles/per-user/x/bin/opencode";
+
+        let by_tty = vec![proc_tty(200, 100, 200, 200, comm)];
+        let id = identify(200, ".opencode-wrapp", "", &by_tty, &ms, None, None);
+        let i = agent(&id);
+        assert_eq!(i.agent_pid, 200);
+        assert!(i.foreground_is_agent, "the agent's group owns the tty");
+
+        let by_name = vec![proc(200, 100, 200, comm)];
+        let id = identify(200, ".opencode-wrapp", "", &by_name, &ms, None, None);
+        assert!(
+            agent(&id).foreground_is_agent,
+            "fallback unwraps the nix suffix"
+        );
     }
 
     // --- BSD/macOS format (comm carries argv[0] + args) -------------------------

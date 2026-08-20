@@ -114,6 +114,55 @@ per-message `▣ … · <elapsed>` footer. So working/idle are hook-covered and 
 tool-invariant across bash and edit prompts) is what the screen fallback contributes, which
 is exactly the state a quiet/hookless pane most needs.
 
+A third gap closed 2026-08-19, found by chasing a `?` on a live OpenCode pane: because
+registration is the only thing between a quiet OpenCode pane and `unknown`, and OpenCode
+fires `session.created` for a **brand-new** session only, a TUI waiting at its prompt and
+`opencode --continue` (a restored session) both registered nothing and read `?` until the
+first message. Both reproduced on 1.18.18. The plugin now fires `session-start` once at
+load — session-id-less, since none exists yet; the `session.created` edge that follows a
+real new session still records it, and `decide` maps `Register` to `idle`, which is the
+honest state for a waiting prompt.
+
+### Nix-wrapped agents (`.<name>-wrapped`)
+
+Nix's `wrapProgram` moves the real binary to `.<name>-wrapped` and installs a shell wrapper
+under the original name. The wrapper `exec -a "$0"`s the real one, which splits the two
+identity channels: `ps -o comm` shows the wrapper's `argv[0]` (basename `opencode`, so the
+subtree walk matches), but `#{pane_current_command}` shows the executable — `.opencode-wrapped`,
+which macOS truncates to 15 characters (`.opencode-wrapp`). No manifest `process_names` entry
+matched that, so `foreground_is_agent` was false and fold precedence 2 capped **every**
+nix-installed agent pane at `unknown` — taking the screen tier down with it, since the
+foreground cap precedes the screen ladder, so even the `blocked` rule never ran.
+
+`normalize_comm` (tma-tmux) now strips the decoration after the basename: a leading `.` plus a
+trailing prefix of `-wrapped`, longest match first. Requiring the leading dot keeps the rewrite
+off normally-named binaries. Fixing it centrally covers every manifest at once rather than
+asking each to carry a `.foo-wrapped` spelling whose truncation point is platform-dependent.
+
+**The tty veto.** Names are the wrong shape for this question, so `foreground_is_agent` no longer
+rests on one alone. `ps` now reads a `tpgid` column: on the PANE ROOT that is the kernel's own
+foreground process group for the controlling terminal, so `tpgid == pgid(agent)` asks who owns the
+screen without reading any executable name (`identity::foreground_owns_tty`).
+
+It is a veto over the name comparison, not a replacement, and the reason is worth recording because
+the first attempt got it wrong. A process group is coarser than a process: a child sharing its
+parent's group — a launcher's real binary (cursor's `cursor-agent` → `node`), or any background job
+started without job control — cannot be told apart from the parent by pgid. Replacing the name test
+outright therefore broke `nested_agent_found_by_walk_when_command_shows_shell`, whose pane runs
+`sleep 100000 & wait`: no job control, so the background "agent" shares the shell's group and the
+tty comparison called it the foreground.
+
+What the veto answers precisely is the converse. When the agent's group is NOT the foreground one,
+the screen is definitely not the agent's, whatever tmux named — and that kills a false positive the
+name cannot: the three manifests matching a bare `node` (cursor, gemini, pi) otherwise read any
+unrelated foreground `node`, a dev server or a build watcher, as their own agent on screen. Missing
+facts (pane root or agent absent from the `ps` snapshot, no controlling terminal) abstain.
+
+Compare herdr, which owns its pty and so can take the honest version of both halves: full `argv`
+per process (so nix is handled by falling back to `argv[0]`, never by un-mangling the name) and
+`tcgetpgrp` for the foreground group. tmux hands us one truncated string instead, which is why the
+name test needs the veto rather than the other way around.
+
 ### Codex mapping
 
 Codex CLI has TWO event mechanisms, both wired by `tma install-hooks codex`: the single

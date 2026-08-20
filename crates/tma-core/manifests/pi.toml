@@ -10,10 +10,15 @@ min_engine_version = "0.1"
 # `project_trust`, but the full ExtensionAPI event set lives in the installed package's
 # `dist/core/extensions/types.d.ts`, and firing/ordering was observed live).
 #
-# IDENTITY (headline finding): pi does NOT run as `pi` on the cheap read path. Its launcher is a
-# node script (`#!/usr/bin/env node`, symlinked as `pi`), so the two tmux read paths DISAGREE:
+# IDENTITY (0.82.1 headline finding): pi did NOT run as `pi` on the cheap read path. Its launcher
+# was a node script (`#!/usr/bin/env node`, symlinked as `pi`), so the two tmux read paths DISAGREED:
 #   - `#{pane_current_command}` = `node`  (the resolved interpreter)
 #   - `ps -eo comm` (the process-tree walk) = `pi`  (pi sets its own process title)
+# RE-VERIFIED on 0.84.2 (2026-08-19): pi now ships a COMPILED binary, so both paths read `pi` and
+# the disagreement is gone. `node` stays in process_names for the 0.82.x-era node launcher; it costs
+# nothing, being title-gated. A nix build needs no extra spelling either — its `bin/pi` wrapper
+# `exec`s `libexec/pi/pi` without `exec -a`, so both paths still read `pi` (no `.pi-wrapped` to
+# strip, unlike claude and opencode).
 # `node` is every Node app, so it is unsafe alone; `pi` is specific but the process-tree walk is
 # the only path that sees it. The `title_patterns` secondary signal makes this safe AND gives a
 # passive path: pi sets a STABLE terminal title `π - <cwd-basename>` (e.g. `π - myproj`; the

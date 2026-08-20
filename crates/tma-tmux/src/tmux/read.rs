@@ -170,19 +170,24 @@ impl Tmux {
     }
 }
 
-/// Parse `ps -eo pid,ppid,pgid,comm` into process facts, portable across procps and BSD. Not a tmux
-/// call. BSD `comm` carries `argv[0]` plus arguments; [`normalize_comm`] extracts the basename.
+/// The `ps` invocation behind [`ps_all`]. `tpgid` is a standard column on both procps and BSD.
+const PS_ARGS: &str = "pid,ppid,pgid,tpgid,comm";
+
+/// Parse `ps -eo pid,ppid,pgid,tpgid,comm` into process facts, portable across procps and BSD. Not
+/// a tmux call. BSD `comm` carries `argv[0]` plus arguments; [`normalize_comm`] extracts the
+/// basename.
 pub fn ps_all() -> Result<Vec<ProcInfo>, TmuxError> {
+    let cmd = format!("ps -eo {PS_ARGS}");
     let output = Command::new("ps")
-        .args(["-eo", "pid,ppid,pgid,comm"])
+        .args(["-eo", PS_ARGS])
         .output()
         .map_err(|source| TmuxError::Spawn {
-            cmd: "ps -eo pid,ppid,pgid,comm".to_string(),
+            cmd: cmd.clone(),
             source,
         })?;
     if !output.status.success() {
         return Err(TmuxError::Failed {
-            cmd: "ps -eo pid,ppid,pgid,comm".to_string(),
+            cmd,
             code: output.status.code().unwrap_or(-1),
             stderr: String::from_utf8_lossy(&output.stderr).trim().to_string(),
         });
@@ -191,27 +196,60 @@ pub fn ps_all() -> Result<Vec<ProcInfo>, TmuxError> {
     Ok(parse_ps(&text))
 }
 
+/// Nix's `wrapProgram` suffix. See [`unwrap_nix`].
+const NIX_WRAPPED: &str = "-wrapped";
+
 /// Extract the executable basename from a `comm` field: first whitespace token (BSD adds arguments),
-/// then its path basename. `"npm exec …"` ⇒ `"npm"`, `"/sbin/launchd"` ⇒ `"launchd"`.
+/// then its path basename, then the nix wrapper suffix. `"npm exec …"` ⇒ `"npm"`,
+/// `"/sbin/launchd"` ⇒ `"launchd"`, `".claude-wrapped"` ⇒ `"claude"`.
 pub fn normalize_comm(comm: &str) -> &str {
     let first = comm.split_whitespace().next().unwrap_or(comm);
-    first.rsplit('/').next().unwrap_or(first)
+    let base = first.rsplit('/').next().unwrap_or(first);
+    unwrap_nix(base)
+}
+
+/// Undo nix's `wrapProgram` rename so a wrapped agent matches its manifest `process_names`.
+/// wrapProgram moves the real binary to `.<name>-wrapped` and installs a shell wrapper under
+/// `<name>`; the wrapper `exec`s the real one, so tmux reports `.opencode-wrapped` as
+/// `pane_current_command` and no manifest name matches. Verified live on a nix opencode 1.18.18.
+///
+/// The leading dot is required, which keeps the rewrite off any normally-named binary. macOS
+/// truncates comm to 15 characters (`.opencode-wrapp`), so a trailing *prefix* of the suffix
+/// counts too; longest match first so the whole suffix goes when it is intact.
+fn unwrap_nix(base: &str) -> &str {
+    let Some(rest) = base.strip_prefix('.') else {
+        return base;
+    };
+    (1..=NIX_WRAPPED.len())
+        .rev()
+        .find_map(|n| rest.strip_suffix(&NIX_WRAPPED[..n]))
+        .filter(|name| !name.is_empty())
+        .unwrap_or(base)
 }
 
 fn parse_ps(text: &str) -> Vec<ProcInfo> {
     let mut out = Vec::new();
     for line in text.lines() {
         let mut it = line.split_whitespace();
-        let (Some(pid), Some(ppid), Some(pgid)) = (it.next(), it.next(), it.next()) else {
+        let (Some(pid), Some(ppid), Some(pgid), Some(tpgid)) =
+            (it.next(), it.next(), it.next(), it.next())
+        else {
             continue;
         };
         let (Ok(pid), Ok(ppid), Ok(pgid)) =
             (pid.parse::<u32>(), ppid.parse::<u32>(), pgid.parse::<u32>())
         else {
-            // Header row ("PID PPID PGID COMM") and any stray line: skip.
+            // Header row ("PID PPID PGID TPGID COMM") and any stray line: skip.
             continue;
         };
-        // `comm` is every token after the three numeric columns. Rejoining on single
+        // No controlling terminal reads as `0` on BSD and `-1` on Linux; both mean "no foreground
+        // group to compare against", so both become None rather than a bogus group id.
+        let tpgid = tpgid
+            .parse::<i64>()
+            .ok()
+            .filter(|t| *t > 0)
+            .map(|t| t as u32);
+        // `comm` is every token after the four numeric columns. Rejoining on single
         // spaces collapses BSD's argument padding, which is irrelevant to name matching.
         let comm = it.collect::<Vec<_>>().join(" ");
         if comm.is_empty() {
@@ -221,6 +259,7 @@ fn parse_ps(text: &str) -> Vec<ProcInfo> {
             pid,
             ppid,
             pgid,
+            tpgid,
             comm,
         });
     }
@@ -337,11 +376,11 @@ mod tests {
     #[test]
     fn parses_procps_and_bsd_ps() {
         // procps: comm is a bare token. BSD (macOS): comm carries argv[0] + arguments.
-        let text = "  PID  PPID  PGID COMM\n\
-                    100     1   100 zsh\n\
-                    200   100   100 claude\n\
-                    300   200   100 npm exec @claude-flow/cli@latest mcp start\n\
-                    400     1   400 /sbin/launchd\n";
+        let text = "  PID  PPID  PGID TPGID COMM\n\
+                    100     1   100   200 zsh\n\
+                    200   100   100   200 claude\n\
+                    300   200   100   200 npm exec @claude-flow/cli@latest mcp start\n\
+                    400     1   400     0 /sbin/launchd\n";
         let procs = parse_ps(text);
         assert_eq!(procs.len(), 4, "header skipped, 4 rows kept");
         assert_eq!(procs[1].comm, "claude");
@@ -350,6 +389,20 @@ mod tests {
         assert_eq!(normalize_comm(&procs[2].comm), "npm");
         assert_eq!(normalize_comm(&procs[3].comm), "launchd");
         assert_eq!(normalize_comm(&procs[1].comm), "claude");
+    }
+
+    /// The nix `wrapProgram` rename, intact and truncated. Both spellings are live captures:
+    /// `.claude-wrapped` fits macOS's 15-char comm, `.opencode-wrapp` is the truncation.
+    #[test]
+    fn unwraps_nix_wrapped_comm() {
+        assert_eq!(normalize_comm(".claude-wrapped"), "claude");
+        assert_eq!(normalize_comm(".opencode-wrapp"), "opencode");
+        assert_eq!(normalize_comm("/nix/store/abc/bin/.codex-wrapped"), "codex");
+        // Not a wrapper: a dotfile name and a bare name both pass through untouched.
+        assert_eq!(normalize_comm(".hidden"), ".hidden");
+        assert_eq!(normalize_comm("opencode"), "opencode");
+        // The suffix alone is not a name; nothing to unwrap to.
+        assert_eq!(normalize_comm(".-wrapped"), ".-wrapped");
     }
 
     #[test]

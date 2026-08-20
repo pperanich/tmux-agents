@@ -1,12 +1,18 @@
 //! Per-pane observation input to the detection core.
 
-/// One process in a pane's tree, from a `ps -eo pid,ppid,pgid,comm` parse. The identity engine
-/// walks these to resolve pane ownership; the core stores them as opaque facts, never spawning `ps`.
+/// One process in a pane's tree, from a `ps -eo pid,ppid,pgid,tpgid,comm` parse. The identity
+/// engine walks these to resolve pane ownership; the core stores them as opaque facts, never
+/// spawning `ps`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProcInfo {
     pub pid: u32,
     pub ppid: u32,
     pub pgid: u32,
+    /// Foreground process group of this process's controlling terminal, or `None` when it has no
+    /// tty (`ps` reports `0` on BSD, `-1` on Linux). Read on the PANE ROOT, this is the kernel's
+    /// own answer to "which process group owns the screen right now" — the name-free foreground
+    /// test. See `identity::foreground_owns_tty`.
+    pub tpgid: Option<u32>,
     pub comm: String,
 }
 
