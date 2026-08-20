@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-08-20
+
 ### Changed
 
 - The done mark now clears on your next input at a pane you are already sitting on. Leaving is
@@ -343,7 +345,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.3.6...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.4.0...HEAD
+[0.4.0]: https://github.com/pperanich/tmux-agents/compare/v0.3.6...v0.4.0
 [0.3.6]: https://github.com/pperanich/tmux-agents/compare/v0.3.5...v0.3.6
 [0.3.5]: https://github.com/pperanich/tmux-agents/compare/v0.3.4...v0.3.5
 [0.3.4]: https://github.com/pperanich/tmux-agents/compare/v0.3.3...v0.3.4

@@ -1125,7 +1125,7 @@ checksum = "9e1c906769ad99c88eaa54e728060edef082f8e358ff32030cb7c7d315e81109"
 
 [[package]]
 name = "tma"
-version = "0.3.6"
+version = "0.4.0"
 dependencies = [
  "clap",
  "clap_complete",
@@ -1146,7 +1146,7 @@ dependencies = [
 
 [[package]]
 name = "tma-core"
-version = "0.3.6"
+version = "0.4.0"
 dependencies = [
  "proptest",
  "regex",
@@ -1157,7 +1157,7 @@ dependencies = [
 
 [[package]]
 name = "tma-daemon"
-version = "0.3.6"
+version = "0.4.0"
 dependencies = [
  "rustix",
  "signal-hook 0.4.4",
@@ -1169,7 +1169,7 @@ dependencies = [
 
 [[package]]
 name = "tma-runtime"
-version = "0.3.6"
+version = "0.4.0"
 dependencies = [
  "regex",
  "rustix",
@@ -1184,14 +1184,14 @@ dependencies = [
 
 [[package]]
 name = "tma-test-support"
-version = "0.3.6"
+version = "0.4.0"
 dependencies = [
  "rustix",
 ]
 
 [[package]]
 name = "tma-tmux"
-version = "0.3.6"
+version = "0.4.0"
 dependencies = [
  "rustix",
  "thiserror",
@@ -1201,7 +1201,7 @@ dependencies = [
 
 [[package]]
 name = "tma-ui"
-version = "0.3.6"
+version = "0.4.0"
 dependencies = [
  "crossterm",
  "nucleo",
@@ -1214,7 +1214,7 @@ dependencies = [
 
 [[package]]
 name = "tma-ui-core"
-version = "0.3.6"
+version = "0.4.0"
 dependencies = [
  "nucleo",
  "proptest",
