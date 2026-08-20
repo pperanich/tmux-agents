@@ -30,6 +30,7 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   The manifests now name their turn-end event, and the intake raises on it. Most exposed was a
   Codex pane whose `hooks.json` entries were never trusted in the TUI: its `notify` channel needs no
   trust and reports only turn ends, so *every* completion of that pane's life was this edge.
+  `tma subscribe --events` reports the re-raise as an `idle` → `done` edge.
 - The desktop notification follows the mark. Its per-episode dedup keyed on `@agent_since`, which is
   write-once while the state is unchanged and so could not move for a second completion on a pane
   that never left `idle`; the new `@agent_turn_at` carries that instant and the dedup reads the

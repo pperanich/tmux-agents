@@ -353,7 +353,13 @@ mod tests {
                 let idle = matches!(&entry.claim, Claim::State(sc) if sc.state == AgentState::Idle);
                 assert_eq!(
                     entry.turn_end, idle,
-                    "{}: `{}` claims idle={idle} but turn_end={}",
+                    "{}: `{}` claims idle={idle} but turn_end={}. Both directions are defects, and \
+                     the fix is almost never to flip `turn_end` to match. An event that merely \
+                     OBSERVES idleness — claude's idle REMINDER notification is the live example, \
+                     and it is deliberately unmapped — fires again and again on a pane nobody has \
+                     touched, so marking it a turn end makes the done mark unclearable. Add \
+                     `turn_end` only to the event that MEANS a turn ended; otherwise the entry \
+                     should not be claiming idle.",
                     lm.name, entry.event, entry.turn_end
                 );
                 turn_ends += usize::from(entry.turn_end);

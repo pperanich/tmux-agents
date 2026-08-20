@@ -206,11 +206,16 @@ pub(crate) fn decide(
             turn_end,
         } => {
             let prev = stored.map(|s| s.state);
-            // A marker still standing means the last completion is unacknowledged, so a turn end
+            // A marker still standing means the pane carries an unacknowledged mark, so a turn end
             // has nothing new to say: it neither re-raises nor records a turn. That is what keeps
             // the two channels reporting ONE codex turn end (`Stop` then `notify`, milliseconds
             // apart) down to one raise and one notification — the only thing separating them from
             // two genuine turns is that the user cleared the marker in between.
+            //
+            // It is read off `s.attention` alone, so a pane sitting BLOCKED with the mark up is
+            // covered by the same arm: a turn end arriving there does not record a turn either.
+            // Not a regression (pre-`turn_end` the raise was `prev == Some(Working)`, which a
+            // blocked pane also failed), and the mark is up and unacknowledged either way.
             let standing = stored.is_some_and(|s| s.attention);
             let set_attention = match state {
                 AgentState::Blocked => prev != Some(AgentState::Blocked),

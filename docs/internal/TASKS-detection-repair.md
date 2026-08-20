@@ -734,8 +734,12 @@ displays the pane **and** its last input is strictly later than the raise.
 - Suite: 1222 → **1235 passing, 0 failed** (`cargo fmt --all --check` clean, clippy silent).
 - Worth a reviewer's eye: the `!standing` gate reads `@agent_attention` from the pane read taken at
   event time, so a seen-clear landing between that read and the write costs one raise. The race is
-  one-directional (it can only fail to raise, never raise falsely) and is the same shape as the
-  pre-existing clear-vs-dispatch race D4 narrowed.
+  one-directional **on the daemon path** (it can only fail to raise, never raise falsely) and is the
+  same shape as the pre-existing clear-vs-dispatch race D4 narrowed. Narrowed by R-E: inbound frames
+  serialize in the single accept loop (`serve.rs:509`), which is what makes it one-directional
+  there. DAEMONLESS it is not — two concurrent `tma event` processes can both read attention absent
+  and both raise. That is an over-raise, and the same shape as the pre-existing blocked
+  read-modify-write, so it is recorded rather than fixed.
 
 **E2 — verify the control-mode alert-suppression footgun.** `DONE`
 - Claim: an attached control-mode client counts as a viewer, so tma's daemon may be silently
