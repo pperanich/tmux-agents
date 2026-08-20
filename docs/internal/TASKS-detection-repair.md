@@ -796,6 +796,47 @@ when `ActivityDelta` went — so it follows here. `Provenance::Process` and `Pro
 untouched. Suite **1235 passing, 0 failed** (unchanged: the deleted assertion lived inside an
 existing test, so no test count moved); `cargo fmt --all --check` clean, clippy silent.
 
+**E5 — repair the R-E findings.** `WIP e5-agent`
+- R-E returned **FAIL** on one blocking finding plus five smaller ones.
+- ⚠️ **Finding 1 (blocking).** `--since` no longer escapes level-triggering. `wait.rs:73` compares
+  `row.episode_at()`, `surfaces.rs:102` emits only `since_ms`, and the documented supervisor loop
+  (`block-a-script-on-agent-state.md:112`, second copy at `custom-actions.md:154`) feeds `since_ms`
+  back as the next `--since`. Once a pane has `turn_at > since` — the second-completion case E1
+  built — the fed-back floor can never reach the compared quantity, so every later `wait`
+  re-satisfies instantly and the loop dispatches its whole queue in a spin. R-E reproduced four
+  consecutive SATISFIED laps with an unchanging fed-back `since_ms`; feeding the true episode
+  instant blocks correctly (`exit=124`). Pre-E1 that pane STALLED, so it is not a pure regression —
+  it converts "misses the second completion" into "fires forever".
+  Expose the compared instant on the row so it can be fed back. **Do NOT change `since_ms`** —
+  `since_ms == @agent_since` is pinned by the uptime column and `pane-options-and-json.md:95`.
+  `AgentRow` has no `Serialize`; the JSON is hand-built in `surfaces.rs` and there are three
+  key-set drift guards to keep honest. Also correct `cli.md:328` and
+  `block-a-script-on-agent-state.md:119`, both of which now state the opposite of the truth.
+  Regression test required, and it must fail on today's tree.
+- **Finding 2 (medium).** `notify.rs:228` still passes `stored.since` as the episode start to
+  `notification_for`, while the dedup (`:56`) and the marker clamp (`:204`) moved to `episode_at()`.
+  For a second completion the payload's `since_ms` / `TMA_SINCE_MS` reads `now - <idle-run start>`,
+  minutes instead of dispatch latency, contradicting `tma-runtime/src/notify.rs:192`, `:260` and
+  `pane-options-and-json.md:178`. Fix: `stored.episode_at()`. The daemonless path already passes
+  `now, now` (`event.rs:394`) and is correct — leave it.
+- **Finding 3 (low).** The episode-reset arms (`render.rs:183-200` guarded, `:331-347` unguarded)
+  unset `ATTENTION` and `NOTIFIED_AT` but not `TURN_AT`, so a completion recorded by a replaced
+  agent survives into the new episode. Benign under a monotone clock, but a backward clock step
+  would let the stale value win `episode_at()`. Add the unset to both arms and extend
+  `render.rs:1100`, which only covers `render_remove`.
+- **Finding 4 (low).** `event/mapping.rs:212`'s comment overstates: `standing` is read off
+  `s.attention` regardless of `s.state`, so a BLOCKED pane with the mark up is conflated. Not a
+  regression (pre-E1 `prev == Blocked` behaved the same). Comment only.
+- **Finding 5 (low).** `manifests.rs:339-364` pins `turn_end == idle` correctly, but its failure
+  message nudges a future author toward setting `turn_end = true` on claude's deliberately-unmapped
+  idle REMINDER — the unclearable-mark failure E1 rejected. Put the rationale in the message.
+- **Finding 6 (nit).** CHANGELOG does not name `subscribe --events` on the new `idle → done` edge.
+- **Plan correction, no code.** E1's outcome note calls the `!standing` race one-directional. That
+  holds on the DAEMON path (inbound frames serialize in the single accept loop, `serve.rs:509`) but
+  not daemonless, where two concurrent `tma event` processes can both read attention absent and both
+  raise. It is an over-raise, the same shape as a pre-existing blocked read-modify-write, so it is
+  not fixed — the claim is narrowed instead.
+
 ---
 
 ## Explicitly rejected (do not resurrect)
