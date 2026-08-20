@@ -69,6 +69,13 @@ impl Tmux {
 
     /// Focus a pane across sessions (`switch-client` + `select-window` + `select-pane`): the only
     /// pane-affecting action `tma` performs. `Some(client)` moves that exact client; `None` is targetless.
+    ///
+    /// `select-window` is skipped when the destination window is already its session's current one.
+    /// That call would be a no-op for the display, but it still runs tmux's `after-select-window`
+    /// hook — whose `window_last_flag` at that moment names whatever window was left however long
+    /// ago, so anyone's hook reading it acts on a window the user never left. Half of all jumps land
+    /// in the window you are already in (`--attention` to the near one of two, `--back`, the picker
+    /// with one window in play), so this is the common case, not the exotic one.
     pub fn focus(
         &self,
         client: Option<&str>,
@@ -79,9 +86,21 @@ impl Tmux {
         let switch = switch_client_argv(client, session);
         let borrowed: Vec<&str> = switch.iter().map(String::as_str).collect();
         self.run(&borrowed)?;
-        self.run(&["select-window", "-t", window_target])?;
+        if !self.window_is_current(window_target) {
+            self.run(&["select-window", "-t", window_target])?;
+        }
         self.run(&["select-pane", "-t", pane_target])?;
         Ok(())
+    }
+
+    /// Is `window_target` already the current window of ITS OWN session? `#{window_active}` is
+    /// per-session (verified on 3.6a: each session's current window reads `1`, whichever session
+    /// tmux would call current), and it resolves from a window target or a pane target alike.
+    /// An unreadable answer is `false`, which falls through to the plain `select-window` this
+    /// guards — the behaviour before the guard existed.
+    fn window_is_current(&self, window_target: &str) -> bool {
+        self.display(window_target, "#{window_active}")
+            .is_ok_and(|v| v.trim() == "1")
     }
 
     /// Deliver a key sequence into a pane as ONE `send-keys` invocation with named-key

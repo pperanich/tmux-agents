@@ -1,5 +1,6 @@
 //! The middle-tier SIGUSR1 nudge. A resident `tma watch` advertises its pid in the
-//! pane-scoped `@tma_watch_pid` option; the always-installed `after-select-pane`/`-window` hooks
+//! pane-scoped `@tma_watch_pid` option; the always-installed focus hooks (`after-select-pane`,
+//! `session-window-changed`)
 //! walk panes for it and SIGUSR1 each pid, and the watcher refreshes on its next input-poll tick.
 //!
 //! Pane scope (never server) narrows the pid-recycle kill hazard (SIGUSR1 default-terminates): the

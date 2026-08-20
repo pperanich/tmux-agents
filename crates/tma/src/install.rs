@@ -1,7 +1,7 @@
 //! `tma install-hooks`: wire the `tma-hook` wrapper into an agent's config and install the tmux
 //! attention-clear server hooks. Two symmetric, idempotent, diff-before-write, byte-identical
 //! write sites: the agent config (an "honest split", one [`adapters::AgentAdapter`] arm per agent, since each
-//! config format differs) and the tmux server hooks (`after-select-*` running `tma clear-attention
+//! config format differs) and the tmux server hooks (the focus pair running `tma clear-attention
 //! #{pane_id}`, their assigned indexes recorded in a PER-SERVER `hooks-state-<server>.toml`,
 //! keyed because tmux `set-hook -g` indexes are per-server: a shared file would let one server's
 //! uninstall strip another's). `--check` verifies both and detects a config-reload hook wipe. The
@@ -42,17 +42,34 @@ const WRAPPER_SRC: &str = include_str!("../assets/tma-hook");
 const CODEX_AGENT: &str = "codex";
 pub(crate) const CODEX_NOTIFY_EVENT: &str = "notify";
 
-/// The always-installed tmux attention-clear hooks. `after-select-*` fire
-/// unconditionally, so they are the zero-config posture.
-const TMUX_HOOKS: &[&str] = &["after-select-pane", "after-select-window"];
+/// The always-installed tmux attention-clear hooks. Both fire unconditionally, with no tmux option
+/// behind them, so they are the zero-config posture.
+///
+/// The window half is `session-window-changed`, NOT `after-select-window`: tmux runs the latter even
+/// for a `select-window` onto the window you are already in, where `window_last_flag` still names a
+/// window left long ago, so the departure clear landed on a pane the user had not seen since. The
+/// notification hook fires only when a session's current window actually changed, and it also covers
+/// the changes `select-window` never sees (a new window, the current one closing).
+const TMUX_HOOKS: &[&str] = &["after-select-pane", "session-window-changed"];
+
+/// Hooks tma used to install and now actively removes on install, so an upgrade in place is not left
+/// running the shape it replaced. Not merely dropped from [`TMUX_HOOKS`]: an entry already on the
+/// server survives a re-install untouched, and this one is the over-clearing bug.
+const RETIRED_TMUX_HOOKS: &[&str] = &["after-select-window"];
 
 /// The extra hook installed only when `[focus] events = true`. `pane-focus-in` fires only under the
 /// user's tmux `focus-events` (default off), so it is off by default and config-gated here.
 const FOCUS_HOOK: &str = "pane-focus-in";
 
-/// The superset tma may have installed (base + opt-in focus hook), used by `--uninstall` and
-/// removal-by-content so a focus hook is still removed after `focus_events` is turned back off.
-const ALL_TMUX_HOOKS: &[&str] = &["after-select-pane", "after-select-window", "pane-focus-in"];
+/// The superset tma may have installed (base + opt-in focus hook + anything retired), used by
+/// `--uninstall` and removal-by-content so a focus hook is still removed after `focus_events` is
+/// turned back off, and so uninstall on a server that predates the hook swap leaves nothing behind.
+const ALL_TMUX_HOOKS: &[&str] = &[
+    "after-select-pane",
+    "session-window-changed",
+    "after-select-window",
+    "pane-focus-in",
+];
 
 /// The hooks that SHOULD be installed for the `[focus] events` posture (base + `pane-focus-in` when
 /// opted in). Drives install and `--check`.
@@ -494,7 +511,7 @@ fn sweep_pane_stamps(tmux: &Tmux) {
 /// command is being written for; it selects the seen-on-leave posture (see [`HOOK_KIND_ENV`]).
 fn clear_attention_command(bin: &Path, hook: &str) -> String {
     // `#{pane_id}`, NOT `#{hook_pane}`. `hook_pane` is populated only on the notify_pane-style hooks
-    // (`pane-focus-in` and friends); on the `after-select-pane` / `after-select-window` command hooks
+    // (`pane-focus-in` and friends); on `after-select-pane` and on `session-window-changed`
     // it expands EMPTY, which `clear-attention` treats as a no-op — so the always-on pair cleared
     // nothing at all, for anyone, and the flag only ever came off via the picker, jump, or the
     // opt-in focus hook. Verified on tmux 3.6a, attached and detached, key-driven and out-of-band:
@@ -576,6 +593,14 @@ fn install_tmux_hooks(tmux: &Tmux, hooks: &[&str]) -> Result<Vec<TmuxHookRecord>
             });
         }
     }
+    // Retire what we no longer install. A hook array is server state that outlives the binary, so
+    // without this an upgraded install would leave its predecessor firing beside the replacement.
+    for &hook in RETIRED_TMUX_HOOKS {
+        if hooks.contains(&hook) {
+            continue;
+        }
+        remove_our_hook_entries(tmux, hook)?;
+    }
     Ok(records)
 }
 
@@ -613,17 +638,24 @@ fn uninstall_tmux_hooks(tmux: &Tmux, state: Option<&HooksState>) -> Result<(), S
 /// Fallback removal by content when no recorded state exists (index-stable).
 fn uninstall_tmux_hooks_by_content(tmux: &Tmux) -> Result<(), String> {
     for &hook in ALL_TMUX_HOOKS {
-        let entries = tmux.show_global_hook(hook).map_err(|e| e.to_string())?;
-        let mut ours: Vec<usize> = entries
-            .iter()
-            .filter(|(_, c)| is_ours(c))
-            .map(|(i, _)| *i)
-            .collect();
-        ours.sort_unstable();
-        for idx in ours.into_iter().rev() {
-            tmux.remove_global_hook_index(hook, idx)
-                .map_err(|e| e.to_string())?;
-        }
+        remove_our_hook_entries(tmux, hook)?;
+    }
+    Ok(())
+}
+
+/// Drop every entry of ours from one hook array, high index to low. Shared by content-based
+/// uninstall and by the retirement sweep, which need the same "ours, by content" rule.
+fn remove_our_hook_entries(tmux: &Tmux, hook: &str) -> Result<(), String> {
+    let entries = tmux.show_global_hook(hook).map_err(|e| e.to_string())?;
+    let mut ours: Vec<usize> = entries
+        .iter()
+        .filter(|(_, c)| is_ours(c))
+        .map(|(i, _)| *i)
+        .collect();
+    ours.sort_unstable();
+    for idx in ours.into_iter().rev() {
+        tmux.remove_global_hook_index(hook, idx)
+            .map_err(|e| e.to_string())?;
     }
     Ok(())
 }
@@ -1349,7 +1381,7 @@ mod tests {
         );
         assert!(
             !cmd.contains("hook_pane"),
-            "`#{{hook_pane}}` expands empty on the after-select-* hooks, which silently \
+            "`#{{hook_pane}}` expands empty on the focus hooks, which silently \
              no-ops the clear: {cmd}"
         );
         assert!(
@@ -1372,7 +1404,10 @@ mod tests {
         let bin = Path::new("/opt/tma/tma");
         for (hook, expected) in [
             ("after-select-pane", "TMA_HOOK_KIND=after-select-pane "),
-            ("after-select-window", "TMA_HOOK_KIND=after-select-window "),
+            (
+                "session-window-changed",
+                "TMA_HOOK_KIND=session-window-changed ",
+            ),
         ] {
             let cmd = clear_attention_command(bin, hook);
             assert!(
@@ -1393,33 +1428,66 @@ mod tests {
             !focus.contains(HOOK_KIND_ENV),
             "the arrival-only hook must carry no departure kind: {focus}"
         );
+        // And the retired one, which is the whole point of retiring it: `after-select-window` fires
+        // on a no-op selection of the current window, where `window_last_flag` is stale. A hook
+        // string of that name left on a server by an older install must reach this binary WITHOUT a
+        // kind, so it can still only clear the pane you arrived at.
+        for &hook in RETIRED_TMUX_HOOKS {
+            let cmd = clear_attention_command(bin, hook);
+            assert!(
+                !cmd.contains(HOOK_KIND_ENV),
+                "{hook} is retired and must carry no departure kind: {cmd}"
+            );
+        }
     }
 
-    /// Every hook the two commands are written for must render a distinguishable command, or
-    /// `hook_command_current` would read one hook's command as another's drift forever.
+    /// Every hook renders exactly the command its own departure posture calls for: removable,
+    /// current against itself, and carrying its kind iff it HAS one. The kind is the only thing that
+    /// varies between these strings, and it is what picks the departure format at hook time, so a
+    /// hook that quietly lost or gained one would clear the wrong pane on every navigation.
+    ///
+    /// Two kindless hooks (the retired one, the arrival-only one) rendering the same string is fine
+    /// and asserted below rather than forbidden: `hook_command_current` only ever compares an entry
+    /// against what THIS hook would be written as, so an identical neighbour reads as current, not
+    /// as drift.
     #[test]
-    fn each_hook_renders_its_own_command() {
+    fn each_hooks_command_carries_exactly_its_own_kind() {
         let bin = Path::new("/opt/tma/tma");
-        let rendered: Vec<String> = ALL_TMUX_HOOKS
-            .iter()
-            .map(|h| clear_attention_command(bin, h))
-            .collect();
-        for (i, a) in rendered.iter().enumerate() {
-            assert!(is_ours(a), "{}: still removable", ALL_TMUX_HOOKS[i]);
+        let mut with_kind: Vec<String> = Vec::new();
+        for &hook in ALL_TMUX_HOOKS {
+            let cmd = clear_attention_command(bin, hook);
+            assert!(is_ours(&cmd), "{hook}: still removable");
             assert!(
-                hook_command_current(a, a),
-                "{}: current against itself",
-                ALL_TMUX_HOOKS[i]
+                hook_command_current(&cmd, &cmd),
+                "{hook}: current against itself"
             );
-            for (j, b) in rendered.iter().enumerate().skip(i + 1) {
+            match DepartureKind::from_hook_name(hook) {
+                Some(_) => {
+                    assert!(
+                        cmd.contains(&format!("{HOOK_KIND_ENV}={hook} ")),
+                        "{hook} resolves a departure, so its command must name itself: {cmd}"
+                    );
+                    with_kind.push(cmd);
+                }
+                None => assert!(
+                    !cmd.contains(HOOK_KIND_ENV),
+                    "{hook} carries no departure, so its command must carry no kind: {cmd}"
+                ),
+            }
+        }
+        for (i, a) in with_kind.iter().enumerate() {
+            for b in with_kind.iter().skip(i + 1) {
                 assert!(
                     !hook_command_current(a, b),
-                    "{} and {} render the same command",
-                    ALL_TMUX_HOOKS[i],
-                    ALL_TMUX_HOOKS[j]
+                    "two departure hooks render the same command:\n{a}\n{b}"
                 );
             }
         }
+        assert_eq!(
+            with_kind.len(),
+            TMUX_HOOKS.len(),
+            "every always-on hook resolves a departure; the opt-in and retired ones do not"
+        );
     }
 
     #[test]

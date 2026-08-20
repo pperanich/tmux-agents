@@ -485,7 +485,8 @@ impl NotifySection {
 
 // ---- [focus] -----------------------------------------------------------------------------
 
-/// `[focus]` posture. The `after-select-pane`/`-window` attention-clear hooks are always installed;
+/// `[focus]` posture. The `after-select-pane` / `session-window-changed` attention-clear hooks are
+/// always installed;
 /// `events = true` adds a `pane-focus-in` hook (fires only under tmux `focus-events on`). Default
 /// off.
 #[derive(Debug, Clone, Default, Deserialize)]

@@ -453,6 +453,90 @@ fn jump_to_a_named_pane_records_the_origin_and_clears_attention() {
     );
 }
 
+/// A jump landing in the window you are already in must not run `select-window` at all.
+///
+/// tmux runs `after-select-window` even when the selection changes nothing, and at that moment
+/// `window_last_flag` names whatever window was left however long ago — so a hook reading it (tma's
+/// own, before this, and anyone else's) acts on a window the user never left. Half of all jumps land
+/// in the current window: `--attention` to the near one of two, `--back` after a same-window jump,
+/// the picker with one window in play.
+///
+/// The probe hook is a bare `run-shell` appending a byte, not tma's own hook: what is under test is
+/// that the tmux command is not issued, independent of what any hook would then do about it. The
+/// cross-window jump at the end is the liveness proof — without it, a probe hook that was never
+/// installed would look exactly like a jump that correctly skipped the selection.
+#[test]
+fn jump_within_the_current_window_does_not_reselect_it() {
+    if !preflight() {
+        return;
+    }
+    let mut s = Scratch::new("jumpsamewin");
+    spawn_session(&s, "home", "exec sleep 100000");
+    // A blocked agent beside you in window 0, and another one over in window 1.
+    let printf = format!("printf '{BLOCKED_CHROME}'; exec sleep 100000");
+    assert!(s
+        .tmux(&["split-window", "-t", "home:0", &printf])
+        .status
+        .success());
+    assert!(s
+        .tmux(&["new-window", "-d", "-t", "home:", &printf])
+        .status
+        .success());
+    for target in ["home:0.1", "home:1.0"] {
+        assert!(
+            wait_capture_contains(&s.socket, target, "Do you want to proceed?", POLL_CEILING),
+            "{target}'s blocked chrome did not render"
+        );
+    }
+    let near = s.display("home:0.1", "#{pane_id}");
+    let far = s.display("home:1.0", "#{pane_id}");
+    write_blocked_manifest(&s, "home");
+
+    let Some(client) = attach_or_skip(&mut s, "home") else {
+        return;
+    };
+    assert!(s.tmux(&["select-window", "-t", "home:0"]).status.success());
+    assert!(s.tmux(&["select-pane", "-t", "home:0.0"]).status.success());
+
+    // A bare probe: one byte per `after-select-window`, whoever caused it.
+    let log = s.workdir.join("select-window.log");
+    assert!(s
+        .tmux(&[
+            "set-hook",
+            "-g",
+            "after-select-window",
+            &format!("run-shell \"printf x >> '{}'\"", log.display()),
+        ])
+        .status
+        .success());
+
+    let out = s.tma(&["jump", "--pane", &near, "--client", &client]);
+    assert!(
+        out.status.success(),
+        "jump --pane failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        wait_until(POLL_CEILING, || s.display("", "#{pane_id}") == near),
+        "the jump still has to land: active pane is {:?}",
+        s.display("", "#{pane_id}")
+    );
+    assert!(
+        !wait_until(std::time::Duration::from_millis(400), || log.exists()),
+        "the jump re-selected the window it was already in; every hook tmux runs for that \
+         selection reads a `window_last_flag` naming a window the user never left"
+    );
+
+    // Liveness: a jump that really does change window issues the selection, so the probe fires.
+    let out = s.tma(&["jump", "--pane", &far, "--client", &client]);
+    assert!(out.status.success());
+    assert!(
+        wait_until(POLL_CEILING, || log.exists()),
+        "the probe hook never fired even for a real window change, so the assertion above \
+         proved nothing"
+    );
+}
+
 /// A pane with no agent on it is a clean miss: exit 0 with a note naming the pane, and nothing moves.
 #[test]
 fn jump_to_a_pane_without_an_agent_reports_the_miss() {

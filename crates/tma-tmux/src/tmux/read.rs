@@ -63,17 +63,27 @@ const EXTRA_PANE_OPTIONS: &[&str] = &[
 pub enum DepartureKind {
     /// `after-select-pane`: the departed pane is this window's `pane_last`.
     SelectPane,
-    /// `after-select-window`: the departed pane is the active pane of the session's last window.
-    SelectWindow,
+    /// `session-window-changed`: the departed pane is the active pane of the session's last window.
+    WindowChange,
 }
 
 impl DepartureKind {
     /// The kind a tmux hook name implies, `None` for a hook that carries no departure (arrival-only
     /// `pane-focus-in`, or an unrecognized name from a newer install talking to an older binary).
+    ///
+    /// `after-select-window` is deliberately absent, and its absence is a safety property rather
+    /// than an omission. Selecting the window you are ALREADY in is a no-op for the display, but
+    /// tmux still runs that hook, with `window_last_flag` naming whatever window you left however
+    /// long ago — so resolving a departure there clears a pane the user has not been near since
+    /// (`prefix <N>` onto the current window, `choose-tree` onto it, `tma jump` landing where you
+    /// already are). `session-window-changed` fires only when a session's current window really
+    /// changed; verified on 3.6a, attached and key-driven, over four separate no-op selections.
+    /// Because the name no longer maps, a hook string left behind by an older install can still
+    /// only do the arrival clear, which is the pre-seen-on-leave behaviour.
     pub fn from_hook_name(hook: &str) -> Option<Self> {
         match hook {
             "after-select-pane" => Some(Self::SelectPane),
-            "after-select-window" => Some(Self::SelectWindow),
+            "session-window-changed" => Some(Self::WindowChange),
             _ => None,
         }
     }
@@ -85,7 +95,7 @@ impl DepartureKind {
     fn format(self) -> &'static str {
         match self {
             Self::SelectPane => "#{P:#{?pane_last,#{pane_id},}}",
-            Self::SelectWindow => "#{W:#{?window_last_flag,#{P:#{?pane_active,#{pane_id},}},}}",
+            Self::WindowChange => "#{W:#{?window_last_flag,#{P:#{?pane_active,#{pane_id},}},}}",
         }
     }
 }
@@ -189,17 +199,23 @@ impl Tmux {
             .collect())
     }
 
-    /// The pane the user just LEFT, resolved while an `after-select-*` hook is running. `arrival` is
-    /// the pane the hook handed us (`#{pane_id}`) and is passed as `-t`, which is not optional: an
-    /// untargeted `display-message` answers for whichever session tmux considers current, and that
-    /// is NOT the session the hook fired in — probed on 3.6a with two sessions, where a query issued
-    /// straight after driving `s2` still answered for `s1`. Targeting the arrival pane scopes
-    /// `#{P:...}` to the destination window and `#{W:...}` to the destination session.
+    /// The pane the user just LEFT, resolved while a focus hook is running. `arrival` is the pane
+    /// the hook handed us (`#{pane_id}`) and is passed as `-t`, which is not optional: an untargeted
+    /// `display-message` answers for whichever session tmux picks as current at that moment, and
+    /// which session that is is arbitrary from our side — probed both ways on 3.6a with two
+    /// sessions, and the answer went to a different session each way under otherwise similar
+    /// setups. Targeting the arrival pane scopes `#{P:...}` to the destination window and
+    /// `#{W:...}` to the destination session.
     ///
     /// `Ok(None)` when the format expands empty: a window with no previous pane, or a session with
-    /// no previous window. Racing a second navigation can only make this name a pane departed
-    /// slightly later, never one the user never left, so the error is one-directional (it can fail
-    /// to clear, not over-clear).
+    /// no previous window (a fresh session, or one whose previous window just closed).
+    ///
+    /// Two races remain open, both one `display-message` round trip wide. A second navigation
+    /// landing inside that window moves the answer to whatever that later navigation left — on the
+    /// pane arm still a pane the user did just leave, so that one is one-directional. The window arm
+    /// is not: a *programmatic* `select-pane` into a background window changes that window's active
+    /// pane with nobody having looked at it, and the `#{W:...}` format then names the new one.
+    /// Neither is closable from the hook side, so they are documented rather than defended against.
     pub fn departed_pane(
         &self,
         arrival: &str,
@@ -558,6 +574,23 @@ mod tests {
         assert!(!rec.alternate_on);
         assert_eq!(rec.window_summary, None);
         assert_eq!(rec.session_summary, None);
+    }
+
+    #[test]
+    fn the_retired_window_hook_name_carries_no_departure() {
+        // Not cosmetic: `after-select-window` fires on a no-op selection of the window you are
+        // already in, and `window_last_flag` is stale there. Refusing the name is what keeps a hook
+        // string left over from an older install to the arrival clear alone.
+        assert_eq!(DepartureKind::from_hook_name("after-select-window"), None);
+        assert_eq!(
+            DepartureKind::from_hook_name("session-window-changed"),
+            Some(DepartureKind::WindowChange)
+        );
+        assert_eq!(
+            DepartureKind::from_hook_name("after-select-pane"),
+            Some(DepartureKind::SelectPane)
+        );
+        assert_eq!(DepartureKind::from_hook_name("pane-focus-in"), None);
     }
 
     #[test]

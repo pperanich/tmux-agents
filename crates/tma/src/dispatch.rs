@@ -5,8 +5,9 @@ use crate::cli::{ClearAttentionArgs, JumpArgs, LsArgs, StatusArgs, StatusFormat,
 use crate::{cli_support, config, cycle, jump, manifests, surfaces, tmux};
 
 /// Clear the `@agent_attention` flag on the pane you arrive at AND on the one you just left, then
-/// nudge any resident `tma watch`. The `after-select-*` hooks call this with `#{pane_id}` on every
-/// focus change (as does the picker's Enter-jump): one binary call does all three jobs.
+/// nudge any resident `tma watch`. The focus hooks (`after-select-pane`, `session-window-changed`)
+/// call this with `#{pane_id}` on every focus change, as does the picker's Enter-jump: one binary
+/// call does all three jobs.
 ///
 /// Arrival alone left the larger residue: an agent finishes while you watch it, you move to another
 /// window, and the flag survives on the pane you were just looking at — counted by `tma status` and

@@ -257,7 +257,7 @@ fn install_uninstall_round_trip_and_check_detects_wipe() {
     assert!(installed.contains("claude SessionStart"));
 
     // tmux hooks installed on the scratch server.
-    for hook in ["after-select-pane", "after-select-window"] {
+    for hook in ["after-select-pane", "session-window-changed"] {
         let shown =
             String::from_utf8_lossy(&s.tmux(&["show-hooks", "-g", hook]).stdout).to_string();
         assert!(
@@ -323,12 +323,82 @@ fn install_uninstall_round_trip_and_check_detects_wipe() {
         "uninstall restores settings.json byte-for-byte"
     );
 
-    let shown =
-        String::from_utf8_lossy(&s.tmux(&["show-hooks", "-g", "after-select-window"]).stdout)
-            .to_string();
+    let shown = String::from_utf8_lossy(
+        &s.tmux(&["show-hooks", "-g", "session-window-changed"])
+            .stdout,
+    )
+    .to_string();
     assert!(
         !shown.contains("clear-attention"),
         "tmux hook removed on uninstall: {shown}"
+    );
+}
+
+/// An install in place must REMOVE the hook it replaced, not just stop writing it. Hook arrays are
+/// tmux server state that outlives the binary, so an `after-select-window` entry from an earlier
+/// release keeps firing beside the new `session-window-changed` one — and that is the entry with the
+/// over-clearing bug (tmux runs it for a `select-window` onto the window you are already in, where
+/// `window_last_flag` names a window left long ago).
+#[test]
+fn install_retires_the_window_hook_it_replaced() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new();
+    assert!(s
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
+        .status
+        .success());
+    std::fs::write(s.settings(), "{}\n").unwrap();
+
+    // The shape an earlier release left behind, plus a stranger's entry that is none of our
+    // business and must survive.
+    assert!(s
+        .tmux(&[
+            "set-hook",
+            "-g",
+            "after-select-window[0]",
+            "run-shell \"/old/tma clear-attention '#{pane_id}'\"",
+        ])
+        .status
+        .success());
+    assert!(s
+        .tmux(&[
+            "set-hook",
+            "-g",
+            "after-select-window[1]",
+            "run-shell \"true\"",
+        ])
+        .status
+        .success());
+
+    let out = s.install_hooks(&["claude", "--yes"]);
+    assert!(
+        out.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let retired =
+        String::from_utf8_lossy(&s.tmux(&["show-hooks", "-g", "after-select-window"]).stdout)
+            .to_string();
+    assert!(
+        !retired.contains("clear-attention"),
+        "the superseded hook must be removed, not left firing beside its replacement: {retired}"
+    );
+    assert!(
+        retired.contains("true"),
+        "removal is ours-only: someone else's entry on the same hook stays: {retired}"
+    );
+    let installed = String::from_utf8_lossy(
+        &s.tmux(&["show-hooks", "-g", "session-window-changed"])
+            .stdout,
+    )
+    .to_string();
+    assert!(
+        installed.contains("clear-attention"),
+        "the replacement is installed: {installed}"
     );
 }
 

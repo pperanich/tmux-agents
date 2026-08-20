@@ -3,7 +3,7 @@
 //! daemon restart (a cold `tma event` whose only record is the persisted `@agent_notified_at`) and
 //! does NOT re-fire; a pid-change episode boundary clears both through `debug stamp --episode-reset`.
 //! Runs on a scratch `tmux -L` server, killed on drop. Most cases invoke `clear-attention` directly
-//! (a simulated hook), but one drives the REAL installed `after-select-pane` hook end to end, which
+//! (a simulated hook), but several drive the REAL installed hooks end to end, which
 //! is what the pane-argument regression below needs.
 
 use std::io::Write;
@@ -187,7 +187,7 @@ fn episode_reset_clears_attention_and_notified() {
 /// The installed `after-select-pane` hook must actually clear the pane it selects.
 ///
 /// It did not, from the first release until this test: the hook passed `#{hook_pane}`, which tmux
-/// populates only on the notify_pane-style hooks. On the `after-select-*` command hooks it expands
+/// populates only on the notify_pane-style hooks. On the focus hooks tma installs it expands
 /// EMPTY, and `clear-attention ''` is a no-op — so the always-on pair cleared nothing for anyone,
 /// while still looking installed and still firing its watch nudge. The old assertion only checked
 /// that the hook TEXT contained `clear-attention`, which the broken shape satisfied.
@@ -234,6 +234,12 @@ fn select_pane_hook_clears_attention_on_the_selected_pane() {
 }
 
 // ---- seen-on-leave ------------------------------------------------------------------
+
+/// The window-departure hook `install-hooks` writes, and the reason it is not `after-select-window`:
+/// tmux runs THAT one even for a `select-window` onto the window you are already in, where
+/// `window_last_flag` still names a window left long ago. `session-window-changed` fires only when a
+/// session's current window really changed. Both regression tests below turn on that difference.
+const WINDOW_HOOK: &str = "session-window-changed";
 
 /// The hook command as `install-hooks` writes it, minus the late-binding `-x` test (the test binary
 /// is always executable and always the one we mean). The `TMA_HOOK_KIND` prefix is the part under
@@ -330,7 +336,7 @@ fn departing_a_pane_clears_its_attention_flag() {
     );
 }
 
-/// The window-switch half: `after-select-window` clears the active pane of the window you left,
+/// The window-switch half: `session-window-changed` clears the active pane of the window you left,
 /// which is the pane you were actually looking at.
 #[test]
 fn departing_a_window_clears_the_pane_it_was_showing() {
@@ -356,7 +362,7 @@ fn departing_a_window_clears_the_pane_it_was_showing() {
     let watched = s.get("s1:0.1", "#{pane_id}");
     select_pane(&s, &watched);
 
-    install_hook(&s, "after-select-window");
+    install_hook(&s, WINDOW_HOOK);
     s.set_opt(&watched, "@agent_attention", "1");
     assert!(s.tmux(&["select-window", "-t", "s1:1"]).status.success());
 
@@ -366,6 +372,128 @@ fn departing_a_window_clears_the_pane_it_was_showing() {
             .is_empty()),
         "leaving the window must clear the pane it was showing, but it is still {:?}",
         s.pane_option(&watched, "@agent_attention")
+    );
+}
+
+/// Selecting the window you are ALREADY in must leave the window you left alone.
+///
+/// This is the R-C failure, and it was not exotic: `tma jump --attention` onto a pane in your own
+/// window, `prefix <N>` onto the current window, `choose-tree` onto it, any script running
+/// `select-window -t :0`. tmux runs `after-select-window` for all of those, and `window_last_flag`
+/// there still names whatever window you left this morning — so seen-on-leave cleared a done marker
+/// on a pane you had not looked at since. The fix is the hook name: `session-window-changed` is a
+/// notification of a real change and is simply never emitted for a no-op.
+///
+/// The liveness proof is the genuine switch at the end rather than a witness cleared by the no-op
+/// itself: a hook that never fires is the CORRECT behaviour for the no-op, so nothing about it can
+/// distinguish "installed and quiet" from "not installed at all". If the hook were dead, misnamed,
+/// or no longer resolving a departure, the last assertion fails.
+#[test]
+fn a_no_op_window_selection_leaves_the_window_you_left_alone() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new("noopwin");
+    assert!(s
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
+        .status
+        .success());
+    assert!(s
+        .tmux(&["split-window", "-t", "s1:0", "exec sleep 100000"])
+        .status
+        .success());
+    for _ in 0..2 {
+        assert!(s
+            .tmux(&["new-window", "-d", "-t", "s1:", "exec sleep 100000"])
+            .status
+            .success());
+    }
+    // `far` is the window-0 pane an agent finished in, on the second pane so a pass cannot be
+    // explained by a format naming the window's first pane.
+    let far = s.get("s1:0.1", "#{pane_id}");
+    let near = s.get("s1:1.0", "#{pane_id}");
+
+    // Establish the history the stale format reads: leave window 0 for window 1, before the hook
+    // exists, so window 0 is the session's `last` window from here on.
+    select_pane(&s, &far);
+    assert!(s.tmux(&["select-window", "-t", "s1:1"]).status.success());
+    install_hook(&s, WINDOW_HOOK);
+
+    // Two agents finish: one in the window you are sitting in, one in the window you left earlier.
+    s.set_opt(&far, "@agent_attention", "1");
+    s.set_opt(&near, "@agent_attention", "1");
+
+    // Jump to the near one. You are already in its window, so this select-window changes nothing.
+    assert!(s.tmux(&["select-window", "-t", "s1:1"]).status.success());
+    assert!(
+        !tma_test_support::wait_until(std::time::Duration::from_millis(400), || s
+            .pane_option(&far, "@agent_attention")
+            .is_empty()),
+        "selecting the window you are already in cleared {far}, a pane in the window you left \
+         long ago and have not seen since — that is the done marker this tool exists to carry"
+    );
+
+    // Now leave window 1 for real. The departure clear must land on the pane it was showing, which
+    // both proves the hook was live all along and re-asserts the seen-on-leave behaviour.
+    assert!(s.tmux(&["select-window", "-t", "s1:2"]).status.success());
+    assert!(
+        tma_test_support::wait_until(tma_test_support::POLL_CEILING, || s
+            .pane_option(&near, "@agent_attention")
+            .is_empty()),
+        "the hook never ran: {near} still reads {:?}, so the no-op assertion above proved nothing",
+        s.pane_option(&near, "@agent_attention")
+    );
+    assert_eq!(
+        s.pane_option(&far, "@agent_attention"),
+        "1",
+        "leaving window 1 must clear window 1, not the window before it"
+    );
+}
+
+/// An `after-select-window` hook string left on a server by an older install must be harmless: this
+/// binary no longer recognizes that hook name, so it can only clear the pane you ARRIVED at, which
+/// is the behaviour that shipped before seen-on-leave existed. Belt to the retirement sweep's
+/// braces — `install-hooks` removes the entry, but a server whose user has not re-run it (or whose
+/// hooks were restored from an old config) keeps firing the string against the new binary.
+///
+/// The arrival clear is this test's witness: it proves the hook fired at all, which is exactly what
+/// makes the surviving flag on `far` meaningful.
+#[test]
+fn the_retired_window_hook_can_only_clear_the_pane_you_arrived_at() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new("retiredwin");
+    assert!(s
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
+        .status
+        .success());
+    assert!(s
+        .tmux(&["split-window", "-t", "s1:0", "exec sleep 100000"])
+        .status
+        .success());
+    assert!(s
+        .tmux(&["new-window", "-d", "-t", "s1:", "exec sleep 100000"])
+        .status
+        .success());
+    let far = s.get("s1:0.1", "#{pane_id}");
+    let near = s.get("s1:1.0", "#{pane_id}");
+
+    select_pane(&s, &far);
+    assert!(s.tmux(&["select-window", "-t", "s1:1"]).status.success());
+    install_hook(&s, "after-select-window");
+
+    // The no-op fires this hook (that is the tmux behaviour under test); the arrival pane's flag
+    // coming off is what proves it ran.
+    let survived = survives_navigation(&s, &far, &near, || {
+        assert!(s.tmux(&["select-window", "-t", "s1:1"]).status.success());
+    });
+    assert!(
+        survived,
+        "a retired hook string still on the server cleared {far}: `after-select-window` fires on a \
+         no-op selection with a stale `window_last_flag`, so it must resolve no departure at all"
     );
 }
 
