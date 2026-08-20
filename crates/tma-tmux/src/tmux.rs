@@ -22,7 +22,7 @@ mod options;
 mod read;
 
 pub use display::{escape_menu_label, MenuItem};
-pub use read::{normalize_comm, ps_all, PaneRecord};
+pub use read::{normalize_comm, ps_all, DepartureKind, PaneRecord};
 
 /// Field separator for the `list-panes` format: US (`\x1f`) never appears in a pane title or command
 /// in practice, so a plain split is unambiguous; the free-form title is placed last for extra safety.

@@ -4,16 +4,35 @@ use std::process::ExitCode;
 use crate::cli::{ClearAttentionArgs, JumpArgs, LsArgs, StatusArgs, StatusFormat, SuperviseArgs};
 use crate::{cli_support, config, cycle, jump, manifests, surfaces, tmux};
 
-/// Clear a pane's `@agent_attention` flag AND nudge any resident `tma watch`. The
-/// `after-select-*` hooks call this with `#{hook_pane}` on every focus change (as does the picker's
-/// Enter-jump): one binary call does both jobs — clear attention, then SIGUSR1 every pane advertising
-/// `@tma_watch_pid`. A focus hook must never error, so an empty pane and a gone server are clean no-ops.
+/// Clear the `@agent_attention` flag on the pane you arrive at AND on the one you just left, then
+/// nudge any resident `tma watch`. The `after-select-*` hooks call this with `#{pane_id}` on every
+/// focus change (as does the picker's Enter-jump): one binary call does all three jobs.
+///
+/// Arrival alone left the larger residue: an agent finishes while you watch it, you move to another
+/// window, and the flag survives on the pane you were just looking at — counted by `tma status` and
+/// offered by `prefix-j` until you happen to navigate back. Departure closes that. Walk-away is
+/// preserved structurally rather than by a heuristic: walking away means you do not navigate, so no
+/// hook fires and nothing clears.
+///
+/// A focus hook must never error into the user's face, so every failure here is a silent no-op: an
+/// empty pane argument, a gone server, an unreadable departed pane.
 pub(crate) fn run_clear_attention(args: ClearAttentionArgs, server: &tmux::Server) -> ExitCode {
     let tmux = tmux::Tmux::connect(server);
-    // The attention clear: skipped on an empty `#{hook_pane}` (nothing to target), but the
-    // focus change still happened, so the watcher nudge below runs regardless.
+    // Skipped on an empty pane argument (nothing to target, and nothing to scope the departure
+    // query to), but the focus change still happened, so the watcher nudge below runs regardless.
     if !args.pane.is_empty() {
         let _ = tmux.unset_pane_option(&args.pane, tma_core::stamp::opt::ATTENTION);
+        // Seen-on-leave. The kind arrives by environment variable, so an older binary reached
+        // through the late-bound hook string simply does not find it and keeps its arrival-only
+        // behaviour instead of failing to parse.
+        if let Some(kind) = std::env::var(crate::install::HOOK_KIND_ENV)
+            .ok()
+            .and_then(|h| tmux::DepartureKind::from_hook_name(&h))
+        {
+            if let Ok(Some(departed)) = tmux.departed_pane(&args.pane, kind) {
+                let _ = tmux.unset_pane_option(&departed, tma_core::stamp::opt::ATTENTION);
+            }
+        }
     }
     tma_runtime::nudge::nudge_watchers(&tmux);
     ExitCode::SUCCESS

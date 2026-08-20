@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli_support;
 use crate::manifests::LoadedManifest;
-use crate::tmux::Tmux;
+use crate::tmux::{DepartureKind, Tmux};
 use json_value::Value;
 
 mod adapters;
@@ -490,8 +490,9 @@ fn sweep_pane_stamps(tmux: &Tmux) {
 /// never `#{hook_pane}` — see below) binds the pane at hook time. The binary is LATE-BOUND like the `tma-hook` wrapper: the install-time
 /// absolute path when it is still executable, else plain `tma` off `$PATH`, so a rebuilt, moved, or
 /// re-installed binary keeps the hook working instead of leaving a dead command behind. The
-/// middle-tier nudge lives inside the same `clear-attention` subcommand.
-fn clear_attention_command(bin: &Path) -> String {
+/// middle-tier nudge lives inside the same `clear-attention` subcommand. `hook` is the tmux hook the
+/// command is being written for; it selects the seen-on-leave posture (see [`HOOK_KIND_ENV`]).
+fn clear_attention_command(bin: &Path, hook: &str) -> String {
     // `#{pane_id}`, NOT `#{hook_pane}`. `hook_pane` is populated only on the notify_pane-style hooks
     // (`pane-focus-in` and friends); on the `after-select-pane` / `after-select-window` command hooks
     // it expands EMPTY, which `clear-attention` treats as a no-op — so the always-on pair cleared
@@ -506,11 +507,33 @@ fn clear_attention_command(bin: &Path) -> String {
     // `#{...}` (wanted) and `$name` (not wanted), so the shell side stays `$`-free. The PATH
     // fallback swallows its own failure: with no `tma` anywhere, sh exits 127 and tmux would flash
     // "returned 127" on every pane switch, so that branch stays silent like the tma-hook wrapper.
+    // The `-x` branch swallows its own failure for the same reason, and for a second one: a hook
+    // string written by a NEW install can still invoke an OLD binary (that is what late binding
+    // buys), and a mismatch must not turn into a message on every pane switch.
+    let kind = departure_kind_env(hook);
     format!(
-        "run-shell \"if [ -x '{0}' ]; then '{0}' clear-attention '#{{pane_id}}'; \
-         else tma clear-attention '#{{pane_id}}' 2>/dev/null || true; fi\"",
-        bin.display()
+        "run-shell \"if [ -x '{0}' ]; then {1}'{0}' clear-attention '#{{pane_id}}' 2>/dev/null \
+         || true; else {1}tma clear-attention '#{{pane_id}}' 2>/dev/null || true; fi\"",
+        bin.display(),
+        kind
     )
+}
+
+/// The environment variable carrying WHICH focus hook fired, so `clear-attention` can also clear the
+/// pane the user just left (seen-on-leave). An environment variable, deliberately, not an argv flag:
+/// the command above is late-bound, so a hook string written by a new install routinely invokes an
+/// older binary. An unknown flag would make clap error on every single pane switch; an unknown
+/// environment variable is ignored in silence, which is the only acceptable failure mode for a hook
+/// that fires on every navigation. Read in `dispatch::run_clear_attention`.
+pub(crate) const HOOK_KIND_ENV: &str = "TMA_HOOK_KIND";
+
+/// The `VAR=value ` shell prefix for a hook, empty for a hook that carries no departure. Kept as a
+/// prefix rather than an exported variable so it scopes to the one command.
+fn departure_kind_env(hook: &str) -> String {
+    match DepartureKind::from_hook_name(hook) {
+        Some(_) => format!("{HOOK_KIND_ENV}={hook} "),
+        None => String::new(),
+    }
 }
 
 /// Whether an installed hook command is what install would write now. Compared modulo whitespace and
@@ -529,9 +552,11 @@ fn hook_command_current(installed: &str, expected: &str) -> bool {
 /// An existing entry of ours is reused when it matches what we would write now and rewritten in
 /// place (keeping its index) when it has drifted: a stale binary path or an older command shape.
 fn install_tmux_hooks(tmux: &Tmux, hooks: &[&str]) -> Result<Vec<TmuxHookRecord>, String> {
-    let command = clear_attention_command(&tma_bin());
+    let bin = tma_bin();
     let mut records = Vec::new();
     for &hook in hooks {
+        // Per hook now: the command carries the hook's own seen-on-leave kind.
+        let command = clear_attention_command(&bin, hook);
         let existing = tmux.show_global_hook(hook).map_err(|e| e.to_string())?;
         match existing.iter().find(|(_, c)| is_ours(c)) {
             None => tmux
@@ -895,10 +920,11 @@ fn tmux_hook_states(
     state: Option<&HooksState>,
     hooks: &[&str],
 ) -> Result<Vec<(String, TmuxHookState)>, String> {
-    let expected = clear_attention_command(&tma_bin());
+    let bin = tma_bin();
     let recorded = state.map(|s| s.tmux_hooks.as_slice()).unwrap_or(&[]);
     let mut out = Vec::new();
     for &hook in hooks {
+        let expected = clear_attention_command(&bin, hook);
         let entries = tmux.show_global_hook(hook).map_err(|e| e.to_string())?;
         let has_record = recorded.iter().any(|r| r.hook == hook);
         let ours = if has_record {
@@ -1308,13 +1334,13 @@ mod tests {
 
     #[test]
     fn the_tmux_hook_command_is_late_bound() {
-        let cmd = clear_attention_command(Path::new("/opt/tma/tma"));
+        let cmd = clear_attention_command(Path::new("/opt/tma/tma"), "after-select-pane");
         assert!(
             cmd.contains("if [ -x '/opt/tma/tma' ]"),
             "the install-time path is the fast path: {cmd}"
         );
         assert!(
-            cmd.contains("else tma clear-attention"),
+            cmd.contains("else TMA_HOOK_KIND=after-select-pane tma clear-attention"),
             "a moved binary falls back to $PATH: {cmd}"
         );
         assert!(
@@ -1330,6 +1356,70 @@ mod tests {
             !cmd.contains('$'),
             "no `$name`: tmux expands those inside the double-quoted argument: {cmd}"
         );
+        assert_eq!(
+            cmd.matches("2>/dev/null || true").count(),
+            2,
+            "BOTH branches must swallow their own failure: the hook string is late-bound, so a \
+             new install routinely invokes an older binary, and the result must never be a \
+             message on every pane switch: {cmd}"
+        );
+    }
+
+    /// The seen-on-leave kind rides an ENVIRONMENT VARIABLE, never an argv flag, and only the two
+    /// hooks that actually have a departure carry it.
+    #[test]
+    fn the_hook_command_carries_its_kind_as_an_env_var() {
+        let bin = Path::new("/opt/tma/tma");
+        for (hook, expected) in [
+            ("after-select-pane", "TMA_HOOK_KIND=after-select-pane "),
+            ("after-select-window", "TMA_HOOK_KIND=after-select-window "),
+        ] {
+            let cmd = clear_attention_command(bin, hook);
+            assert!(
+                cmd.contains(&format!("{expected}'/opt/tma/tma' clear-attention")),
+                "{hook}: the kind must prefix the invocation: {cmd}"
+            );
+            // An argv flag would make an older binary's clap error on every navigation; an
+            // unrecognized environment variable is ignored in silence.
+            assert!(
+                !cmd.contains(" --"),
+                "{hook}: the kind must not be an argv flag: {cmd}"
+            );
+        }
+        // `pane-focus-in` is arrival-only: it fires when the CLIENT gains focus too, so there is no
+        // departure to attribute to it.
+        let focus = clear_attention_command(bin, FOCUS_HOOK);
+        assert!(
+            !focus.contains(HOOK_KIND_ENV),
+            "the arrival-only hook must carry no departure kind: {focus}"
+        );
+    }
+
+    /// Every hook the two commands are written for must render a distinguishable command, or
+    /// `hook_command_current` would read one hook's command as another's drift forever.
+    #[test]
+    fn each_hook_renders_its_own_command() {
+        let bin = Path::new("/opt/tma/tma");
+        let rendered: Vec<String> = ALL_TMUX_HOOKS
+            .iter()
+            .map(|h| clear_attention_command(bin, h))
+            .collect();
+        for (i, a) in rendered.iter().enumerate() {
+            assert!(is_ours(a), "{}: still removable", ALL_TMUX_HOOKS[i]);
+            assert!(
+                hook_command_current(a, a),
+                "{}: current against itself",
+                ALL_TMUX_HOOKS[i]
+            );
+            for (j, b) in rendered.iter().enumerate().skip(i + 1) {
+                assert!(
+                    !hook_command_current(a, b),
+                    "{} and {} render the same command",
+                    ALL_TMUX_HOOKS[i],
+                    ALL_TMUX_HOOKS[j]
+                );
+            }
+        }
     }
 
     #[test]
@@ -1361,6 +1451,17 @@ mod tests {
         assert!(
             !hook_command_current(&empty_pane_shape, expected),
             "the old empty-pane shape must read as drift so re-install repairs it"
+        );
+
+        // Seen-on-leave needs no migration code precisely because of this: the 0.3.6 shape, which
+        // has no `TMA_HOOK_KIND` prefix, reads as drift against what install writes now, and the
+        // drift arm rewrites it in place at the same index.
+        let pre_seen_on_leave = clear_attention_command(Path::new("/opt/tma/tma"), FOCUS_HOOK);
+        let now = clear_attention_command(Path::new("/opt/tma/tma"), "after-select-pane");
+        assert!(is_ours(&pre_seen_on_leave));
+        assert!(
+            !hook_command_current(&pre_seen_on_leave, &now),
+            "a hook string with no kind must read as drift so re-install upgrades it"
         );
     }
 

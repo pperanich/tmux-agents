@@ -54,6 +54,42 @@ const EXTRA_PANE_OPTIONS: &[&str] = &[
     opt::API_ENDPOINT,
 ];
 
+/// Which focus hook is asking [`Tmux::departed_pane`], which decides where "the pane I just left"
+/// lives: still in this window (a pane switch) or back in the previous window (a window switch).
+/// The distinction is load-bearing, not cosmetic — answering both on either hook would clear the
+/// previous window's active pane on every ordinary pane switch, which is a pane the user may have
+/// left hours ago and since had a completion raised on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DepartureKind {
+    /// `after-select-pane`: the departed pane is this window's `pane_last`.
+    SelectPane,
+    /// `after-select-window`: the departed pane is the active pane of the session's last window.
+    SelectWindow,
+}
+
+impl DepartureKind {
+    /// The kind a tmux hook name implies, `None` for a hook that carries no departure (arrival-only
+    /// `pane-focus-in`, or an unrecognized name from a newer install talking to an older binary).
+    pub fn from_hook_name(hook: &str) -> Option<Self> {
+        match hook {
+            "after-select-pane" => Some(Self::SelectPane),
+            "after-select-window" => Some(Self::SelectWindow),
+            _ => None,
+        }
+    }
+
+    /// The tmux format naming the departed pane, evaluated in the ARRIVAL pane's context. Both were
+    /// verified on tmux 3.6a, key-driven and out-of-band: tmux updates `pane_last` /
+    /// `window_last_flag` before it dispatches the hook, so these already name the pane left behind.
+    /// Formats, not target aliases — `-t '{last}'` is not reliable at hook time.
+    fn format(self) -> &'static str {
+        match self {
+            Self::SelectPane => "#{P:#{?pane_last,#{pane_id},}}",
+            Self::SelectWindow => "#{W:#{?window_last_flag,#{P:#{?pane_active,#{pane_id},}},}}",
+        }
+    }
+}
+
 /// One pane's read-side facts from `list-panes -a -F`.
 #[derive(Clone, Debug)]
 pub struct PaneRecord {
@@ -151,6 +187,27 @@ impl Tmux {
             .filter(|l| !l.is_empty())
             .map(String::from)
             .collect())
+    }
+
+    /// The pane the user just LEFT, resolved while an `after-select-*` hook is running. `arrival` is
+    /// the pane the hook handed us (`#{pane_id}`) and is passed as `-t`, which is not optional: an
+    /// untargeted `display-message` answers for whichever session tmux considers current, and that
+    /// is NOT the session the hook fired in — probed on 3.6a with two sessions, where a query issued
+    /// straight after driving `s2` still answered for `s1`. Targeting the arrival pane scopes
+    /// `#{P:...}` to the destination window and `#{W:...}` to the destination session.
+    ///
+    /// `Ok(None)` when the format expands empty: a window with no previous pane, or a session with
+    /// no previous window. Racing a second navigation can only make this name a pane departed
+    /// slightly later, never one the user never left, so the error is one-directional (it can fail
+    /// to clear, not over-clear).
+    pub fn departed_pane(
+        &self,
+        arrival: &str,
+        kind: DepartureKind,
+    ) -> Result<Option<String>, TmuxError> {
+        let out = self.run(&["display-message", "-p", "-t", arrival, kind.format()])?;
+        let pane = out.trim();
+        Ok((!pane.is_empty()).then(|| pane.to_string()))
     }
 
     /// Capture the live-viewport tail with escapes. `-S -50` reaches up to 50 lines ABOVE the
