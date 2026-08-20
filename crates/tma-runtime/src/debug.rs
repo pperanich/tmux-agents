@@ -519,7 +519,9 @@ fn claim_token(c: &Claim) -> String {
 }
 
 /// FNV-1a 64-bit content hash for the viewport tail. Stable across processes (unlike
-/// `DefaultHasher`'s randomized seed), as the cross-producer `@agent_hash` comparison requires.
+/// `DefaultHasher`'s randomized seed) so every producer stamps the same `@agent_hash` for the
+/// same screen. Nothing compares two hashes any more; stability keeps the stamp reproducible
+/// across the poll, daemon, and debug producers.
 pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
     for &b in bytes {

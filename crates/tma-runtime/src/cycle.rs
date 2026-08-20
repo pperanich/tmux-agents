@@ -285,7 +285,7 @@ pub fn run_cycle(
         };
 
         let evaluation = id.manifest.engine.evaluate(&snapshot);
-        let evidence = evaluation.evidence.clone();
+        let evidence = &evaluation.evidence;
         let facts = SnapshotFacts {
             pid: id.agent_pid,
             foreground_is_agent: id.foreground_is_agent,
@@ -295,7 +295,7 @@ pub fn run_cycle(
         let verdict = tma_core::verdict(
             prev.clone(),
             &facts,
-            &evidence,
+            evidence,
             &id.manifest.manifest,
             cfg,
             now,

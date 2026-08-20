@@ -23,7 +23,7 @@ pub struct Manifest {
     pub min_engine_version: Version,
     pub identity: Identity,
     /// Absent for hookless agents (no `[hooks]` block — the screen-only floor a user manifest may
-    /// sit at); detection then rides screen rules, title, and activity entirely.
+    /// sit at); detection then rides screen rules and title entirely.
     pub hooks: Option<Hooks>,
     pub capture: Capture,
     pub rules: Vec<Rule>,

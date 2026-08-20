@@ -122,7 +122,9 @@ parsing, or agents converge on a state the triad genuinely lacks.
 ## AD2 — Evidence model: typed evidence, deterministic fold
 
 **Question.** How do heterogeneous signals (hook events, screen rules, titles, activity
-deltas, process facts) combine? `ta` hardcodes a priority ladder in one function;
+deltas, process facts) combine? (Amended 2026-08-20: activity deltas were removed as a
+signal — a viewport-hash change cannot tell agent output from a user-caused repaint. The
+question is preserved as asked; the Decision below reflects the amendment.) `ta` hardcodes a priority ladder in one function;
 sidebar trusts hooks exclusively; herdr arbitrates screen vs PTY activity.
 
 **Analysis.** A hardcoded ladder is opaque and unextensible (adding an evidence source
@@ -143,7 +145,7 @@ Evidence {
 ```
 
 `verdict(prev_state, evidence_set, config) -> Verdict` is a pure function implementing
-the F8 order (hook > blocker chrome > activity > idle chrome > hold/unknown) with
+the F8 order (hook > blocker chrome > working chrome > idle chrome > hold/unknown) with
 per-source freshness windows. As built (`tma-core/src/fold.rs`), the fold also takes a
 `SnapshotFacts` parameter alongside the evidence set: process/screen facts (pid,
 `foreground_is_agent`, `scrolled`, `history_view`) that gate rules F5/F9/F10/F4 but are
@@ -157,7 +159,7 @@ flip it to idle. Every verdict carries the winning evidence for explain output (
 
 Critically, evidence provenance is *persisted* (AD4: `@agent_source`,
 `@agent_evidence_at`), so the evidence set exists across processes: a one-shot's
-inputs are its own fresh capture/activity claims *plus* the stamped prior claim with
+inputs are its own fresh capture claims *plus* the stamped prior claim with
 its source and timestamp. Without persisted provenance, a stateless producer cannot
 rank a hook stamp above its own stale capture verdict and will clobber `blocked` with
 `working` — the failure mode that motivated this design revision. This is also why
@@ -247,7 +249,7 @@ emoji string in the option and reverse-maps it to an enum.
 
   | option | scope | semantics |
   |---|---|---|
-  | `@agent_hash` | pane | hash of the last captured viewport tail, paired with `@agent_stamped_at`; delta evidence is valid only against elapsed time |
+  | `@agent_hash` | pane | hash of the last captured viewport tail. Its PRESENCE marks the pane as having been captured at least once, which is all `can_reuse_stamp` reads; the value itself is no longer compared against anything (see AD2) |
   | `@tma_setpf_ok` | server | capability-probe cache: `1` when the server supports `set -pF` conditional writes, `0` when it does not (advisory degrade). A server's version is constant for its life, so the probe runs once |
   | `@tma_origin_<client>` | server (keyed by client) | jump-origin trail: a newline-joined, bounded stack (cap 8) of `session:window.pane` locators forward jumps left. Keyed by the sanitized invoking client name plus a short hash of the raw name, so each tmux client's trail stays independent even for punctuation-only-differing names. `--back` pops one entry, `--home` returns to the bottom and clears; written by `tma jump` and the picker |
   | `@tma_title_match_pid` | pane | flicker-stickiness anchor: the agent pid a title-narrowed manifest last matched by `#{pane_title}`. The identity resolver holds the title match while the pane's agent pid is unchanged, and a new pid re-requires a match. Written only for a `title_patterns` manifest, never for a process-only one |
@@ -318,10 +320,12 @@ emoji string in the option and reverse-maps it to an enum.
      state*"; evidence for a not-yet-published candidate state updates nothing until
      it publishes. (Without this rule, dwell livelocks: fresh contradicting evidence
      would reset its own clock every cycle.) The hash refreshes because it is an
-     *observation baseline*, not state-consistent evidence: freezing it makes the
-     next cycle diff a static screen against the pre-pause streaming hash,
-     manufacture a phantom activity edge, and restart the dwell clock (round-3
-     finding).
+     *observation baseline*, not state-consistent evidence. HISTORICAL RATIONALE: this
+     guarded against the next cycle diffing a static screen against the pre-pause
+     streaming hash, manufacturing a phantom activity edge and restarting the dwell
+     clock (round-3 finding). No cycle diffs two hashes any more (the activity-delta
+     source was removed), so the refresh now only keeps the baseline honest for the
+     presence check. Harmless, and kept for that; re-derive before relying on it.
 
   Runtime floor note: `set-option -F` needs probing at the tmux 3.2 floor (N10);
   verified present on 3.6a. If absent, degrade is documented advisory writes with

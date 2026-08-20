@@ -736,7 +736,7 @@ mod tests {
         // sits under the spinner). Equal timestamps, so only the slot order can decide.
         let evidence = [
             ev(Source::ScreenRule, AgentState::Idle, 10),
-            ev(Source::Title, AgentState::Working, 10),
+            ev(Source::ScreenRule, AgentState::Working, 10),
         ];
         let v = run(None, facts(), &evidence, 20);
         assert_eq!(v.state, AgentState::Working);

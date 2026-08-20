@@ -401,7 +401,7 @@ pub(crate) fn stamp_from_capture(
         captured_at: now,
     };
     let evaluation = id.manifest.engine.evaluate(&snapshot);
-    let evidence = evaluation.evidence.clone();
+    let evidence = &evaluation.evidence;
     let facts = tma_core::SnapshotFacts {
         pid: id.agent_pid,
         foreground_is_agent: id.foreground_is_agent,
@@ -420,14 +420,8 @@ pub(crate) fn stamp_from_capture(
         (_, p) => p.cloned(),
     };
 
-    let mut verdict = tma_core::verdict(
-        fold_prev,
-        &facts,
-        &evidence,
-        &id.manifest.manifest,
-        cfg,
-        now,
-    );
+    let mut verdict =
+        tma_core::verdict(fold_prev, &facts, evidence, &id.manifest.manifest, cfg, now);
     if demoted {
         // Force `Guard::Unconditional` via the stamp adapter (`may_override`), bypassing the
         // source guard so the capture verdict actually lands over the stale hook stamp.

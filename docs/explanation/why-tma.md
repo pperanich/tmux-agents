@@ -107,7 +107,7 @@ instead:
 | pane process probe | `#{pane_pid}` and a process-tree walk |
 | bottom-of-buffer screen snapshot | `capture-pane -p -e -t %id -S -<N>` |
 | OSC title, where agents put spinners and state | `#{pane_title}` |
-| PTY activity signal | a content-hash delta between cycles, `#{window_activity}` |
+| PTY activity signal | `#{window_activity}`, and control-mode `%output` edges |
 | state storage and event bus | pane and window user options |
 | session persistence, detach and attach | tmux itself |
 

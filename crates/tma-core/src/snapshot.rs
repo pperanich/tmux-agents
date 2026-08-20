@@ -29,9 +29,10 @@ pub struct PaneSnapshot {
     pub title: String,
     /// Live-viewport tail from `capture-pane -p -e -S -N`. The match surface.
     pub tail_text: String,
-    /// Hash of `tail_text`, paired with the stamped `@agent_hash` to decide whether a cycle can
-    /// reuse the stored stamp. Scheduling only — it makes no state claim. Injected so the core
-    /// does not choose a hash algorithm.
+    /// Hash of `tail_text`, stamped as `@agent_hash`. Its PRESENCE marks the pane as having been
+    /// captured at least once, which `can_reuse_stamp` requires before it will reuse a stored
+    /// stamp; the value is not compared against anything. Scheduling only — it makes no state
+    /// claim. Injected so the core does not choose a hash algorithm.
     pub tail_hash: u64,
     /// `#{alternate_on}` — alt-screen agents report 1.
     pub alternate_on: bool,

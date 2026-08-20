@@ -128,9 +128,28 @@ and the keyboard-disarmed decay.
   `@agent_source` value.
 - CHANGELOG entry under `## [Unreleased]`, prose, matching the existing voice.
 
-> **Review gate R-A.** Focus: did anything lose coverage? Is `Provenance::Activity` still decodable?
-> Does `can_reuse_stamp` still work with `p.hash`? Any remaining reference to activity-as-evidence in
-> code or docs?
+**A6 — R-A cleanup (docs/comment accuracy).** `DONE`
+- R-A returned PASS WITH FINDINGS: code correct and complete, 11 findings all documentation or
+  comment accuracy. Cleared in one pass.
+- Notable: R-A found that NO hash-to-hash comparison remains anywhere in the workspace (verified —
+  the activity push was the only one). `@agent_hash`'s VALUE is now write-only; its PRESENCE is a
+  "this pane has been captured" flag. Several comments claimed a pairing that no longer happens,
+  including one this batch introduced at `snapshot.rs:32`. All corrected.
+- Also: `ARCHITECTURE.md:146` still carried the old F8 ladder (a second, disagreeing copy inside the
+  AD2 decision record `fold.rs` cites as its spec); the AD2 Question now carries an amendment note
+  rather than being rewritten; the hold-writes-hash rationale is marked HISTORICAL; two vestigial
+  `evidence.clone()` calls became borrows.
+
+> **Review gate R-A.** `PASSED` (with findings, all cleared in A6). Focus was: did anything lose
+> coverage? Is `Provenance::Activity` still decodable? Does `can_reuse_stamp` still work with
+> `p.hash`? Any remaining reference to activity-as-evidence in code or docs?
+>
+> R-A confirmed the A4 replacement genuinely guards slot ordering (swap the ladder arms and it
+> fails; `prev = None` so the dwell guard cannot mask it; equal timestamps so `latest()` cannot
+> decide it). It also noted a PRE-EXISTING gap for batch B to close: the SECOND ordering site,
+> `fold.rs:275` `claims.working.or(claims.idle)` inside `fold_against_hook`, has no test — and
+> batch B's coexisting idle chrome will flow through it whenever a hook claim is live. **Add that
+> test in B4.**
 
 ---
 
