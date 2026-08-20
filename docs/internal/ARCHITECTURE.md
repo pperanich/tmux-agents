@@ -77,9 +77,10 @@ screens *into* this table; they do not define it.
 warned against glob-matching detail in tmux conditionals until then.
 
 The attention flag is presentation state only — set on noteworthy transition, cleared
-on focus. It is **not** the notification-episode marker; that is the separate
-`@agent_notified_at` stamp (AD4, F22), because focus-then-leave-unanswered clears
-attention while the blocked episode continues.
+by navigation (the pane arrived at, and the pane departed). It is **not** the
+notification-episode marker; that is the separate `@agent_notified_at` stamp (AD4,
+F22), because focus-then-leave-unanswered clears attention while the blocked episode
+continues.
 
 Clearing mechanics, corrected by round-2 empirical review:
 
@@ -90,9 +91,31 @@ Clearing mechanics, corrected by round-2 empirical review:
   for completeness, with its side effect documented (`focus-events on` changes
   escape-sequence behavior for every application in the session and requires client
   reattach).
-- Hook commands bind their pane via `#{hook_pane}` format expansion, never
+- Hook commands bind their pane via `#{pane_id}` format expansion, never
   `$TMUX_PANE` — `run-shell` inherits the server's *startup* environment, so
-  `$TMUX_PANE` there is stale or foreign (verified).
+  `$TMUX_PANE` there is stale or foreign (verified). Not `#{hook_pane}` either,
+  which is what every release up to 0.3.6 used: tmux populates it only on the
+  notify_pane-style hooks and expands it EMPTY on the `after-select-*` command
+  hooks, so the always-on pair cleared nothing at all (fixed in `ef12d02`).
+- **Seen-on-leave.** The clear runs on the pane departed as well as the pane
+  arrived at, because every arrival-only path leaves the commonest residue
+  standing: finish while you watch, move to another window, and the flag survives
+  on the pane you were just looking at. The departed pane is resolved from the
+  hook's own kind — `#{P:#{?pane_last,#{pane_id},}}` at `after-select-pane`,
+  `#{W:#{?window_last_flag,#{P:#{?pane_active,#{pane_id},}},}}` at
+  `after-select-window`, both scoped with `display-message -t <arrival pane>`
+  since an untargeted query answers for whichever session tmux calls best.
+  Formats, not target aliases: `-t '{last}'` is not reliable at hook time.
+  Walk-away survives *structurally* rather than by any threshold — walking away
+  means not navigating, so no hook fires. Resolving both formats on either hook
+  would break that, by clearing the previous window's active pane on every
+  ordinary pane switch.
+- The hook kind travels in the `TMA_HOOK_KIND` **environment variable**, never as
+  an argv flag, which the late binding below forces: a hook string written by a
+  new install routinely invokes an older binary, where an unrecognized flag would
+  make clap error on every single pane switch. An unrecognized environment
+  variable is ignored in silence. Both branches of the command end
+  `2>/dev/null || true` for the same reason.
 - Installation appends with **unindexed** `set-hook -ga` (tmux picks the next free
   index — verified safe), then records the actual index by re-reading `show-hooks`.
   Explicitly-indexed writes silently overwrite whatever occupies that index, and

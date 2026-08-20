@@ -753,7 +753,9 @@ narrows its equivalent window by re-probing the socket immediately before the ki
 `nudge_watchers` sender both live in `tma_runtime::nudge` — both need `libc`, which
 the `tma-ui` display crate deliberately lacks (RD4). The always-on
 `after-select-pane`/`after-select-window` hook already runs `tma clear-attention` on
-every focus change; that same handler now also walks panes for `@tma_watch_pid`
+every focus change (on the arrival pane and, since seen-on-leave, on the departed
+one; the hook tells it which via `TMA_HOOK_KIND`); that same handler now also walks
+panes for `@tma_watch_pid`
 (`pid > 0` only) and `SIGUSR1`s each advertiser, so every resident watcher refreshes
 within one input-poll tick (~200 ms worst case) of a focus change. The hook walks
 panes for the option, as sidebar does.

@@ -105,7 +105,8 @@ pub(crate) enum Command {
     /// last evidence source + age, and the ambient-driver check. Read-only; `--json` for the schema.
     Doctor(DoctorArgs),
     /// INTERNAL: clear a pane's `@agent_attention` flag; the tmux focus hooks call this with
-    /// `#{hook_pane}`. Also invoked by the picker's Enter-jump.
+    /// `#{pane_id}`, plus `TMA_HOOK_KIND` naming the hook so the pane just DEPARTED is cleared
+    /// too. Also invoked by the picker's Enter-jump.
     #[command(hide = true)]
     ClearAttention(ClearAttentionArgs),
     /// INTERNAL: the detached-action supervisor. Spawned by the `tma act` broker's detach path
@@ -322,7 +323,8 @@ pub(crate) struct DaemonCmdArgs {
 /// Args for the internal `tma clear-attention <pane>` command.
 #[derive(clap::Args)]
 pub(crate) struct ClearAttentionArgs {
-    /// The pane whose attention flag to clear (the tmux hook passes `#{hook_pane}`).
+    /// The pane whose attention flag to clear (the tmux hook passes `#{pane_id}`, the pane
+    /// ARRIVED at). It also scopes the seen-on-leave look-up to its own session.
     pub(crate) pane: String,
 }
 

@@ -10,6 +10,19 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Changed
+
+- The done mark now clears when you leave an agent's pane, not only when you arrive at one. The
+  case it was missing is the ordinary one: an agent finishes while you are sitting there watching
+  it, you move to another window, and the flag stays up on the pane you were just looking at —
+  counted by `tma status` and offered by `prefix-j` for as long as you stay away. The two always-on
+  tmux hooks now tell `tma clear-attention` which of them fired, and it clears the pane you left as
+  well as the one you moved to. Walking away is untouched, and not by a timeout: leaving an agent
+  running and going to lunch means you never navigate, so no hook fires and nothing clears. A pane
+  switch in some other window clears only that window's departed pane. **Re-run
+  `tma install-hooks <agent>` to pick this up** — the hooks live in tmux server state, so upgrading
+  the binary does not rewrite them; the old command reads as drift and install replaces it in place.
+
 ### Fixed
 
 - A codex, cursor, gemini, opencode or pi pane no longer stays stuck on the spinner after its turn

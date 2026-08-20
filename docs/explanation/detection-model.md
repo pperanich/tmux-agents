@@ -28,13 +28,17 @@ onto two other axes so the state token stays stable:
   the ball is not with the human; an agent that *halts* asking for confirmation
   is `blocked/permission` on its own prompt evidence.
 - `@agent_attention` is a presentation flag meaning "this changed and you have
-  not seen it yet". It is set on a noteworthy transition and cleared the moment
-  you focus the pane. A finished agent is `idle` with attention still set, which
+  not seen it yet". It is set on a noteworthy transition and cleared by
+  navigation: on the pane you move to, and on the pane you move away from. The
+  second half is what covers an agent finishing while you sit there watching it —
+  with only the first, that flag stayed up until you happened to navigate back.
+  Not navigating clears nothing, so leaving an agent running and walking away
+  still leaves the mark waiting for you. A finished agent is `idle` with attention still set, which
   the surfaces render as the distinct **done** glyph. Keeping **done** on this
   separate flag rather than making it a fifth state token is deliberate: the
   closed `state` vocabulary stays four tokens, and a script reading `state` never
   has its value change shape under it. Attention is also *not* the notification
-  record: focusing a pane clears attention, but a blocked episode you glanced at
+  record: navigating clears attention, but a blocked episode you glanced at
   and walked away from is still blocked, so the notifier keeps its own separate
   marker.
 

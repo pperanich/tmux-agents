@@ -647,8 +647,8 @@ fn uninstall_removes_only_recorded_indexes() {
         "non-recorded stray must survive uninstall: {shown}"
     );
     assert!(
-        !shown.contains("hook_pane"),
-        "our recorded entry (bound via #{{hook_pane}}) must be removed: {shown}"
+        !shown.contains("pane_id"),
+        "our recorded entry (the only one binding #{{pane_id}}) must be removed: {shown}"
     );
 }
 

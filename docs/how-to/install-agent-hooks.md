@@ -198,13 +198,14 @@ separately ("installed but not present on this server, likely restarted"); see
 ## The attention-clear tmux hooks
 
 `tma install-hooks <agent>` also installs two tmux server hooks so a pane's
-attention flag clears the moment you look at it. You do not add these yourself;
-they are shown here so you recognize them in `show-hooks`:
+attention flag clears the moment you look at it, and again when you look away.
+You do not add these yourself; they are shown here so you recognize them in
+`show-hooks`:
 
 ```
 $ tmux show-hooks -g | grep clear-attention
-after-select-pane[0] run-shell "if [ -x '/usr/local/bin/tma' ]; then '/usr/local/bin/tma' clear-attention '#{hook_pane}'; else tma clear-attention '#{hook_pane}' 2>/dev/null || true; fi"
-after-select-window[0] run-shell "if [ -x '/usr/local/bin/tma' ]; then '/usr/local/bin/tma' clear-attention '#{hook_pane}'; else tma clear-attention '#{hook_pane}' 2>/dev/null || true; fi"
+after-select-pane[0] run-shell "if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=after-select-pane '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=after-select-pane tma clear-attention '#{pane_id}' 2>/dev/null || true; fi"
+after-select-window[0] run-shell "if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=after-select-window '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=after-select-window tma clear-attention '#{pane_id}' 2>/dev/null || true; fi"
 ```
 
 The command names the binary tma was installed from and falls back to whatever
@@ -214,9 +215,28 @@ against the command this build would write and reports a mismatch as stale; the
 next `tma install-hooks <agent>` rewrites it in place.
 
 On every `select-pane` and `select-window`, `tma clear-attention` drops
-`@agent_attention` on the focused pane, so the `done`/blocked flag reverts to
-plain idle as soon as you jump to (or manually switch to) that pane. That is how
-the attention lifecycle closes.
+`@agent_attention` on two panes: the one you just moved to, and the one you just
+left. So the `done`/blocked flag reverts to plain idle as soon as you jump to (or
+manually switch to) that pane — and also when an agent finishes while you are
+sitting there watching it and you then move on, which is the case an arrival-only
+clear left marked for as long as you stayed away.
+
+Clearing on departure does not touch the walk-away signal, and not by a
+threshold: leaving an agent running and going to lunch means you never navigate,
+so no hook fires and nothing clears. A pane switch in some other window clears
+only that window's departed pane; every other flag stands.
+
+`TMA_HOOK_KIND` in the command is how `clear-attention` knows which of the two
+hooks fired, which is what tells it where the departed pane is: still in this
+window, or back in the window you left. It is an environment variable rather than
+an argument on purpose, so that a hook string written by a newer tma still works
+against an older binary on `$PATH` — the older one does not recognize it, ignores
+it, and clears the arrival pane as it always did.
+
+**An existing install keeps the old behaviour until you re-run
+`tma install-hooks <agent>`.** The hooks live in tmux server state, not in tma, so
+upgrading the binary does not rewrite them; `tma install-hooks --check` reports the
+old command as stale, and the next install rewrites it in place.
 
 If your tmux has `focus-events on`, you can also clear attention on terminal focus
 changes (switching into the tmux window from another app) by opting in:
@@ -227,7 +247,9 @@ events = true
 ```
 
 This installs an additional `pane-focus-in` hook. It is off by default because it
-requires `focus-events on` to be set in tmux.
+requires `focus-events on` to be set in tmux. It carries no `TMA_HOOK_KIND`: it
+also fires when the *client* regains focus, which is not a departure from
+anything, so it clears the arrival pane only.
 
 ### Making the tmux hooks survive a server restart
 
@@ -242,8 +264,8 @@ To make them durable, put the same commands in your tmux config, substituting yo
 own `tma` path:
 
 ```tmux
-set-hook -ga after-select-pane "run-shell \"if [ -x '/usr/local/bin/tma' ]; then '/usr/local/bin/tma' clear-attention '#{hook_pane}'; else tma clear-attention '#{hook_pane}' 2>/dev/null || true; fi\""
-set-hook -ga after-select-window "run-shell \"if [ -x '/usr/local/bin/tma' ]; then '/usr/local/bin/tma' clear-attention '#{hook_pane}'; else tma clear-attention '#{hook_pane}' 2>/dev/null || true; fi\""
+set-hook -ga after-select-pane "run-shell \"if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=after-select-pane '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=after-select-pane tma clear-attention '#{pane_id}' 2>/dev/null || true; fi\""
+set-hook -ga after-select-window "run-shell \"if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=after-select-window '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=after-select-window tma clear-attention '#{pane_id}' 2>/dev/null || true; fi\""
 ```
 
 Two things matter here:

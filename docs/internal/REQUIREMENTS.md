@@ -232,9 +232,14 @@ captured evidence (see D10, X3).
   (b) tmux server hooks — the attention auto-clear and SIGUSR1 nudge hooks, which
   MUST use `after-select-pane`/`after-select-window` (NOT `pane-focus-in`, which is
   gated on `focus-events`, default off — a focus-hook auto-clear silently never
-  fires; verified round 2). Hook commands MUST bind their pane via `#{hook_pane}`
+  fires; verified round 2). Hook commands MUST bind their pane via `#{pane_id}`
   format expansion, never `$TMUX_PANE` (`run-shell` inherits the server's startup
-  environment; verified stale/foreign). Installation: **unindexed** `set-hook -ga`
+  environment; verified stale/foreign) and never `#{hook_pane}`, which tmux expands
+  EMPTY on these two hooks. Any further per-hook information the command carries
+  (currently the seen-on-leave kind) MUST travel as an environment variable, never
+  as an argv flag: the command late-binds its binary, so a hook string written by a
+  new install can invoke an older one, where an unknown flag would error on every
+  navigation and an unknown environment variable is ignored. Installation: **unindexed** `set-hook -ga`
   append (tmux assigns the next free index — verified safe; explicit indexes
   silently overwrite occupants), then record the assigned index from `show-hooks`.
   Known hazard, detected not prevented: a user's own unindexed `set-hook -g`

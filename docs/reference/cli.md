@@ -113,7 +113,7 @@ your other sessions exactly as an unscoped one does.
 | `completions` | Print a shell completion script on stdout (`tma completions zsh`). |
 | `debug` | Manifest-authoring and inspection tools. |
 | `event` | Internal, unstable: bridge one agent hook event to a stamp. |
-| `clear-attention` | Internal: clear a pane's attention flag and nudge any resident `tma watch`; invoked by the auto-installed tmux focus hooks. |
+| `clear-attention` | Internal: clear the attention flag on the pane named and, when the tmux hook that fired it says a departure happened, on the pane just left; then nudge any resident `tma watch`. Invoked by the auto-installed tmux focus hooks. |
 | `supervise` | Internal: the detached-action supervisor. Spawned by the `act` broker's detach path to hold the single-flight lock for the child's lifetime, kill it at the deadline, then clear the lock and fire the completion notification. Never user-invoked. |
 
 `event` is invoked only through the `tma-hook` wrapper an agent's config
