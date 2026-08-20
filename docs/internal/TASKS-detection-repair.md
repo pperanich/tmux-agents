@@ -1043,6 +1043,63 @@ re-running the same experiment with the hook installed after the attach, and by 
 > new test fail against a real implementation of the fix (not just a stubbed one)? Is anything in
 > the F2 outcome an inference rather than a measurement? Does any doc still promise a clear that
 > does not happen?
+> **Result: PASS WITH FINDINGS (7).** One of them reopens the batch — see F2 below.
+
+---
+
+## Batch F2 — reopen the session departure: `pane-focus-out`
+
+Batch F concluded the gap must stay open because `client-session-changed` is the ONLY notification
+tmux emits for a session change and it cannot tell a genuine switch from a no-op. The
+no-op indistinguishability is real and re-verified. The "only notification" half is FALSE: R-F found
+`pane-focus-out` also fires on a session switch, and a follow-up probe (isolated socket, real PTY
+client, `focus-events` at its default OFF) saw it fire on exactly a genuine session change and on
+nothing else, naming the departed pane directly in `#{pane_id}` with no nested format and no
+`client_last_session`. R-F also reported a directional asymmetry the follow-up probe did not
+reproduce. Whatever the outcome, batch F's false claim has to come out of all five places it was
+written, because the obvious probe falsifies it in seconds.
+
+**F2-1 — resolve the asymmetry and characterise the hook.** `WIP f2-agent`
+- Reconcile R-F's "one direction produced no `pane-focus-out`" against the follow-up probe's "both
+  directions fired". One of the two mis-measured; which one changes the answer.
+- Full characterisation, `focus-events` OFF **and** ON: every navigation kind (pane, window, no-op
+  pane, no-op window, genuine session switch, no-op session switch), terminal focus loss/gain,
+  detach, attach, nested tmux, a second client on the same session, and a programmatic switch from
+  a script. Table it.
+- The "explicitly rejected" entry for `pane-focus-out` says it fires when the CLIENT loses focus, so
+  alt-tabbing to a browser would clear the flag. That is true only under `focus-events on`
+  (default off). Weigh it against R-D finding 3: with `focus-events on` the focus-report bytes
+  already move `client_activity`, so alt-tabbing already clears a marker today via batch D.
+
+**F2-2 — decide, on the measurements.** `WIP f2-agent`
+- Wire it, or keep the gap. Both are legitimate; the decision record must rest on measured
+  behaviour, and must state explicitly what changes for a `focus-events on` user vs a default user.
+- If wired: batch C's bar. Enumerate and prove every firing path clears only a pane the user saw;
+  prove it does not double-clear or fight `after-select-pane` / `session-window-changed`; decide
+  config-gated (like `pane-focus-in` behind `[focus] events`) vs unconditional, on evidence.
+- If not wired: correct the "only notification" claim in `crates/tma-tmux/src/tmux/read.rs`,
+  `docs/internal/ARCHITECTURE.md` (twice), this plan, `crates/tma/tests/attention_integration.rs`,
+  and `docs/how-to/install-agent-hooks.md`; and extend
+  `a_hand_wired_session_hook_can_only_clear_the_pane_you_arrived_at` to cover `pane-focus-out`,
+  which otherwise guards half the door.
+
+**F2-3 — clear the remaining R-F findings.** `WIP f2-agent`
+- R-F 2: F3's outcome says the guard test installs its hook AFTER the attach; it installs it BEFORE
+  (`attention_integration.rs:694-696`) and uses the attach's own firing as a liveness sentinel.
+- R-F 3: batch F's facts never reached §1, breaking the plan's convention (C6 and E2 both added
+  theirs). Add the CSC facts and the `pane-focus-out` characterisation.
+- R-F 4: `the_retired_window_hook_name_carries_no_departure` (`read.rs`) now also asserts the CSC
+  case; the name no longer covers its contents.
+- R-F 5: the comment at `attention_integration.rs:694-698` leads with a race claim R-F could not
+  reproduce in 10 runs. Its second reason is the strong one; reorder or drop the unproven claim.
+- R-F 6: batch C's gap note (this file, ~line 460) dangles with no pointer to F, and still says
+  `switch-client` "fires neither focus hook".
+- R-F 7 (nit): `CHANGELOG.md` grew a `### Documentation` heading; every other section is
+  Added/Fixed/Changed/Breaking.
+
+> **Review gate R-F2.** Focus: is the characterisation table reproducible, and does the decision
+> follow from it rather than from batch F's momentum? If wired, does any firing path clear a pane
+> the user never saw? If not wired, is the "only notification" claim gone from all five places?
 
 ---
 
