@@ -167,23 +167,23 @@ the working spinner and is disambiguated by slot order (`claude.toml:100-102`).
 working chrome decay an idle hook claim. Update the design comments at `gemini_manifest.rs:180` and
 `opencode_manifest.rs:229` to say idle now has a rule but stays outside `visible`.
 
-**B1 — codex + gemini.** `WIP batch-b-agent`
+**B1 — codex + gemini.** `DONE`
 - Existing idle fixtures at both widths; confirm they carry the intended anchor with ANSI stripped
   (escapes can sit *between* words — that is how the opencode `esc interrupt` anchor was missed).
 - Suggested anchors to verify, not to trust: gemini `Type your message or @path/to/file`,
   codex the `›` composer arrow.
 
-**B2 — opencode + pi.** `WIP batch-b-agent`
+**B2 — opencode + pi.** `DONE`
 - Same shape. opencode's idle row is the pane cwd (per-pane, not matchable) — find invariant chrome
   elsewhere on the idle screen or set `BLOCKED` with what you found.
 
-**B3 — cursor.** `WIP batch-b-agent`
+**B3 — cursor.** `DONE`
 - ⚠️ Its only idle fixture is a **fresh session** (`→ Plan, search, build anything`). A post-turn idle
   screen almost certainly reads `→ Add a follow-up …` without the stop hint. **Capture a real
   post-turn idle screen at both widths before authoring**, redact via `tma debug redact`, and anchor
   on the `→` composer arrow rather than hint text.
 
-**B4 — invert only the idle half of the negative tests.** `WIP batch-b-agent`
+**B4 — invert only the idle half of the negative tests.** `DONE`
 - `codex_manifest.rs:261`, `cursor_manifest.rs:275`, `gemini_manifest.rs:246`, `pi_manifest.rs:186`,
   `opencode_manifest.rs:191`.
 - These currently assert the idle screen raises **no** state evidence. Only that half inverts, to
@@ -193,8 +193,36 @@ working chrome decay an idle hook claim. Update the design comments at `gemini_m
   lose it. Add, per agent, a coexistence test that the **working** fixture also matches the new idle
   rule yet still folds to `working`.
 
-**B5 — docs + changelog for batch B.** `WIP batch-b-agent`
+**B5 — docs + changelog for batch B.** `DONE`
 - `docs/reference/agent-coverage.md` per-agent notes; CHANGELOG under `## [Unreleased]`.
+
+**Batch B outcome** (for R-B; anchors as shipped, all verified ANSI-stripped against that agent's
+idle AND working/blocked fixtures):
+- codex: `line_regex '^›'` in `tail_lines(6)`, with `not { line_regex '^› \d+\. ' }`. The approval
+  dialog's `› 1. Yes, proceed (y)` is SIX rows from the end, not seven — §1's plan had it outside
+  the window, and it is not. The `not` leaf is what excludes it; the window is what excludes the
+  transcript's own `› <user message>` echoes.
+- gemini: `contains "Type your message or @path/to/file"` on `visible`. Absent from both blocked
+  captures (the dialog replaces the composer).
+- opencode: `contains "ctrl+p commands"` on `visible`. The plan's note that "opencode's idle row is
+  the pane cwd" was about the wrong row: the composer's status row ends with this invariant hint,
+  and it is absent from all three blocked fixtures.
+- pi: `all [ line_regex '^─{20,}$', line_regex '\d+(\.\d+)?%/\d+k' ]` on `visible`. The manifest's
+  old note ("renders in both states, so no positive idle chrome to anchor") was the actual bug —
+  co-rendering chrome is claude's `⏵⏵` shape, not a disqualifier.
+- cursor: `all [ line_regex '^\s*▄{10,}\s*$', line_regex '^\s*→ ' ]` on `visible`. NOT blocked: a
+  real post-turn screen was driven on cursor-agent 2026.08.11 and captured at both widths
+  (`cursor_idle_post_turn_w{100,60}.txt`). It reads `→ Add a follow-up`, as predicted — so the rule
+  anchors on the composer FRAME, since the arrow alone also prefixes `→ Run (once) (y)` in the
+  approval dialog. Those captures also confirm the title does not revert after a turn (theirs is
+  `Just OK`, a conversation summary), which is now a test.
+- Priority below the working rule is documentary only: `engine.rs:176-183` uses priority to break
+  ties WITHIN one state, and cross-state order is decided solely by the fold's slot ladder. The
+  priorities were still set below to match claude and to keep the manifests self-describing.
+- R-A's flagged gap is closed: `fold::tests::working_chrome_beats_coexisting_idle_chrome_under_a_hook_claim`
+  covers `fold.rs:275`. Mutation-checked (swap the `or` arms and it fails), with a control arm
+  proving it is not passing for want of any working path.
+- Suite: 1174 → 1192 passing, 0 failed.
 
 > **Review gate R-B.** Focus: is every new rule backed by a real capture at two widths? Did any
 > never-false-block assertion get dropped or softened? Does any new idle rule match its own agent's

@@ -12,6 +12,20 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Fixed
 
+- A codex, cursor, gemini, opencode or pi pane no longer stays stuck on the spinner after its turn
+  ends. Each of those manifests described what a working screen looks like and said nothing about
+  an idle one, so the moment the streaming chrome scrolled away there was no claim on the screen at
+  all — and with nothing to weigh, every later cycle held the previous verdict. A pane that finished
+  half an hour ago still read `working`, and no amount of waiting moved it, because waiting was the
+  problem. All five now carry an idle rule anchored on their composer: codex's `›` arrow, cursor's
+  input frame, gemini's `Type your message or @path/to/file`, opencode's `ctrl+p commands`, pi's
+  input rules plus context gauge. Each anchor is backed by real captures at two widths, including a
+  freshly driven post-turn cursor screen — its previous idle fixture was a fresh session, whose
+  prompt text turns out not to survive the first turn. The composer is on screen mid-turn too, so
+  these rules deliberately co-render with the working ones and lose to them, exactly as claude's
+  `⏵⏵` rule already did; and idle stays out of each manifest's `[capture].visible`, so working
+  chrome still cannot argue a hook's idle claim away.
+
 - A pane whose screen merely changed is no longer reported as `working`. Every cycle hashes the
   viewport, and a hash differing from the stamped one used to be pushed as working evidence in its
   own right. It carried the same timestamp as the manifest's own rules and was appended after them,

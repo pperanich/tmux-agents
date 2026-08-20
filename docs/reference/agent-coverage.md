@@ -13,8 +13,8 @@ each table reflects events actually observed firing with a full payload.
 | agent | mechanism | hook coverage | context telemetry | notes |
 |---|---|---|---|---|
 | Claude Code | `settings.json` `hooks` block or plugin manifest | working / idle / blocked / lifecycle | statusline push shim: per-turn `context_window.used_percentage`, parsed by `claude-statusline-json` (event channel) | The `Notification` matcher distinguishes permission prompts from idle reminders. `tma install-hooks claude` writes the block and the statusline context shim. |
-| Codex CLI | two channels: a `notify` program in `config.toml` (payload as a trailing argv arg) and a Claude-style `hooks.json` in `CODEX_HOME` (payload on stdin, real session id) | working / idle / blocked / lifecycle, all hook-covered; blocked also screen-carried | rollout `token_count` file-tail, parsed by `codex-rollout-jsonl` (file-tail channel): the per-turn `token_count` event carries `total_token_usage` + `model_context_window`, so the percent needs no model table | `tma install-hooks codex` writes both. The `hooks.json` entries need one-time in-TUI trust (`/hooks`) before they fire. Discovery keys the pane's rollout file off `@agent_session`; its cross-version stability is the fixture caveat in ACTIONS.md open question 6. |
-| OpenCode | JS plugin in `~/.config/opencode/plugin/` | working / idle / blocked / lifecycle (registration only); blocked and working also screen-carried | — | No session-end or subagent hooks; deregistration rides the pid-change / pane-close path. `tma install-hooks opencode` writes the plugin. Answers `approve`/`deny` over its HTTP API rather than keystrokes (API lane, below). |
+| Codex CLI | two channels: a `notify` program in `config.toml` (payload as a trailing argv arg) and a Claude-style `hooks.json` in `CODEX_HOME` (payload on stdin, real session id) | working / idle / blocked / lifecycle, all hook-covered; blocked, working and idle also screen-carried | rollout `token_count` file-tail, parsed by `codex-rollout-jsonl` (file-tail channel): the per-turn `token_count` event carries `total_token_usage` + `model_context_window`, so the percent needs no model table | `tma install-hooks codex` writes both. The `hooks.json` entries need one-time in-TUI trust (`/hooks`) before they fire. Discovery keys the pane's rollout file off `@agent_session`; its cross-version stability is the fixture caveat in ACTIONS.md open question 6. |
+| OpenCode | JS plugin in `~/.config/opencode/plugin/` | working / idle / blocked / lifecycle (registration only); blocked, working and idle also screen-carried | — | No session-end or subagent hooks; deregistration rides the pid-change / pane-close path. `tma install-hooks opencode` writes the plugin. Answers `approve`/`deny` over its HTTP API rather than keystrokes (API lane, below). |
 | Gemini CLI | `settings.json` `hooks` object, native event names | working / idle / blocked / lifecycle, hook- and screen-carried | — (turn-granularity token counts only) | Reuses the Claude JSON editor over `~/.gemini/settings.json`. Local config is gated behind a per-folder trust prompt. |
 | Cursor CLI | user-level `~/.cursor/hooks.json` in cursor's own shape, plus a `statusLine` shim in `~/.cursor/cli-config.json` | working / idle / lifecycle via hooks; blocked screen-only | statusLine push shim: per-turn `context_window` (`total_input_tokens` / `context_window_size`), parsed by `cursor-statusline-json` (event channel). The `statusLine` mechanism works but is undocumented (highest churn risk) — a payload change degrades to an absent gauge | Cursor exposes no permission hook, so blocked rides a screen rule. `tma install-hooks cursor` writes cursor's own hooks JSON shape and the statusLine context shim. |
 | pi | extension module in `~/.pi/agent/extensions/` | working / idle / lifecycle via the extension; no blocked | `getContextUsage()` push shim: the extension forwards pi's `ctx.getContextUsage()` (a precomputed `percent` + absolute `contextWindow`) on the turn-settled event, parsed by `pi-context-json` (event channel) | pi auto-runs tools with no approval state, so there is no blocked signal at all. `tma install-hooks pi` drops the extension. |
@@ -121,6 +121,26 @@ report, screen-capture fallback for what they do not. The per-agent manifest
 declares which states its hooks cover (`[hooks].covers`) and which its screen
 rules can see (`[capture].visible`).
 
+### Idle screen rules
+
+Every bundled agent ships a positive `idle` rule, anchored on its composer chrome.
+It matters most for a pane nobody wired hooks into: without one, a turn ending
+leaves no claim on the screen at all, so the fold holds the previous verdict and
+the pane reads `working` forever.
+
+Two properties are shared by all six and are the reason the rules are safe:
+
+- **The composer co-renders with the working chrome.** Every one of these anchors is
+  on screen mid-turn as well — claude's `⏵⏵` mode line sits under the spinner, codex's
+  `›` under `esc to interrupt`, and so on. The fold's slot order (blocked, then
+  working, then idle) resolves the co-render, so the idle claim only decides anything
+  once the working chrome is gone.
+- **`idle` is deliberately absent from `[capture].visible` for all but claude.**
+  `visible` is what lets screen evidence expire a contradicting hook claim. Chrome
+  that renders mid-turn is not evidence a turn *ended*, so listing idle there would
+  let working chrome decay a legitimate idle hook claim. The rule gives the fold a
+  claim; it does not give it authority over a hook.
+
 Hooks always reference a stable wrapper script (`tma-hook`), never the binary
 directly: the wrapper resolves the binary at fire time and exits silently when it
 is missing, so rebuilds and moves never surface as hook failures. `tma
@@ -198,9 +218,10 @@ to `tma-hook opencode <token>` with the payload on stdin.
 `blocked` and `working` are visible on screen, so `[capture].visible = ["blocked",
 "working"]`. The working anchor is the in-flight status row's `esc interrupt` hint,
 present for the whole of a live turn and gone the moment it settles; only the text is
-matched, since the `■`/`⬝` progress bar beside it animates. `idle` carries no rule — it
-is the absence of that row, not chrome of its own — so, exactly as with pi, a hookless
-pane that finishes a turn holds `working` until a hook moves it.
+matched, since the `■`/`⬝` progress bar beside it animates. `idle` is anchored on
+`ctrl+p commands`, the invariant tail of the composer's status row (the rest of that row
+is per-pane: token count, cost, cwd). The permission dialog replaces the composer, so a
+blocked screen never raises it.
 
 The OSC title is not usable. The original audit found it static (`OpenCode`); on 1.18.18
 it is state-bearing (`OC | Running <command>`) but goes stale, still reading `Running`
@@ -265,7 +286,10 @@ registration and the subagent guard are live here.
 
 Combined: `[hooks].covers = ["working", "idle", "blocked", "lifecycle"]`. Blocked
 is also screen-carried for the daemonless, quiet-edge, and untrusted-hook cases,
-so `codex.toml` ships `[capture].visible = ["working", "blocked"]`.
+so `codex.toml` ships `[capture].visible = ["working", "blocked"]`. `idle` has a
+screen rule too — the `›` composer arrow in the last six rows — but stays out of
+`visible` (see "Idle screen rules", above). The approval dialog numbers its options
+with the same arrow, so the rule carries a `not` leaf excluding `› <n>. `.
 
 ### Gemini mapping
 
@@ -285,9 +309,11 @@ real snake_case `session_id`; Gemini uses its own native event names.
 
 `blocked` is gated by the `ToolPermission` matcher so a future non-permission
 notification cannot false-block. Coverage: `[hooks].covers = ["working", "idle",
-"blocked", "lifecycle"]` and `[capture].visible = ["working", "blocked"]`; idle
-rides the `AfterAgent` hook with no idle rule, since its composer chrome overlaps
-working on screen.
+"blocked", "lifecycle"]` and `[capture].visible = ["working", "blocked"]`. Idle
+rides the `AfterAgent` hook, and additionally has a screen rule anchored on the
+composer placeholder `Type your message or @path/to/file`; that chrome overlaps
+working, which is why idle has a rule but is not `visible` (see "Idle screen
+rules", above).
 
 ### Cursor mapping
 
@@ -309,7 +335,11 @@ dedicated adapter. Payloads arrive on stdin with a real snake_case `session_id`.
 `blocked` is not hook-covered: Cursor exposes no dedicated permission hook
 (`beforeShellExecution` fires for approved and pending commands alike), so it
 rides the approval-dialog screen rule. Coverage: `[hooks].covers = ["working",
-"idle", "lifecycle"]` and `[capture].visible = ["working", "blocked"]`.
+"idle", "lifecycle"]` and `[capture].visible = ["working", "blocked"]`. `idle` has
+a screen rule (outside `visible`) anchored on the composer's half-block frame plus
+an `→` row — the frame rather than the hint text, because the hint reads `→ Plan,
+search, build anything` on a fresh session and `→ Add a follow-up` afterwards, and
+because the approval dialog reuses the same arrow glyph but not the frame.
 
 `postToolUseFailure` (captured 2026-07-29): a `cat` of a missing file
 exited non-zero and fired `postToolUseFailure` carrying `failure_type":"error"`,
@@ -363,7 +393,9 @@ extension reads `ctx.sessionManager.getSessionId()` and forwards `{session_id}`.
 `blocked` is not a pi state: pi auto-runs tools with no per-tool permission
 prompt, so there is neither a hook nor a screen rule for it. Coverage:
 `[hooks].covers = ["working", "idle", "lifecycle"]` and `[capture].visible =
-["working"]` (the `Working...` loader row).
+["working"]` (the `Working...` loader row). `idle` has a screen rule outside
+`visible`, requiring both a full-width composer rule line in column 0 and the
+`<pct>%/<window>k` context gauge on the status row.
 
 On the turn-settled `agent_settled` event the extension additionally forwards pi's
 `ctx.getContextUsage()` to `tma event --kind context`. pi's `ContextUsage` carries
