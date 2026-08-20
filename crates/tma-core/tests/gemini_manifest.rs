@@ -14,7 +14,11 @@ use tma_core::evidence::{Claim, Lifecycle, StateClaim};
 use tma_core::fixture::Fixture;
 use tma_core::manifest::CoverToken;
 use tma_core::snapshot::PaneSnapshot;
-use tma_core::{AgentState, Evaluation, Manifest, RuleEngine};
+use tma_core::stamp::StampedState;
+use tma_core::{
+    verdict, AgentState, Evaluation, FoldConfig, Manifest, Provenance, RuleEngine, SnapshotFacts,
+    Verdict,
+};
 
 const GEMINI_TOML: &str = include_str!("../manifests/gemini.toml");
 
@@ -54,6 +58,48 @@ fn has_state(ev: &Evaluation, state: AgentState) -> bool {
     ev.evidence
         .iter()
         .any(|e| matches!(&e.claim, Claim::State(s) if s.state == state))
+}
+
+/// Run the full detector (engine + fold) on a fixture, as a live producer would. `after_ms` places
+/// the fold clock relative to the capture, so a test can sit either side of the working→idle dwell.
+fn fold_verdict(name: &str, prev: Option<StampedState>, after_ms: u64) -> Verdict {
+    let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
+    let snap = snapshot(&fx);
+    let ev = engine().evaluate(&snap);
+    let facts = SnapshotFacts {
+        pid: 1,
+        foreground_is_agent: true,
+        scrolled: false,
+        history_view: ev.history_view,
+    };
+    verdict(
+        prev,
+        &facts,
+        &ev.evidence,
+        &manifest(),
+        &FoldConfig::default(),
+        snap.captured_at + after_ms,
+    )
+}
+
+/// A screen-stamped `working` prior — the state a pane is pinned at once the turn's chrome leaves
+/// the screen. `Provenance::Capture` (not `Hook`) keeps the fold on the plain ladder, which is the
+/// path that used to dead-end in `hold previous`.
+fn working_prior(now: u64) -> StampedState {
+    StampedState {
+        state: AgentState::Working,
+        detail: None,
+        source: Provenance::Capture,
+        evidence_at: now,
+        since: now,
+        stamped_at: now,
+        attention: false,
+        notified_at: None,
+        hash: None,
+        pid: 1,
+        session: None,
+        subagents: vec![],
+    }
 }
 
 // ---- the manifest shape (live audit) ---------------------------------------------
@@ -177,11 +223,17 @@ fn hooks_cover_working_idle_blocked_lifecycle() {
 fn screen_rules_ship_for_working_and_blocked() {
     let m = manifest();
     // The audit drove working + blocked screens live, so both are capture-visible with real
-    // rules. idle is NOT capture-visible (its composer chrome overlaps working; idle rides the
-    // AfterAgent hook).
+    // rules. idle now HAS a screen rule too (the composer placeholder), but deliberately stays
+    // OUT of `visible`: its chrome overlaps working, so it is not evidence a turn ENDED and must
+    // never be allowed to decay an idle hook claim. The rule exists only to give the fold a
+    // positive idle claim once the working chrome leaves.
     assert_eq!(
         m.capture.visible,
         [AgentState::Working, AgentState::Blocked]
+    );
+    assert!(
+        !m.capture.visible.contains(&AgentState::Idle),
+        "idle has a rule but must stay outside [capture].visible"
     );
     assert!(
         !m.rules.is_empty(),
@@ -240,14 +292,15 @@ fn blocked_detected_at_wide_and_narrow() {
     }
 }
 
-// ---- the real idle screen must never read working/blocked (safety) ---------------
+// ---- the real idle screen reads idle, and never working/blocked (safety) ---------
 
 #[test]
 fn idle_screen_never_reads_working_or_blocked_at_wide_and_narrow() {
     // The real idle composer (`> Type your message or @path/to/file` + status line) matches NONE of
-    // the working/blocked rules (no `esc to cancel` footer, no approval dialog), so the engine
-    // raises no state evidence — critically it never synthesizes `blocked` from the idle screen (the
-    // forbidden direction). This negative regression proves the anchors are state-unique.
+    // the working/blocked rules (no `esc to cancel` footer, no approval dialog). It now matches the
+    // idle rule, so the engine raises EXACTLY one claim, `idle` — critically it never synthesizes
+    // `blocked` from the idle screen (the forbidden direction). This negative regression proves the
+    // anchors are state-unique.
     for name in ["gemini_idle_w100.txt", "gemini_idle_w60.txt"] {
         let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
         assert_eq!(fx.agent, "gemini");
@@ -259,6 +312,62 @@ fn idle_screen_never_reads_working_or_blocked_at_wide_and_narrow() {
         assert!(
             !has_state(&ev, AgentState::Working),
             "{name}: idle chrome must not raise a working claim"
+        );
+        assert!(
+            has_state(&ev, AgentState::Idle),
+            "{name}: the composer placeholder must raise an idle claim"
+        );
+        assert_eq!(
+            ev.evidence.len(),
+            1,
+            "{name}: exactly one claim, the idle one"
+        );
+    }
+}
+
+// ---- the pinned-`working` trap: a finished turn now lands ------------------------
+
+#[test]
+fn idle_screen_releases_a_pinned_working_stamp() {
+    // The bug batch B closes: with no idle rule the idle screen raised nothing, so every cycle
+    // after a turn hit `hold previous` and the pane stayed `working` forever. Now the composer
+    // claim lands — once past the working→idle dwell.
+    for name in ["gemini_idle_w100.txt", "gemini_idle_w60.txt"] {
+        let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
+        let held = fold_verdict(name, Some(working_prior(fx.captured_at)), 1_000);
+        assert_eq!(
+            held.state,
+            AgentState::Working,
+            "{name}: inside the dwell, working→idle is still suppressed"
+        );
+        let landed = fold_verdict(name, Some(working_prior(fx.captured_at)), 10_000);
+        assert_eq!(
+            landed.state,
+            AgentState::Idle,
+            "{name}: past the dwell the composer claim releases the pinned working stamp"
+        );
+    }
+}
+
+// ---- the idle rule co-renders with working, and must lose to it ------------------
+
+#[test]
+fn working_screen_also_matches_the_idle_rule_but_still_folds_working() {
+    // gemini draws the composer placeholder underneath the thinking footer, so the working screen
+    // raises BOTH claims. That is by design (claude's `⏵⏵` precedent); the fold's slot order is
+    // what resolves it. If this ever folds to idle, the ladder in `fold.rs` has been reordered.
+    for name in ["gemini_working_w100.txt", "gemini_working_w60.txt"] {
+        let ev = evaluate(name);
+        assert!(
+            has_state(&ev, AgentState::Idle),
+            "{name}: the composer placeholder renders mid-turn too"
+        );
+        assert!(has_state(&ev, AgentState::Working), "{name}: working too");
+        let v = fold_verdict(name, None, 10);
+        assert_eq!(
+            v.state,
+            AgentState::Working,
+            "{name}: working outranks the co-rendered idle claim"
         );
     }
 }

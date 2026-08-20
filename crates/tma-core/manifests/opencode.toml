@@ -119,3 +119,30 @@ state = "working"
 priority = 60
 region = "visible"
 match = { contains = "esc interrupt" }
+
+# --- idle: the composer's command hint on the status row --------------------------------
+# Without a positive idle claim a pane that finished a turn raises no fresh evidence, so every
+# later cycle lands on `hold previous` and the row stays pinned at `working` — the plugin's
+# session.idle event covers the transition, but an unwired pane has nothing. OpenCode's status
+# row (bottom line of the composer) always ends with `ctrl+p commands` while the editor has the
+# screen; the rest of that row is per-pane (token count, cost, cwd) and the earlier audit stopped
+# there. `ctrl+p commands` is the invariant piece.
+#
+# It is present for the WHOLE turn — the in-flight row reads
+# `■■⬝⬝⬝⬝⬝⬝  esc interrupt   13.1K (1%) · $0.01  ctrl+p commands` — so it deliberately co-renders
+# with the working anchor above, exactly like claude's `⏵⏵` rule: the fold's slot order
+# (blocked → working → idle) holds the verdict at `working` until the interrupt hint is gone.
+# Priority sits below the working rule to say the same thing here.
+#
+# Evidence: present in opencode_idle_w{100,60} and opencode_working_w{100,60}; ABSENT from all
+# three blocked fixtures, whose permission box replaces the composer and whose footer reads
+# `ctrl+f fullscreen  ⇆ select  enter confirm` instead. So a permission prompt raises no idle
+# claim. `visible` region for the same scrollback reason as the working rule.
+#
+# `idle` stays OUT of [capture].visible: the hint renders mid-turn too, so it is not evidence a
+# turn ENDED and must never be allowed to decay an idle hook claim.
+[[rules]]
+state = "idle"
+priority = 40
+region = "visible"
+match = { contains = "ctrl+p commands" }

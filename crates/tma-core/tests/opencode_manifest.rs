@@ -53,6 +53,12 @@ fn evaluate(name: &str) -> Evaluation {
 
 /// Run the full detector (engine + fold) on a fixture, as a live producer would.
 fn fold_verdict(name: &str, prev: Option<StampedState>) -> Verdict {
+    fold_verdict_at(name, prev, 10)
+}
+
+/// [`fold_verdict`] with the fold clock placed `after_ms` past the capture, so a test can sit
+/// either side of the working→idle dwell.
+fn fold_verdict_at(name: &str, prev: Option<StampedState>, after_ms: u64) -> Verdict {
     let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
     let snap = snapshot(&fx);
     let ev = engine().evaluate(&snap);
@@ -68,8 +74,28 @@ fn fold_verdict(name: &str, prev: Option<StampedState>) -> Verdict {
         &ev.evidence,
         &manifest(),
         &FoldConfig::default(),
-        snap.captured_at + 10,
+        snap.captured_at + after_ms,
     )
+}
+
+/// A screen-stamped `working` prior — the state a pane is pinned at once the turn's chrome leaves
+/// the screen. `Provenance::Capture` (not `Hook`) keeps the fold on the plain ladder, which is the
+/// path that used to dead-end in `hold previous`.
+fn working_prior(now: u64) -> StampedState {
+    StampedState {
+        state: AgentState::Working,
+        detail: None,
+        source: Provenance::Capture,
+        evidence_at: now,
+        since: now,
+        stamped_at: now,
+        attention: false,
+        notified_at: None,
+        hash: None,
+        pid: 1,
+        session: None,
+        subagents: vec![],
+    }
 }
 
 fn idle_prior(now: u64) -> StampedState {
@@ -99,6 +125,7 @@ fn has_state(ev: &Evaluation, state: AgentState) -> bool {
 mod rule {
     pub(crate) const BLOCKED_PERMISSION: usize = 0;
     pub(crate) const WORKING_STATUS_ROW: usize = 1;
+    pub(crate) const IDLE_COMPOSER_HINT: usize = 2;
 }
 
 fn matched(ev: &Evaluation, index: usize) -> bool {
@@ -226,12 +253,18 @@ fn bundled_manifest_declares_expected_hooks_and_coverage() {
     let m = manifest();
     // Homebrew reports the resolved binary comm `opencode.exe`; `opencode` covers other installs.
     assert_eq!(m.identity.process_names, ["opencode.exe", "opencode"]);
-    // `blocked` and `working` are capture-visible; `idle` still is not, being the absence of the
-    // working row rather than positive chrome. The OSC title is unusable either way: it is
-    // state-bearing on 1.18.18 but goes stale after a turn settles.
+    // `blocked` and `working` are capture-visible. `idle` now HAS a screen rule (the composer's
+    // `ctrl+p commands` hint) but deliberately stays OUT of `visible`: that hint renders mid-turn
+    // too, so it is not evidence a turn ENDED and must never be allowed to decay an idle hook
+    // claim. The OSC title is unusable either way: it is state-bearing on 1.18.18 but goes stale
+    // after a turn settles.
     assert_eq!(
         m.capture.visible,
         [AgentState::Blocked, AgentState::Working]
+    );
+    assert!(
+        !m.capture.visible.contains(&AgentState::Idle),
+        "idle has a rule but must stay outside [capture].visible"
     );
 
     let hooks = m.hooks.as_ref().expect("opencode is hook-capable");
@@ -315,4 +348,93 @@ fn settled_and_blocked_screens_do_not_read_working() {
 fn blocked_outranks_working_on_a_dialog_screen() {
     let v = fold_verdict("opencode_blocked_permission_w100.txt", None);
     assert_eq!(v.state, AgentState::Blocked);
+}
+
+// ---- rule #2: idle, anchored on the composer's command hint -------------------------
+
+/// The settled screen now raises a positive `idle` claim. Before batch B it raised nothing, so a
+/// pane that finished a turn hit `hold previous` on every later cycle and stayed pinned at
+/// `working` forever. Exactly one claim: `ctrl+p commands` is the only rule the settled screen
+/// matches.
+#[test]
+fn settled_screen_reads_idle() {
+    for name in ["opencode_idle_w100.txt", "opencode_idle_w60.txt"] {
+        let ev = evaluate(name);
+        assert!(
+            matched(&ev, rule::IDLE_COMPOSER_HINT),
+            "{name}: the composer hint must read as idle"
+        );
+        assert!(has_state(&ev, AgentState::Idle), "{name}: idle evidence");
+        assert_eq!(
+            ev.evidence.len(),
+            1,
+            "{name}: exactly one claim, the idle one"
+        );
+    }
+}
+
+/// The permission dialog replaces the composer, so its footer reads
+/// `ctrl+f fullscreen  ⇆ select  enter confirm` and the idle rule stays silent. A blocked screen
+/// must raise a blocked claim and nothing else.
+#[test]
+fn blocked_screens_raise_no_idle_claim() {
+    for name in [
+        "opencode_blocked_permission_w100.txt",
+        "opencode_blocked_permission_w60.txt",
+        "opencode_blocked_edit_w60.txt",
+    ] {
+        let ev = evaluate(name);
+        assert!(
+            !matched(&ev, rule::IDLE_COMPOSER_HINT),
+            "{name}: the permission box replaces the composer hint"
+        );
+        assert!(
+            !has_state(&ev, AgentState::Idle),
+            "{name}: no idle evidence"
+        );
+    }
+}
+
+/// The co-render, and why the idle rule is safe: OpenCode keeps `ctrl+p commands` on the status
+/// row for the whole turn, so a live turn raises BOTH claims. The fold's slot order
+/// (blocked → working → idle) is what resolves it — the same shape as claude's `⏵⏵` rule. If this
+/// ever folds to idle, the ladder in `fold.rs` has been reordered.
+#[test]
+fn working_screen_also_matches_the_idle_rule_but_still_folds_working() {
+    for name in ["opencode_working_w100.txt", "opencode_working_w60.txt"] {
+        let ev = evaluate(name);
+        assert!(
+            matched(&ev, rule::IDLE_COMPOSER_HINT),
+            "{name}: the composer hint renders mid-turn too"
+        );
+        assert!(has_state(&ev, AgentState::Idle), "{name}: idle evidence");
+        assert!(has_state(&ev, AgentState::Working), "{name}: working too");
+        let v = fold_verdict(name, None);
+        assert_eq!(
+            v.state,
+            AgentState::Working,
+            "{name}: working outranks the co-rendered idle claim"
+        );
+    }
+}
+
+/// The pinned-`working` trap, end to end: a screen-stamped `working` prior meets a settled screen
+/// and, once past the working→idle dwell, finally lands on idle.
+#[test]
+fn settled_screen_releases_a_pinned_working_stamp() {
+    for name in ["opencode_idle_w100.txt", "opencode_idle_w60.txt"] {
+        let at = ev_now(name);
+        let held = fold_verdict_at(name, Some(working_prior(at)), 1_000);
+        assert_eq!(
+            held.state,
+            AgentState::Working,
+            "{name}: inside the dwell, working→idle is still suppressed"
+        );
+        let landed = fold_verdict_at(name, Some(working_prior(at)), 10_000);
+        assert_eq!(
+            landed.state,
+            AgentState::Idle,
+            "{name}: past the dwell the composer claim releases the pinned working stamp"
+        );
+    }
 }

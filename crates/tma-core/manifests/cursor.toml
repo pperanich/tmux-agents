@@ -122,9 +122,10 @@ channel = "event"
 format = "cursor-statusline-json"
 
 # Capture fallback: working + blocked screen rules from real captures (redacted), driven live in
-# a scratch tmux server at two widths. idle is NOT capture-visible (idle is the absence of
-# working/blocked plus the stop hook; the composer chrome overlaps working, so no idle rule).
-# Every visible state has a real fixture behind it.
+# a scratch tmux server at two widths. idle has a rule too (bottom of this file) but is NOT
+# capture-visible: its composer chrome overlaps working, so it is not evidence a turn ENDED and
+# must never be allowed to decay an idle hook claim. Every visible state has a real fixture
+# behind it.
 [capture]
 visible = ["working", "blocked"]
 
@@ -158,3 +159,37 @@ state = "working"
 priority = 10
 region = "visible"
 match = { contains = "ctrl+c to stop" }
+
+# idle: the composer box. Without a positive idle claim a pane that finished a turn raises no
+# fresh evidence, so every later cycle lands on `hold previous` and the row stays pinned at
+# `working` — the `stop` hook covers the transition, but a pane that is not hook-wired has
+# nothing. Cursor draws its composer as an input row between two full-width half-block rules
+# (`▄▄▄…` above, `▀▀▀…` below), with the row itself prefixed by `→`.
+#
+# Anchoring on the FRAME, not the hint text, is deliberate: the hint is `→ Plan, search, build
+# anything` on a fresh session and `→ Add a follow-up` once a turn has run, so hint text is not
+# invariant. It also cannot be the arrow alone — the approval dialog numbers its options with
+# the same glyph (`→ Run (once) (y)`) — so the rule requires the frame AND an arrow row.
+#
+# Evidence, six real captures at two widths: the frame is present in cursor_idle_w{100,60}
+# (fresh session, 2026.07.23) AND cursor_idle_post_turn_w{100,60} (a real completed turn on
+# 2026.08.11, captured for this rule) AND cursor_working_w{100,60}; it is ABSENT from
+# cursor_blocked_w{100,60}, whose dialog replaces the composer outright. The working captures
+# are the co-render case and are deliberate, exactly like claude's `⏵⏵` rule: the fold's slot
+# order (blocked → working → idle) holds the verdict at `working` until `ctrl+c to stop` is gone.
+# Priority sits below the working rule to say the same thing here.
+#
+# The post-turn captures also confirm the title finding above: their `#{pane_title}` is the
+# conversation summary (`Just OK`), not `Cursor Agent` — the title does not revert, which is why
+# identity leans on the stickiness hold rather than the title alone.
+#
+# `idle` stays OUT of [capture].visible: the composer renders mid-turn too, so it is not evidence
+# a turn ENDED and must never be allowed to decay an idle hook claim.
+[[rules]]
+state = "idle"
+priority = 5
+region = "visible"
+match = { all = [
+  { line_regex = '^\s*▄{10,}\s*$' },
+  { line_regex = '^\s*→ ' },
+] }

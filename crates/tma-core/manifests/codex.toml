@@ -112,11 +112,11 @@ matcher = "agent-turn-complete"
 claim = { state = "idle" }
 
 # Capture fallback: the `working` (streaming) and `blocked` (approval prompt) screens
-# were driven live 2026-07-25 and captured at two widths each (redacted). Idle stays
-# hook-only (Stop / notify) — the codex idle screen is just the composer + welcome box with
-# no invariant state-bearing chrome worth a rule, and the real idle captures
-# (codex_idle_w{100,60}.txt) are kept as negative fixtures so a screen rule never mis-reads
-# idle as working/blocked.
+# were driven live 2026-07-25 and captured at two widths each (redacted). Idle now has a screen
+# rule too (the composer arrow, at the bottom of this file) but stays OUT of `visible`: the
+# composer renders mid-turn as well, so it is not evidence a turn ENDED and must never be allowed
+# to decay an idle hook claim. The real idle captures (codex_idle_w{100,60}.txt) remain the
+# negative fixtures proving a screen rule never mis-reads idle as working/blocked.
 [capture]
 visible = ["working", "blocked"]
 
@@ -174,3 +174,36 @@ state = "working"
 priority = 55
 region = "tail_lines(20)"
 match = { contains = "esc to interrupt" }
+
+# --- idle: the composer prompt is back at the bottom of the screen ----------------------
+# Without a positive idle claim a pane that finished a turn has no fresh evidence at all, so
+# every later cycle lands on `hold previous` and the row stays pinned at `working` forever
+# (the notify/Stop hooks cover the transition, but a pane that was never hook-wired has
+# nothing). Codex draws its composer as `› <placeholder-or-draft>` in column 0 immediately
+# above the `<model> · <cwd>` footer, and it is present for the WHOLE turn — idle and
+# working alike (verified: `› Explain this codebase` sits under `• Working (0s • esc to
+# interrupt)` in codex_working_w{100,60}.txt). That is deliberate, and mirrors claude's
+# `⏵⏵` rule: the fold's slot order (blocked → working → idle) resolves the co-render to
+# `working` while the turn runs, and the composer only wins once the streaming footer and
+# the braille title are gone. Priority sits below both working rules to say the same thing
+# in the manifest.
+#
+# Two things share that arrow and both are excluded deliberately:
+#   - the transcript echo of each user message (`› Run the shell command: …`) — kept out by the
+#     `tail_lines(6)` window: the nearest echo is fourteen rows from the end in the working
+#     captures and twenty-two in the blocked ones, while the live composer is two to three rows
+#     from the end in all four idle/working captures;
+#   - the approval dialog's option list, which numbers its options with the SAME arrow
+#     (`› 1. Yes, proceed (y)`) and sits SIX rows from the end — inside the window. The `not`
+#     leaf is what excludes it, so the window is not load-bearing for the blocked case. It
+#     matches `› <digits>. ` specifically, so an ordinary draft that happens to start with a
+#     digit still reads as the composer.
+# Backed by codex_idle_w{100,60}.txt and negatively by codex_blocked_w{100,60}.txt.
+[[rules]]
+state = "idle"
+priority = 40
+region = "tail_lines(6)"
+match = { all = [
+  { line_regex = '^›' },
+  { not = { line_regex = '^› \d+\. ' } },
+] }

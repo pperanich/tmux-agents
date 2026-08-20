@@ -743,6 +743,40 @@ mod tests {
     }
 
     #[test]
+    fn working_chrome_beats_coexisting_idle_chrome_under_a_hook_claim() {
+        // The SECOND ordering site: `claims.working.or(claims.idle)` inside `fold_against_hook`.
+        // The plain ladder above is not the only place slot order decides — with a live hook claim
+        // every screen claim funnels through that one `or`, and five manifests now ship idle chrome
+        // that co-renders with their working chrome, so it is reached on every mid-turn cycle.
+        //
+        // A working hook claim aged past the decay window, with BOTH chromes on screen at equal
+        // timestamps. Picking working corroborates the claim; picking idle would contradict it,
+        // find it decayed, and publish `idle` — a finished-turn announcement mid-turn.
+        let prev = Some(stamp(AgentState::Working, Provenance::Hook, 0));
+        let evidence = [
+            ev(Source::ScreenRule, AgentState::Idle, 100_000),
+            ev(Source::ScreenRule, AgentState::Working, 100_000),
+        ];
+        let v = run(prev.clone(), facts(), &evidence, 100_000);
+        assert_eq!(v.state, AgentState::Working, "working fills the candidate");
+        assert_eq!(
+            v.winning_evidence.source,
+            Provenance::Hook,
+            "corroboration keeps the claim's hook provenance"
+        );
+
+        // The control: drop the working chrome and the same aged claim DOES decay to idle. Without
+        // this the assertion above could pass for want of any working path at all.
+        let idle_only = [ev(Source::ScreenRule, AgentState::Idle, 100_000)];
+        let v = run(prev, facts(), &idle_only, 100_000);
+        assert_eq!(
+            v.state,
+            AgentState::Idle,
+            "idle alone still expires a decayed working hook claim"
+        );
+    }
+
+    #[test]
     fn idle_chrome_when_only_idle() {
         let evidence = [ev(Source::ScreenRule, AgentState::Idle, 10)];
         let v = run(None, facts(), &evidence, 20);

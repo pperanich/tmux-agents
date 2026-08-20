@@ -101,11 +101,12 @@ event = "agent_settled"
 claim = { state = "idle" }
 
 # Capture fallback: a `working` screen rule from real captures (redacted), driven live in
-# a scratch tmux server at two widths. idle and blocked carry NO rule:
-#   - idle is the ABSENCE of the working chrome (the composer region is empty; the footer status
-#     line + model row render in both states), so there is no positive idle chrome to anchor — the
-#     stop is signaled by the `agent_settled` hook, and the idle fixtures below exist only as the
-#     negative regression that the working rule never mis-fires on them.
+# a scratch tmux server at two widths.
+#   - idle now HAS a rule (bottom of this file), anchored on the composer frame + context gauge.
+#     Those DO render in both states — the earlier note treated that as disqualifying, which was
+#     the bug: co-rendering chrome is fine, the fold's slot order picks working while the loader
+#     is up. It stays OUT of `visible` below, because chrome that renders mid-turn is not
+#     evidence a turn ENDED and must never be allowed to decay an idle hook claim.
 #   - blocked has no state in pi at all (see the [hooks] note): no rule, honestly.
 [capture]
 visible = ["working"]
@@ -135,3 +136,33 @@ match = { contains = "Working..." }
 [telemetry.context]
 channel = "event"
 format = "pi-context-json"
+
+# --- idle: the composer frame plus the context gauge ------------------------------------
+# Without a positive idle claim a pane that finished a turn raises no fresh evidence, so every
+# later cycle lands on `hold previous` and the row stays pinned at `working` — the extension's
+# `agent_settled` event covers the transition, but an unwired pane has nothing. The note above
+# is right that pi's bottom chrome renders in BOTH states; what it got wrong is that this
+# disqualifies it. Co-rendering chrome is exactly claude's `⏵⏵` rule: the fold's slot order
+# (blocked → working → idle) holds the verdict at `working` while `Working...` is on screen, and
+# the composer only wins once the loader row is gone. Priority sits below the working rule to
+# say the same thing here.
+#
+# Two leaves, both required, both part of pi's persistent bottom chrome:
+#   - a full-width horizontal rule in column 0 — pi brackets the input row with one above and
+#     one below. Transcript content is indented one space, so `^─` is the composer's, not a
+#     tool's.
+#   - the context gauge on the status row (`0.3%/262k (auto)`) — `<pct>%/<window>k`.
+# Requiring both means a stray rule line in tool output is not enough on its own. Verified
+# present at both widths in pi_idle_w{100,60} AND pi_working_w{100,60} (the co-render).
+#
+# pi has no blocked state and no blocked rule, so there is no dialog for this to collide with.
+# `idle` stays OUT of [capture].visible: the composer renders mid-turn too, so it is not
+# evidence a turn ENDED and must never be allowed to decay an idle hook claim.
+[[rules]]
+state = "idle"
+priority = 5
+region = "visible"
+match = { all = [
+  { line_regex = '^─{20,}$' },
+  { line_regex = '\d+(\.\d+)?%/\d+k' },
+] }

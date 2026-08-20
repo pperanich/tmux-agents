@@ -13,7 +13,11 @@ use tma_core::evidence::Claim;
 use tma_core::fixture::Fixture;
 use tma_core::manifest::CoverToken;
 use tma_core::snapshot::PaneSnapshot;
-use tma_core::{AgentState, Evaluation, Manifest, RuleEngine};
+use tma_core::stamp::StampedState;
+use tma_core::{
+    verdict, AgentState, Evaluation, FoldConfig, Manifest, Provenance, RuleEngine, SnapshotFacts,
+    Verdict,
+};
 
 const CURSOR_TOML: &str = include_str!("../manifests/cursor.toml");
 
@@ -53,6 +57,48 @@ fn has_state(ev: &Evaluation, state: AgentState) -> bool {
     ev.evidence
         .iter()
         .any(|e| matches!(&e.claim, Claim::State(s) if s.state == state))
+}
+
+/// Run the full detector (engine + fold) on a fixture, as a live producer would. `after_ms` places
+/// the fold clock relative to the capture, so a test can sit either side of the working→idle dwell.
+fn fold_verdict(name: &str, prev: Option<StampedState>, after_ms: u64) -> Verdict {
+    let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
+    let snap = snapshot(&fx);
+    let ev = engine().evaluate(&snap);
+    let facts = SnapshotFacts {
+        pid: 1,
+        foreground_is_agent: true,
+        scrolled: false,
+        history_view: ev.history_view,
+    };
+    verdict(
+        prev,
+        &facts,
+        &ev.evidence,
+        &manifest(),
+        &FoldConfig::default(),
+        snap.captured_at + after_ms,
+    )
+}
+
+/// A screen-stamped `working` prior — the state a pane is pinned at once the turn's chrome leaves
+/// the screen. `Provenance::Capture` (not `Hook`) keeps the fold on the plain ladder, which is the
+/// path that used to dead-end in `hold previous`.
+fn working_prior(now: u64) -> StampedState {
+    StampedState {
+        state: AgentState::Working,
+        detail: None,
+        source: Provenance::Capture,
+        evidence_at: now,
+        since: now,
+        stamped_at: now,
+        attention: false,
+        notified_at: None,
+        hash: None,
+        pid: 1,
+        session: None,
+        subagents: vec![],
+    }
 }
 
 // ---- the manifest shape (live audit) ---------------------------------------------
@@ -269,15 +315,22 @@ Not in allowlist: rm -rf build
     );
 }
 
-// ---- the real idle screen must never read working/blocked (safety) ---------------
+// ---- the real idle screen reads idle, and never working/blocked (safety) ---------
 
 #[test]
 fn idle_screen_never_reads_working_or_blocked_at_wide_and_narrow() {
-    // The real idle composer (`→ Plan, search, build anything`, `Auto`, cwd) matches NONE of the
-    // working/blocked rules (no `ctrl+c to stop`, no approval dialog), so the engine raises no
-    // state evidence — critically it never synthesizes `blocked` from the idle screen (the
-    // forbidden direction). Keeps the rules honest.
-    for name in ["cursor_idle_w100.txt", "cursor_idle_w60.txt"] {
+    // Both idle shapes: the fresh session (`→ Plan, search, build anything`) and a real completed
+    // turn (`→ Add a follow-up`, captured 2026.08.11 for the idle rule). Neither matches the
+    // working or blocked rules (no `ctrl+c to stop`, no approval dialog); both match the idle
+    // rule and nothing else, so the engine raises EXACTLY one claim, `idle` — critically it never
+    // synthesizes `blocked` from the idle screen (the forbidden direction). Keeps the rules
+    // honest.
+    for name in [
+        "cursor_idle_w100.txt",
+        "cursor_idle_w60.txt",
+        "cursor_idle_post_turn_w100.txt",
+        "cursor_idle_post_turn_w60.txt",
+    ] {
         let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
         assert_eq!(fx.agent, "cursor");
         let ev = evaluate(name);
@@ -289,5 +342,125 @@ fn idle_screen_never_reads_working_or_blocked_at_wide_and_narrow() {
             !has_state(&ev, AgentState::Working),
             "{name}: idle chrome must not raise a working claim"
         );
+        assert!(
+            has_state(&ev, AgentState::Idle),
+            "{name}: the composer box must raise an idle claim"
+        );
+        assert_eq!(
+            ev.evidence.len(),
+            1,
+            "{name}: exactly one claim, the idle one"
+        );
     }
+}
+
+// ---- the approval dialog reuses the arrow glyph and must not read idle -----------
+
+#[test]
+fn blocked_screen_raises_no_idle_claim() {
+    // Cursor prefixes its approval options with the SAME glyph as the composer
+    // (`→ Run (once) (y)`), which is exactly why the idle rule requires the surrounding
+    // half-block frame as well: the dialog replaces the composer box outright, so the frame is
+    // absent from both blocked captures.
+    for name in ["cursor_blocked_w100.txt", "cursor_blocked_w60.txt"] {
+        let ev = evaluate(name);
+        assert!(
+            !has_state(&ev, AgentState::Idle),
+            "{name}: the approval option list must not read as the composer"
+        );
+    }
+}
+
+// ---- the pinned-`working` trap: a finished turn now lands ------------------------
+
+#[test]
+fn idle_screen_releases_a_pinned_working_stamp() {
+    // The bug batch B closes, shown on the post-turn captures specifically: with no idle rule a
+    // pane that finished a turn raised nothing, so every later cycle hit `hold previous` and the
+    // row stayed `working` forever.
+    for name in [
+        "cursor_idle_post_turn_w100.txt",
+        "cursor_idle_post_turn_w60.txt",
+    ] {
+        let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
+        let held = fold_verdict(name, Some(working_prior(fx.captured_at)), 1_000);
+        assert_eq!(
+            held.state,
+            AgentState::Working,
+            "{name}: inside the dwell, working→idle is still suppressed"
+        );
+        let landed = fold_verdict(name, Some(working_prior(fx.captured_at)), 10_000);
+        assert_eq!(
+            landed.state,
+            AgentState::Idle,
+            "{name}: past the dwell the composer claim releases the pinned working stamp"
+        );
+    }
+}
+
+// ---- the idle rule co-renders with working, and must lose to it ------------------
+
+#[test]
+fn working_screen_also_matches_the_idle_rule_but_still_folds_working() {
+    // Cursor keeps the composer box on screen for the whole turn — the working captures show
+    // `→ Add a follow-up` inside the frame with `ctrl+c to stop` beside it — so a live turn
+    // raises BOTH claims. That is by design (claude's `⏵⏵` precedent); the fold's slot order is
+    // what resolves it. If this ever folds to idle, the ladder in `fold.rs` has been reordered.
+    for name in ["cursor_working_w100.txt", "cursor_working_w60.txt"] {
+        let ev = evaluate(name);
+        assert!(
+            has_state(&ev, AgentState::Idle),
+            "{name}: the composer box renders mid-turn too"
+        );
+        assert!(has_state(&ev, AgentState::Working), "{name}: working too");
+        let v = fold_verdict(name, None, 10);
+        assert_eq!(
+            v.state,
+            AgentState::Working,
+            "{name}: working outranks the co-rendered idle claim"
+        );
+    }
+}
+
+// ---- the post-turn captures also pin the title finding ---------------------------
+
+#[test]
+fn post_turn_idle_title_is_not_cursor_agent() {
+    // The identity note in the manifest says cursor's OSC title does NOT revert after a turn.
+    // These captures are the evidence: their title is the conversation summary, so the title
+    // pattern must reject it and identity has to lean on the pid-anchored stickiness hold.
+    for name in [
+        "cursor_idle_post_turn_w100.txt",
+        "cursor_idle_post_turn_w60.txt",
+    ] {
+        let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
+        assert_ne!(fx.title, "Cursor Agent", "{name}: the title did not revert");
+        assert!(
+            !engine().title_matches(&fx.title),
+            "{name}: a post-turn title must not satisfy the identity pattern"
+        );
+    }
+}
+
+// ---- idle has a rule but is deliberately not capture-visible ---------------------
+
+#[test]
+fn idle_has_a_rule_but_stays_outside_capture_visible() {
+    let m = manifest();
+    assert_eq!(
+        m.capture.visible,
+        [AgentState::Working, AgentState::Blocked]
+    );
+    assert!(
+        m.rules
+            .iter()
+            .any(|r| r.state == AgentState::Idle && !r.skip_state_update),
+        "cursor ships a positive idle rule"
+    );
+    // The composer box renders mid-turn too, so it is not evidence a turn ENDED and must never be
+    // allowed to decay an idle hook claim.
+    assert!(
+        !m.capture.visible.contains(&AgentState::Idle),
+        "idle has a rule but must stay outside [capture].visible"
+    );
 }

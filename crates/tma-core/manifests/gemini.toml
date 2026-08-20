@@ -150,10 +150,12 @@ claim = { state = "blocked", detail = "permission" }
 # idle is NOT capture-visible: the idle composer (`> Type your message or @path/to/file`) shares
 # its chrome with working, so it carries no state-unique anchor — idle rides the AfterAgent hook.
 # Every visible state has a real fixture (and the idle negatives prove the anchors are
-# state-unique). Both rules scan `Region::Visible`: gemini's approval dialog and thinking footer
-# sit at the END of the conversation content (not pinned to the bottom), so a whole-screen scan
-# is needed, but clamped to the visible screen so `capture-pane -S` scrollback from a prior turn
-# cannot false-match.
+# state-unique). idle has a rule too (bottom of this file) but stays OUT of `visible`: its
+# composer chrome renders mid-turn, so it is not evidence a turn ENDED and must never be allowed
+# to decay an idle hook claim. The rules scan `Region::Visible`: gemini's approval dialog and
+# thinking footer sit at the END of the conversation content (not pinned to the bottom), so a
+# whole-screen scan is needed, but clamped to the visible screen so `capture-pane -S` scrollback
+# from a prior turn cannot false-match.
 [capture]
 visible = ["working", "blocked"]
 
@@ -180,3 +182,24 @@ state = "working"
 priority = 10
 region = "visible"
 match = { contains = "esc to cancel" }
+
+# idle: the composer placeholder (`>   Type your message or @path/to/file`), the hint gemini draws
+# inside its input box. Without a positive idle claim a pane that finished a turn raises no fresh
+# evidence at all, so every later cycle lands on `hold previous` and the row stays pinned at
+# `working` — the SessionStart/Stop hooks cover the transition, but an unwired pane has nothing.
+#
+# The placeholder is present for the whole turn, idle and working alike (verified in
+# gemini_working_w{100,60}.txt, where it sits below `⠏ Thinking... (esc to cancel, 24s)`). That
+# co-render is deliberate and mirrors claude's `⏵⏵` rule: the fold's slot order (blocked → working
+# → idle) keeps the verdict at `working` while the turn runs, and the composer only wins once the
+# thinking footer is gone. Priority sits below the working rule to say the same thing here.
+# The approval dialog replaces the composer entirely, so the anchor is absent from
+# gemini_blocked_w{100,60}.txt — a blocked screen raises no idle claim at all.
+#
+# Note that `idle` stays OUT of [capture].visible: the composer is not evidence a turn ENDED
+# (it renders mid-turn too), so it must never be allowed to decay an idle hook claim.
+[[rules]]
+state = "idle"
+priority = 5
+region = "visible"
+match = { contains = "Type your message or @path/to/file" }

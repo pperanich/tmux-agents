@@ -56,6 +56,12 @@ fn evaluate(name: &str) -> Evaluation {
 
 /// Run the full detector (engine + fold) on a fixture, as a live producer would.
 fn fold_verdict(name: &str, prev: Option<StampedState>) -> Verdict {
+    fold_verdict_at(name, prev, 10)
+}
+
+/// [`fold_verdict`] with the fold clock placed `after_ms` past the capture, so a test can sit
+/// either side of the working→idle dwell.
+fn fold_verdict_at(name: &str, prev: Option<StampedState>, after_ms: u64) -> Verdict {
     let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
     let snap = snapshot(&fx);
     let ev = engine().evaluate(&snap);
@@ -74,8 +80,28 @@ fn fold_verdict(name: &str, prev: Option<StampedState>) -> Verdict {
         &ev.evidence,
         &manifest(),
         &FoldConfig::default(),
-        snap.captured_at + 10,
+        snap.captured_at + after_ms,
     )
+}
+
+/// A screen-stamped `working` prior — the state a pane is pinned at once the turn's chrome leaves
+/// the screen. `Provenance::Capture` (not `Hook`) keeps the fold on the plain ladder, which is the
+/// path that used to dead-end in `hold previous`.
+fn working_prior(now: u64) -> StampedState {
+    StampedState {
+        state: AgentState::Working,
+        detail: None,
+        source: Provenance::Capture,
+        evidence_at: now,
+        since: now,
+        stamped_at: now,
+        attention: false,
+        notified_at: None,
+        hash: None,
+        pid: 1,
+        session: None,
+        subagents: vec![],
+    }
 }
 
 fn has_state(ev: &Evaluation, state: AgentState) -> bool {
@@ -112,10 +138,16 @@ fn bundled_manifest_declares_verified_hook_coverage() {
     assert_eq!(m.identity.process_names, ["codex", "codex-aarch64-a"]);
 
     // The working (streaming) and blocked (approval-prompt) screens were driven live
-    // and captured, so both are capture-visible with real screen rules. Idle stays hook-only.
+    // and captured, so both are capture-visible with real screen rules. Idle now has a screen
+    // rule (the composer arrow) but deliberately stays OUT of `visible`: the composer renders
+    // mid-turn too, so it is not evidence a turn ENDED and must never decay an idle hook claim.
     assert_eq!(
         m.capture.visible,
         [AgentState::Working, AgentState::Blocked]
+    );
+    assert!(
+        !m.capture.visible.contains(&AgentState::Idle),
+        "idle has a rule but must stay outside [capture].visible"
     );
     assert!(
         !m.rules.is_empty(),
@@ -255,16 +287,16 @@ fn blocked_detected_at_wide_and_narrow() {
     }
 }
 
-// ---- the real idle screen must never read as blocked (safety) ----------------------
+// ---- the real idle screen reads idle, and never blocked (safety) -------------------
 
 #[test]
 fn idle_screen_never_reads_as_blocked_at_wide_and_narrow() {
     // The two real idle captures (composer prompt, welcome box, model/effort footer) at the
     // wide and narrow widths driven live. The idle chrome matches NONE of the working/blocked
-    // rules (no `esc to interrupt`, no braille title, no approval dialog), so the engine raises
-    // no state evidence and the fold holds whatever the Stop/notify hook last stamped —
-    // critically it must NEVER synthesize `blocked` from the idle screen (the forbidden
-    // direction). This negative regression keeps the working/blocked rules honest.
+    // rules (no `esc to interrupt`, no braille title, no approval dialog); it matches the idle
+    // rule and nothing else, so the engine raises EXACTLY one claim, `idle` — critically it must
+    // NEVER synthesize `blocked` from the idle screen (the forbidden direction). This negative
+    // regression keeps the working/blocked rules honest.
     for name in ["codex_idle_w100.txt", "codex_idle_w60.txt"] {
         let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
         assert_eq!(fx.agent, "codex");
@@ -273,12 +305,84 @@ fn idle_screen_never_reads_as_blocked_at_wide_and_narrow() {
             !has_state(&ev, AgentState::Blocked),
             "{name}: idle chrome must not raise a blocked claim"
         );
+        assert!(
+            has_state(&ev, AgentState::Idle),
+            "{name}: the composer arrow must raise an idle claim"
+        );
+        assert_eq!(
+            ev.evidence.len(),
+            1,
+            "{name}: exactly one claim, the idle one"
+        );
         // A prior idle notify stamp is held, never flipped to blocked by the idle screen.
         let v = fold_verdict(name, Some(idle_prior(fx.captured_at)));
         assert_ne!(
             v.state,
             AgentState::Blocked,
             "{name}: verdict never blocked"
+        );
+    }
+}
+
+// ---- the approval dialog must not raise an idle claim ------------------------------
+
+#[test]
+fn blocked_screen_raises_no_idle_claim() {
+    // Codex numbers the approval options with the SAME arrow the composer uses
+    // (`› 1. Yes, proceed (y)`). The idle rule's `tail_lines(6)` window is what keeps them
+    // apart: in both blocked captures the nearest `›` is seven rows from the end. If this
+    // fails, widen the guard rather than the window.
+    for name in ["codex_blocked_w100.txt", "codex_blocked_w60.txt"] {
+        let ev = evaluate(name);
+        assert!(
+            !has_state(&ev, AgentState::Idle),
+            "{name}: the approval option list must not read as the composer"
+        );
+    }
+}
+
+// ---- the pinned-`working` trap: a finished turn now lands --------------------------
+
+#[test]
+fn idle_screen_releases_a_pinned_working_stamp() {
+    // The bug batch B closes: with no idle rule the idle screen raised nothing, so every cycle
+    // after a turn hit `hold previous` and the pane stayed `working` forever.
+    for name in ["codex_idle_w100.txt", "codex_idle_w60.txt"] {
+        let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
+        let held = fold_verdict_at(name, Some(working_prior(fx.captured_at)), 1_000);
+        assert_eq!(
+            held.state,
+            AgentState::Working,
+            "{name}: inside the dwell, working→idle is still suppressed"
+        );
+        let landed = fold_verdict_at(name, Some(working_prior(fx.captured_at)), 10_000);
+        assert_eq!(
+            landed.state,
+            AgentState::Idle,
+            "{name}: past the dwell the composer claim releases the pinned working stamp"
+        );
+    }
+}
+
+// ---- the idle rule co-renders with working, and must lose to it --------------------
+
+#[test]
+fn working_screen_also_matches_the_idle_rule_but_still_folds_working() {
+    // Codex keeps the composer on screen under the streaming footer, so the working screen
+    // raises BOTH claims. That is by design (claude's `⏵⏵` precedent); the fold's slot order is
+    // what resolves it. If this ever folds to idle, the ladder in `fold.rs` has been reordered.
+    for name in ["codex_working_w100.txt", "codex_working_w60.txt"] {
+        let ev = evaluate(name);
+        assert!(
+            has_state(&ev, AgentState::Idle),
+            "{name}: the composer renders mid-turn too"
+        );
+        assert!(has_state(&ev, AgentState::Working), "{name}: working too");
+        let v = fold_verdict(name, None);
+        assert_eq!(
+            v.state,
+            AgentState::Working,
+            "{name}: working outranks the co-rendered idle claim"
         );
     }
 }
