@@ -85,13 +85,13 @@ Goal: a changed viewport hash stops being a state claim. It stays a capture-sche
 (`can_reuse_stamp` still reads `p.hash`). Fixes the fabricated `done`, the shadowed working rule,
 and the keyboard-disarmed decay.
 
-**A1 — delete the three producers.** `WIP batch-a-agent`
+**A1 — delete the three producers.** `DONE`
 - `crates/tma-runtime/src/cycle.rs:289-301`, `crates/tma-runtime/src/capture.rs:405-418`,
   `crates/tma-runtime/src/debug.rs:148-160`.
 - `tail_hash` must still flow to the stamp; only the evidence push goes.
 - Accept: no `Source::ActivityDelta` construction remains in the workspace.
 
-**A2 — retire the `Source` variant, keep the `Provenance`.** `WIP batch-a-agent`
+**A2 — retire the `Source` variant, keep the `Provenance`.** `DONE`
 - Remove `Source::ActivityDelta` (`evidence.rs:20`) and its `provenance()` arm (`:32`), and the
   name arms at `fold.rs:454` and `debug.rs:522`.
 - **Keep `Provenance::Activity`, its token, and its `FromStr` arm** (`evidence.rs:44`, `:53`, `:72`).
@@ -100,7 +100,7 @@ and the keyboard-disarmed decay.
 - Keep `provenance_token_roundtrip` (`evidence.rs:165`) intact — it guards that compat.
 - Accept: an existing server carrying `@agent_source=activity` still decodes.
 
-**A3 — re-source the affected tests (mechanical, no coverage lost).** `WIP batch-a-agent`
+**A3 — re-source the affected tests (mechanical, no coverage lost).** `DONE`
 - `fold.rs:725` `blocker_chrome_beats_activity_working` → rename to `..._beats_working_chrome`.
 - `fold.rs:906` `corroborating_evidence_refreshes_hook_and_resets_decay` → `Source::ScreenRule`
   (strictly better: that is the path production actually takes).
@@ -109,7 +109,7 @@ and the keyboard-disarmed decay.
 - `fold.rs:1129` proptest `arb_non_hook_source` → drop the `Just(Source::ActivityDelta)` arm.
 - `evidence.rs:157` `source_folds_to_provenance` → drop only the ActivityDelta assertion.
 
-**A4 — replace, do not delete, the ordering test.** `WIP batch-a-agent`
+**A4 — replace, do not delete, the ordering test.** `DONE`
 - `fold.rs:735` `activity_working_beats_idle_chrome` becomes meaningless once activity is gone, but
   it is the **only** test asserting working-slot-before-idle-slot ordering (`fold.rs:203-217`) — and
   that ordering becomes *more* load-bearing in batch B, where five manifests gain idle chrome that
@@ -118,7 +118,7 @@ and the keyboard-disarmed decay.
   equal `at`, asserting `Working`.
 - ⚠️ Deleting without this replacement is a silent coverage loss. Do not.
 
-**A5 — amend the normative docs.** `WIP batch-a-agent`
+**A5 — amend the normative docs.** `DONE`
 - `docs/internal/REQUIREMENTS.md`: F7 (content-hash becomes a capture-scheduling input, not a
   detection source), F8 (drop "then activity delta ⇒ working" — **this is a spec amendment**),
   and the decay wording at `:75` ("corroborating activity" → "corroborating evidence").
