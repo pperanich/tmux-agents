@@ -7,7 +7,7 @@
 //! Asserts the byte-identical install/uninstall round-trip, tmux-hook install, and that
 //! `--check` detects a deleted tmux hook.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use common::{scratch_tmux, unique_id};
@@ -142,24 +142,60 @@ impl Scratch {
     /// inherited `PATH` stays behind it: tma still has to find `tmux`.
     fn path_with_wrapper_dir(&self) -> String {
         let dir = self.wrapper().parent().unwrap().display().to_string();
-        match Self::path_without_wrapper() {
+        match self.path_without_wrapper() {
             rest if !rest.is_empty() => format!("{dir}:{rest}"),
             _ => dir,
         }
     }
 
-    /// The inherited `PATH` with every directory holding a `tma-hook` dropped, so a bare reference
-    /// does NOT resolve. A developer running the suite usually has tma installed for real, and that
-    /// copy would otherwise answer for the one under test.
-    fn path_without_wrapper() -> String {
+    /// The inherited `PATH` with `tma-hook` made unresolvable, so a bare reference does NOT
+    /// resolve. A developer running the suite usually has tma installed for real, and that copy
+    /// would otherwise answer for the one under test.
+    ///
+    /// Each offending directory is replaced IN PLACE by a scratch mirror of symlinks to everything
+    /// it holds except `tma-hook`, rather than being dropped. Dropping was the obvious move and it
+    /// was wrong: it assumes one binary per directory. A nix profile
+    /// (`/etc/profiles/per-user/<user>/bin`) aggregates every installed tool into ONE directory, so
+    /// on a machine where tma is installed that way, dropping it to hide `tma-hook` took `tmux`
+    /// down with it and the install tests failed with "tmux is not installed or not on PATH" —
+    /// exactly what the doc comment above promises will still work. Homebrew's `/opt/homebrew/bin`
+    /// and `~/.cargo/bin` share the shape.
+    fn path_without_wrapper(&self) -> String {
         let inherited = std::env::var_os("PATH").unwrap_or_default();
-        let kept: Vec<_> = std::env::split_paths(&inherited)
-            .filter(|dir| !dir.join("tma-hook").exists())
+        let kept: Vec<PathBuf> = std::env::split_paths(&inherited)
+            .enumerate()
+            .map(|(i, dir)| {
+                if dir.join("tma-hook").exists() {
+                    self.mirror_without_wrapper(&dir, i)
+                } else {
+                    dir
+                }
+            })
             .collect();
         std::env::join_paths(kept)
             .expect("rejoin PATH")
             .to_string_lossy()
             .into_owned()
+    }
+
+    /// A scratch directory symlinking every entry of `dir` except `tma-hook`. Falls back to the
+    /// original path if the mirror cannot be built — better a test that fails loudly on a stray
+    /// real `tma-hook` than one that silently loses `tmux`.
+    fn mirror_without_wrapper(&self, dir: &Path, index: usize) -> PathBuf {
+        let mirror = self.workdir.join(format!("pathmirror/{index}"));
+        if std::fs::create_dir_all(&mirror).is_err() {
+            return dir.to_path_buf();
+        }
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return dir.to_path_buf();
+        };
+        for entry in entries.flatten() {
+            if entry.file_name() == "tma-hook" {
+                continue;
+            }
+            let _ = std::os::unix::fs::symlink(entry.path(), mirror.join(entry.file_name()));
+        }
+        mirror
     }
 }
 
@@ -1096,7 +1132,7 @@ fn bare_wrapper_ref_refuses_when_it_is_not_on_path() {
 
     // The wrapper's directory is a fresh temp dir, and any real tma-hook the developer has
     // installed is stripped out, so the name resolves nowhere.
-    let path = Scratch::path_without_wrapper();
+    let path = s.path_without_wrapper();
     let out = s.install_hooks_env(
         &["claude", "--yes", "--wrapper-ref", "bare"],
         &[("PATH", path.as_str())],
