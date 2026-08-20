@@ -653,13 +653,13 @@ displays the pane **and** its last input is strictly later than the raise.
 - Adding a key is compat-safe (options are keyed by name; positional layout is per-invocation, not a
   wire format). Add it to `REMOVABLE` (`render.rs:541`) or uninstall leaves it behind.
 
-**E2 — verify the control-mode alert-suppression footgun.** `OPEN (deferred)`
+**E2 — verify the control-mode alert-suppression footgun.** `WIP e23-agent`
 - Claim: an attached control-mode client counts as a viewer, so tma's daemon may be silently
   clearing the user's own tmux activity/silence alert flags for the current window of each monitored
   session. **Not reproduced** in our probe (the test control client never attached). Verify properly,
   and if real, decide whether to document or avoid.
 
-**E3 — dead code.** `OPEN (deferred)`
+**E3 — dead code.** `WIP e23-agent`
 - `Source::ProcessFact` is declared (`evidence.rs:20` neighbourhood) and produced nowhere.
 - `#{alternate_on}` is read into `PaneSnapshot` and consumed only by a debug line, while every agent
   pane is alt-screen — which is why the `scroll_position` freeze has no coverage over in-app
