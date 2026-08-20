@@ -3,7 +3,7 @@
 //! fixture form, explain prints the fold's reasoning.
 
 use tma_core::engine::region_label;
-use tma_core::evidence::{Claim, Evidence, Source, StateClaim};
+use tma_core::evidence::{Claim, Evidence, Source};
 use tma_core::snapshot::{PaneSnapshot, ProcInfo};
 use tma_core::stamp::{opt, StampedState};
 use tma_core::{
@@ -145,22 +145,7 @@ pub fn observe<'a>(
     let (evaluation, evidence, facts, verdict) = match &identified {
         Some(id) => {
             let evaluation = id.manifest.engine.evaluate(&snapshot);
-            let mut evidence = evaluation.evidence.clone();
-            // Activity-delta evidence: a changed viewport hash vs the stamped baseline is
-            // working evidence. Only meaningful when a prior hash exists.
-            if let Some(prev) = &prev {
-                if prev.hash.is_some_and(|h| h != snapshot.tail_hash) {
-                    evidence.push(Evidence {
-                        source: Source::ActivityDelta,
-                        claim: Claim::State(StateClaim {
-                            state: AgentState::Working,
-                            detail: None,
-                        }),
-                        at: snapshot.captured_at,
-                        meta: "viewport hash changed since last stamp".to_string(),
-                    });
-                }
-            }
+            let evidence = evaluation.evidence.clone();
             let facts = SnapshotFacts {
                 pid: id.agent_pid,
                 foreground_is_agent: id.foreground_is_agent,
@@ -519,7 +504,6 @@ fn source_token(s: Source) -> &'static str {
         Source::HookEvent => "hook",
         Source::ScreenRule => "screen",
         Source::Title => "title",
-        Source::ActivityDelta => "activity",
         Source::ProcessFact => "process",
     }
 }
@@ -549,6 +533,7 @@ pub(crate) fn fnv1a64(bytes: &[u8]) -> u64 {
 mod tests {
     use super::*;
     use tma_core::engine::RuleReport;
+    use tma_core::evidence::StateClaim;
     use tma_core::manifest::Region;
     use tma_core::verdict::{WinningEvidence, WritePlan};
     use tma_core::{Detail, Provenance, WriteAction};

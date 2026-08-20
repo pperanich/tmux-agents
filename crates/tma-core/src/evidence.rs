@@ -15,8 +15,6 @@ pub enum Source {
     ScreenRule,
     /// The pane title carried recognizable chrome (spinner / idle marker).
     Title,
-    /// The viewport content-hash changed between cycles ⇒ activity.
-    ActivityDelta,
     /// A process-tree fact (pid present/gone, foreground command).
     ProcessFact,
 }
@@ -28,7 +26,6 @@ impl Source {
         match self {
             Source::HookEvent => Provenance::Hook,
             Source::ScreenRule | Source::Title => Provenance::Capture,
-            Source::ActivityDelta => Provenance::Activity,
             Source::ProcessFact => Provenance::Process,
         }
     }
@@ -41,6 +38,8 @@ impl Source {
 pub enum Provenance {
     Hook,
     Capture,
+    /// Legacy, no longer produced: a viewport hash change used to count as working evidence.
+    /// Kept so a running tmux server carrying `@agent_source=activity` still decodes.
     Activity,
     Process,
 }
@@ -164,7 +163,6 @@ mod tests {
         assert_eq!(Source::HookEvent.provenance(), Provenance::Hook);
         assert_eq!(Source::ScreenRule.provenance(), Provenance::Capture);
         assert_eq!(Source::Title.provenance(), Provenance::Capture);
-        assert_eq!(Source::ActivityDelta.provenance(), Provenance::Activity);
         assert_eq!(Source::ProcessFact.provenance(), Provenance::Process);
     }
 

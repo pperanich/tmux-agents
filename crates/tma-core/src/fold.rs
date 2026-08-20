@@ -6,7 +6,7 @@
 //! Precedence: (1) a fresh hook event this cycle bypasses all; (2) foreground cap — non-agent
 //! foreground ⇒ `unknown`, unless a live hook claim covers a pane whose agent process is still
 //! alive; (3) freeze (scrolled / history view) holds without touching the screen; (4) the
-//! screen/activity/title order against the persisted claim.
+//! screen/title order against the persisted claim.
 
 use crate::evidence::{Claim, Evidence, Provenance, Source};
 use crate::manifest::Manifest;
@@ -171,7 +171,7 @@ pub fn verdict(
         return hold(prev_ref, why, episode_reset, now);
     }
 
-    // Precedence 4 — screen/activity/title order. Blocker chrome is a `blocked` claim from a
+    // Precedence 4 — screen/title order. Blocker chrome is a `blocked` claim from a
     // screen rule *or* the title (both fold to `capture`); accepting only `ScreenRule` here
     // silently dropped a `blocked` rule on `region = "title"`, so the three slots stay symmetric.
     let claims = ScreenClaims {
@@ -241,7 +241,7 @@ struct ScreenClaims<'a> {
     idle: Option<&'a Evidence>,
 }
 
-/// Fold fresh screen/activity evidence against a protected hook claim (`p.state` is
+/// Fold fresh screen evidence against a protected hook claim (`p.state` is
 /// working, idle, or blocked).
 fn fold_against_hook(
     p: &StampedState,
@@ -451,7 +451,6 @@ fn source_name(s: Source) -> &'static str {
         Source::HookEvent => "hook",
         Source::ScreenRule => "screen",
         Source::Title => "title",
-        Source::ActivityDelta => "activity",
         Source::ProcessFact => "process",
     }
 }
@@ -722,9 +721,9 @@ mod tests {
     // ---- Rule 2: evidence order -------------------------------------------------
 
     #[test]
-    fn blocker_chrome_beats_activity_working() {
+    fn blocker_chrome_beats_working_chrome() {
         let evidence = [
-            ev(Source::ActivityDelta, AgentState::Working, 10),
+            ev(Source::ScreenRule, AgentState::Working, 10),
             ev(Source::ScreenRule, AgentState::Blocked, 10),
         ];
         let v = run(None, facts(), &evidence, 20);
@@ -732,10 +731,12 @@ mod tests {
     }
 
     #[test]
-    fn activity_working_beats_idle_chrome() {
+    fn working_chrome_beats_coexisting_idle_chrome() {
+        // A manifest whose idle chrome is still on screen while the agent works (claude's `⏵⏵`
+        // sits under the spinner). Equal timestamps, so only the slot order can decide.
         let evidence = [
             ev(Source::ScreenRule, AgentState::Idle, 10),
-            ev(Source::ActivityDelta, AgentState::Working, 10),
+            ev(Source::Title, AgentState::Working, 10),
         ];
         let v = run(None, facts(), &evidence, 20);
         assert_eq!(v.state, AgentState::Working);
@@ -900,10 +901,10 @@ mod tests {
 
     #[test]
     fn corroborating_evidence_refreshes_hook_and_resets_decay() {
-        // Working activity consistent with a working hook advances evidence_at, keeping
+        // Working chrome consistent with a working hook advances evidence_at, keeping
         // source = hook (so the decay clock restarts).
         let prev = Some(stamp(AgentState::Working, Provenance::Hook, 10));
-        let evidence = [ev(Source::ActivityDelta, AgentState::Working, 95)];
+        let evidence = [ev(Source::ScreenRule, AgentState::Working, 95)];
         let v = run(prev, facts(), &evidence, 100);
         assert_eq!(v.state, AgentState::Working);
         assert_eq!(v.writes.action, WriteAction::Publish);
@@ -977,7 +978,7 @@ mod tests {
     #[test]
     fn idle_to_working_is_immediate() {
         let prev = Some(stamp(AgentState::Idle, Provenance::Capture, 100));
-        let evidence = [ev(Source::ActivityDelta, AgentState::Working, 101)];
+        let evidence = [ev(Source::ScreenRule, AgentState::Working, 101)];
         let v = run(prev, facts(), &evidence, 101);
         assert_eq!(v.state, AgentState::Working);
         assert_eq!(v.writes.action, WriteAction::Publish);
@@ -1050,7 +1051,7 @@ mod tests {
     fn pid_change_is_episode_boundary() {
         let mut prev = stamp(AgentState::Blocked, Provenance::Hook, 50);
         prev.pid = 999; // different from facts().pid
-        let evidence = [ev(Source::ActivityDelta, AgentState::Working, 100)];
+        let evidence = [ev(Source::ScreenRule, AgentState::Working, 100)];
         let v = run(Some(prev), facts(), &evidence, 100);
         // Prior discarded: fresh working publishes, and the reset flag is set.
         assert_eq!(v.state, AgentState::Working);
@@ -1126,7 +1127,6 @@ mod tests {
         prop_oneof![
             Just(Source::ScreenRule),
             Just(Source::Title),
-            Just(Source::ActivityDelta),
             Just(Source::ProcessFact),
         ]
     }

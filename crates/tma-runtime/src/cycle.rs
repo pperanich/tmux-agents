@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
-use tma_core::evidence::{Claim, Evidence, Provenance, Source, StateClaim};
+use tma_core::evidence::Provenance;
 use tma_core::render;
 use tma_core::snapshot::{PaneSnapshot, ProcInfo};
 use tma_core::stamp::opt;
@@ -285,20 +285,7 @@ pub fn run_cycle(
         };
 
         let evaluation = id.manifest.engine.evaluate(&snapshot);
-        let mut evidence = evaluation.evidence.clone();
-        if let Some(p) = &prev {
-            if p.hash.is_some_and(|h| h != tail_hash) {
-                evidence.push(Evidence {
-                    source: Source::ActivityDelta,
-                    claim: Claim::State(StateClaim {
-                        state: AgentState::Working,
-                        detail: None,
-                    }),
-                    at: now,
-                    meta: "viewport hash changed since last stamp".to_string(),
-                });
-            }
-        }
+        let evidence = evaluation.evidence.clone();
         let facts = SnapshotFacts {
             pid: id.agent_pid,
             foreground_is_agent: id.foreground_is_agent,
