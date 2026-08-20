@@ -490,6 +490,61 @@ Control mode provides, as push:
 Activity events are rate-limited into an edge signal (active/quiet per pane, with a
 quiet threshold) rather than processed per-event, bounding daemon CPU (N4).
 
+### Known cost: the control client counts as a viewer (E2)
+
+`tmux -C attach-session` is a *real* attach, not an observer connection. Measured on
+tmux 3.6a over an isolated socket (`-L tma-e2probe -f /dev/null`), spawned with pipes
+and no tty exactly as `control.rs` does:
+
+```
+list-clients -F …   name=client-87900 ctrl=1 tty= sess=A size=80x
+                    flags=attached,focused,control-mode,UTF-8
+```
+
+`#{session_attached}` goes 0 → 1 and `#{window_active_clients}` 0 → 1 on the session's
+current window. tmux arms an alert flag only for a winlink that is *not* the current
+window of an attached session, so on the **current window of a session with no other
+client** the flags stop arming while the daemon runs:
+
+| current window, `monitor-*` on                          | no client | one `tmux -C` client |
+| ------------------------------------------------------- | --------- | -------------------- |
+| output → `#{window_activity_flag}`                       | 1         | 0                    |
+| quiet past `monitor-silence` → `#{window_silence_flag}`   | 1         | 0                    |
+| BEL → `#{window_bell_flag}`                              | 1         | 0                    |
+
+Background windows are unaffected (all three still read 1). A flag that was *already*
+set is cleared by the attach. The effect is exactly as long-lived as the client: kill
+it and the next event arms the flag again.
+
+**No mitigation exists at the tmux level.** All measured, all still suppress:
+`attach-session -f read-only`, `-f ignore-size`, `-f no-output`, and the three
+together; `activity-action` and `silence-action` set to `any` or `current` do not
+re-arm the flag either, because the gate sits upstream of the action. tmux has no
+client flag for "attach without counting as a viewer". The only lever is not
+attaching, i.e. running daemonless and accepting the latency in the capability table
+below. The client is load-bearing (`%output` is the hookless quiet-edge source), so
+this is an accepted cost, recorded here rather than worked around.
+
+How much it actually costs a user:
+
+- **Nothing while they are attached.** Their own client already makes
+  `session_attached ≥ 1`, and tmux suppresses that session's current-window flags on
+  its own; the daemon's client adds no change there.
+- **On a detached session, only the outside view changes.** A real re-attach clears
+  those same flags anyway (measured), so nothing the user would have seen on return is
+  lost. What is lost is the flag read from outside the session while it stays
+  detached: `choose-tree`, `list-windows`, a status line that iterates other sessions,
+  a script polling `#{window_activity_flag}`.
+- **`destroy-unattached on` is neutralised** for every monitored session (measured:
+  the session survives with only the `-C` client, and dies the instant that client
+  exits). Sharp edge: stopping the daemon then destroys all of them at once.
+- **No resize.** A 200x50 session stays 200x50 after a `-C` attach under the default
+  `window-size latest`, with or without `ignore-size`.
+
+Related and already handled: the same clients would have caused a fleet-wide false
+attention clear, which `tma-core/src/seen.rs` prevents by filtering on
+`#{client_control_mode}` (batch D). This section is the other half of the phenomenon.
+
 ## Fallback detection (capture on demand)
 
 The phase-1 manifest detector is unchanged as a library (D7) but is now *triggered*:

@@ -93,6 +93,15 @@ Established with live probes; cited so no agent burns time rediscovering them.
   a second `tmux` invocation costs a full extra round trip.
 - Idle fixtures already exist at both widths for all five manifests
   (`crates/tma-core/fixtures/{codex,cursor,gemini,opencode,pi}_idle_w{60,100}.txt`).
+- **A `tmux -C` client is a real viewer** (E2, tmux 3.6a, pipes and no tty as `control.rs`
+  spawns it): `session_attached` 0→1, `window_active_clients` 0→1,
+  `flags=attached,focused,control-mode`. On the **current window of a session with no other
+  client** it suppresses `window_activity_flag`, `window_silence_flag` **and**
+  `window_bell_flag`, and clears one already set. Background windows are unaffected.
+  `destroy-unattached` also stops firing for that session. No `attach-session -f` flag
+  (`read-only`, `ignore-size`, `no-output`, all three) and no `activity-action`/`silence-action`
+  value re-arms the flag: the gate is upstream of the action. No size effect. Full write-up in
+  DAEMON.md, "Known cost: the control client counts as a viewer".
 
 ---
 
@@ -653,11 +662,19 @@ displays the pane **and** its last input is strictly later than the raise.
 - Adding a key is compat-safe (options are keyed by name; positional layout is per-invocation, not a
   wire format). Add it to `REMOVABLE` (`render.rs:541`) or uninstall leaves it behind.
 
-**E2 — verify the control-mode alert-suppression footgun.** `WIP e23-agent`
+**E2 — verify the control-mode alert-suppression footgun.** `DONE`
 - Claim: an attached control-mode client counts as a viewer, so tma's daemon may be silently
   clearing the user's own tmux activity/silence alert flags for the current window of each monitored
-  session. **Not reproduced** in our probe (the test control client never attached). Verify properly,
-  and if real, decide whether to document or avoid.
+  session. The earlier probe never got its control client attached, so the claim was unverified.
+- **Outcome: real, reproduced, documented, no behaviour change.** The earlier probe's client had not
+  attached; with stdin held open (pipes, no tty, exactly `control.rs`) it attaches every time. Bell
+  is affected as well as activity and silence, which the claim did not mention. See the new fact in
+  §1 and DAEMON.md, "Known cost: the control client counts as a viewer" (measurements, materiality,
+  and the four mitigations that were tried and failed).
+- Materiality is narrow and that is why the daemon is unchanged: while the user is attached their own
+  client already suppresses those flags, and a real re-attach clears them anyway, so the loss is only
+  the outside view of a still-detached session (`choose-tree`, `list-windows`, a polling script).
+  The sharper edge is `destroy-unattached`, which never fires while the daemon runs.
 
 **E3 — dead code.** `WIP e23-agent`
 - `Source::ProcessFact` is declared (`evidence.rs:20` neighbourhood) and produced nowhere.

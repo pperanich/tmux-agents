@@ -460,6 +460,12 @@ Control-mode feature floor probed at runtime (N10); degrade path is the reconcil
 sweep at higher frequency. Rejected: control mode in one-shots (connection setup cost
 and complexity for no win) and subprocess polling in the daemon (defeats its purpose).
 
+Accepted cost of that pool, measured and not fixable at the tmux level: each `-C`
+client is a real attach, so for every monitored session tmux stops arming the
+activity, silence and bell flags on the *current* window and `destroy-unattached`
+never fires. Full measurements and the mitigations that were tried and failed are in
+DAEMON.md, "Known cost: the control client counts as a viewer".
+
 ## AD7 — Crate layout: layered workspace, one binary
 
 Amended by the layered-workspace restructure (RD1–RD5). The
