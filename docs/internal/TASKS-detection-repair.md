@@ -575,7 +575,7 @@ displays the pane **and** its last input is strictly later than the raise.
 
 ---
 
-**D6 — clear the R-D findings.** `WIP d6-agent`
+**D6 — clear the R-D findings.** `DONE`
 - F1: the D4 ordering (clear strictly after `dispatch_notify`) is held by source order and a comment
   only — R-D moved the clear above the dispatch and the whole `tma-daemon` suite still passed.
   Add a `notify_integration.rs` case with a real client on the pane and a guaranteed sweep inside
@@ -600,6 +600,41 @@ displays the pane **and** its last input is strictly later than the raise.
   warn against.
 - For E2: F2 is direct evidence that tma's control clients are real attached clients on the current
   window of every monitored session — exactly the alert-suppression question E2 defers.
+
+**D6 outcome**:
+- **F1 is the one that needed building, and the obvious test does not work.** The daemon dispatches
+  on EVERY wake — a bare poll timeout reconciles the pool and dirties the status — so a marker
+  raised between two sweeps is notified hundreds of ms before the sweep that clears it, and the
+  order never decides anything. Measured, under the reorder: fire at `t+244 ms`, `sweeps` unchanged,
+  clear at `t+855 ms`. The collision has to be staged: SIGSTOP the daemon across an out-of-band
+  raise, SIGCONT, and its next iteration runs the overdue sweep and the dispatch back to back —
+  the only place their order is observable. The pane runs `sleep`, so the client's keystrokes
+  produce no pane output and never wake the daemon's control client (that wake was what made the
+  first attempt pass under the reorder).
+  `a_done_marker_the_user_typed_past_still_fires_before_it_is_cleared`, in `notify_integration.rs`:
+  **verified RED with the two blocks swapped** (sink empty, 0 fires, 47 s to the ceiling) and green
+  3 runs in a row as shipped. It also pins the clear itself (`@agent_attention` must still come
+  down afterwards), so a clear that never runs fails it too.
+- **F2 re-verified on an isolated 3.6a socket**, not taken on R-D's word: two sessions, one
+  `sleep 60 | tmux -C attach-session -t <s>` each, `list-clients` reports one client per session,
+  `cm=1`, `pane_id` = that session's current-window active pane (it followed a `select-window`),
+  `client_activity` = attach time. The reason is now in the `seen` module doc, both `ClientView`
+  field docs, `read.rs`, the ARCHITECTURE bullet, and a unit case whose fixture is the daemon's own
+  client — mutation-checked: dropping `!c.control_mode` fails it (and the `-CC` case) and nothing
+  else.
+- **F3 probed, and the finding is slightly sharper than stated.** `client_activity` moves for the
+  focus-report bytes whether `focus-events` is on or OFF (a client's tty read is a client's tty
+  read); the setting governs whether the terminal ever SENDS them, since tmux only emits DECSET 1004
+  when it is on. Wording widened accordingly in `seen.rs`, `detection-model.md`,
+  `install-agent-hooks.md`, ARCHITECTURE and the CHANGELOG (which said "keystroke" too, and is
+  user-facing). No code change: alt-tab counts as leaving, which batch C already decided is seen.
+- F4/nits as specified. `clear_seen_rows` now takes the caller's `raised_panes` result (one call,
+  no unread count). No `-F` guard, for R-D's reasons, now written down.
+- Suite: 1220 → **1222 passing, 0 failed** (`cargo fmt --all --check` clean, clippy silent). The two
+  additions are the ordering integration case and the daemon-control-client unit case.
+- Worth a reviewer's eye: the new case is the only test in the tree that signals the daemon with
+  STOP/CONT. If it ever hangs, that is where to look — `signal_daemon` is shared with the SIGHUP
+  helper, and `DaemonGuard` SIGKILLs on drop, which reaps a stopped child too.
 
 ---
 
