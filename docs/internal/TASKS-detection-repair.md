@@ -70,9 +70,21 @@ Established with live probes; cited so no agent burns time rediscovering them.
 - **A control-mode client's `client_activity` freezes at attach time.** Any ordered-input test is a
   no-op for iTerm2 `-CC` users. Filter clients on `#{client_control_mode}`.
 - At `after-select-pane` hook time, `#{P:#{?pane_last,#{pane_id},}}` already names the **departed**
-  pane. At `after-select-window`, `#{W:#{?window_last_flag,#{P:#{?pane_active,#{pane_id},}},}}`
+  pane. On a window change, `#{W:#{?window_last_flag,#{P:#{?pane_active,#{pane_id},}},}}`
   names the departed window's active pane. Verified on tmux 3.6a, key-driven and out-of-band.
   Target aliases (`-t '{last}'`) are **not** reliable at hook time — use formats.
+- **Resolve that window format on `session-window-changed`, never on `after-select-window`** (C6).
+  tmux runs `after-select-window` even for a `select-window` onto the window you are already in, and
+  `window_last_flag` is stale there — it names whatever window was left however long ago, and the
+  whole expansion resolves in the *client's* session rather than the selected one. There is no
+  format that says "the current window really changed": `session_set_current` updates `lastw` only
+  on a genuine switch and returns early otherwise, so the arrival window reads `window_last_flag=0`
+  either way. `session-window-changed` is emitted only on a real change (4 no-ops, 0 firings,
+  attached and detached), and additionally covers `new-window` and a current-window `kill-window`.
+  Re-selecting the already-active PANE fires no hook at all, so that arm needs no equivalent.
+- `#{window_active}` is per session — each session's current window reads `1` regardless of which
+  session tmux would call current — and it resolves from a window target or a pane target alike.
+  It is what lets a caller skip a `select-window` that would change nothing.
 - `#{hook_pane}` and `#{hook_client}` expand **empty** on `after-select-pane` / `after-select-window`.
   `#{pane_id}` resolves correctly there. (This was the `ef12d02` bug.)
 - `#{pane_unseen_changes}` means "output arrived while the pane was in copy-mode". It is **not** a
@@ -321,7 +333,7 @@ preserved structurally: walking away means not navigating, so no hook fires.
   `docs/explanation/detection-model.md`, `docs/internal/ARCHITECTURE.md`, `docs/internal/DAEMON.md`.
 - Note that users must re-run `tma install-hooks` to pick it up.
 
-**C6 — repair the R-C failure: a no-op `select-window` over-clears.** `WIP c6-agent`
+**C6 — repair the R-C failure: a no-op `select-window` over-clears.** `DONE`
 - R-C returned **FAIL**. `select-window -t <the already-current window>` DOES fire
   `after-select-window` on 3.6a, and at that moment `window_last_flag` still names whatever window
   the user left however long ago — so batch C's departure format clears `@agent_attention` on a pane
@@ -387,8 +399,65 @@ preserved structurally: walking away means not navigating, so no hook fires.
   pane departed slightly later, never one never departed).
 - Suite: 1194 → 1201 passing, 0 failed.
 
+**C6 outcome** (for the re-run of R-C):
+- **Defect reproduced first**, on an isolated socket, before anything was changed: three `SW` lines
+  where the third is a `select-window` of the already-current window reporting a departed pane.
+- **The general fix is a different hook, not a memo.** tmux's control-mode notifications are also
+  hook names (man page, HOOKS: *"All the notifications listed in the CONTROL MODE section are
+  hooks"*), and `session-window-changed` is emitted only when a session's current window really
+  changed. The `@tma_focus_window` memo R-C sketched was NOT built: it has a hole the probes found
+  first — `new-window` moves a session's current window with no `after-select-window` at all, so the
+  memo goes stale and the very next no-op is mis-detected as genuine. The notification hook has no
+  such hole because tmux maintains the fact, not us.
+- **Probe evidence, tmux 3.6a.** Detached, out-of-band: 4 no-op `select-window`s fired
+  `after-select-window` every time, `session-window-changed` zero times; every genuine change fired
+  both. Attached and key-driven through a pty client (`prefix 1`, `prefix n`, `prefix c`): same
+  result, and `prefix c` (new-window) fires `session-window-changed` with the departed window's
+  active pane, which `after-select-window` never saw at all — so leaving a window by creating one
+  now clears it. `kill-window` of the current window fires it with an EMPTY departure (`Ok(None)`,
+  no clear). Format context at hook time is the CHANGED session's, `#{pane_id}` is the arrival pane.
+  Detach/reattach fires nothing; `attach -t <sess>:<win>` fires it with the previous window departed.
+- **A worse cross-session face of the same bug, found while probing**: on a no-op `select-window` in
+  `s1`, `after-select-window` expands in the CLIENT's session (`s2`) — arrival pane, departed pane
+  and all — so today's code could clear a flag in a session the navigation never touched. Gone with
+  the hook, since `session-window-changed` never fires for a no-op.
+- **Retired, not merely dropped.** `install_tmux_hooks` removes tma's `after-select-window` entry
+  (ours-only, by content), and `DepartureKind::from_hook_name` no longer maps that name — so a hook
+  string surviving on a server, or hand-wired from the old docs, can only do the arrival clear,
+  which is the pre-C behaviour. Two independent layers, either alone sufficient.
+- **`Tmux::focus` short-circuit shipped too**, as R-C proved it: `display-message -p -t <window>
+  '#{window_active}'` is per-session (verified across two sessions with neither attached), and the
+  `select-window` is skipped when it reads `1`. tma therefore stops firing anyone else's
+  `after-select-window` on a jump that moves nothing.
+- **Tests, each verified to FAIL on the pre-C6 tree** (source reverted, tests kept):
+  `a_no_op_window_selection_leaves_the_window_you_left_alone` (fails at its liveness assertion),
+  `the_retired_window_hook_can_only_clear_the_pane_you_arrived_at` (fails with the defect verbatim:
+  *"a retired hook string still on the server cleared %1"*), `departing_a_window_clears_the_pane_it_was_showing`
+  (retargeted), `jump_within_the_current_window_does_not_reselect_it`,
+  `install_retires_the_window_hook_it_replaced`, plus a `from_hook_name` unit test. The witness
+  pattern is kept and extended: because the correct behaviour for a no-op is that NO hook runs, the
+  no-op test proves liveness with a genuine switch afterwards instead of a witness pane.
+- **One test rewritten, deliberately, not weakened**: `each_hook_renders_its_own_command` asserted
+  every hook renders a distinguishable command, for a stated reason that R-C showed is false (two
+  identical strings read as CURRENT, not drift) and that is now unsatisfiable (two kindless hooks
+  render identically). It is `each_hooks_command_carries_exactly_its_own_kind`, which pins each
+  command completely — kind-carrying hooks name themselves and stay pairwise distinct, kindless ones
+  carry no kind at all — so it is strictly stronger than what it replaced.
+- Comment fixes: `read.rs` departure race (one-directional on the pane arm ONLY; a programmatic
+  `select-pane` can move a background window's active pane), `read.rs` untargeted `display-message`
+  (arbitrary, not determinate), `install.rs` distinctness reason (CURRENT, not drift).
+- Suite: 1201 → **1206 passing, 0 failed** (`cargo fmt --all --check` clean, clippy silent).
+
+**Known gap, recorded for batch D/E, not a defect of C:** `switch-client` fires neither focus hook
+(verified: `switch-client -t s2` from a client on `s1` produced nothing), so departing a whole
+SESSION while an agent is finishing there leaves exactly the residue seen-on-leave set out to kill.
+Batch D's ordered-input clear does not reach it either — the user is by then typing in a different
+session. If it is worth closing, `client-session-changed` is the hook that fires, and the departed
+session's current window's active pane is what it would have to resolve.
+
 > **Review gate R-C.** Focus: can a departure clear a pane the user never saw? Does an old binary
 > survive the new hook string? Are all three replacement tests present?
+> **First pass: FAIL** — the no-op `select-window` over-clear above; repaired in C6, re-run needed.
 
 ---
 
