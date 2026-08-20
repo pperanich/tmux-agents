@@ -49,8 +49,10 @@ fidelity:
 2. **Screen chrome.** Capturing the pane and matching its on-screen text against
    the agent's manifest rules. This is how a hookless agent, or a missed hook,
    still gets detected.
-3. **Process and activity facts.** The process walk (is the agent still alive?),
-   output activity (is the pane producing bytes?), and the pane title.
+3. **Process facts and the pane title.** The process walk (is the agent still
+   alive?) and the OSC title the agent publishes. Output activity is not on this
+   list: a pane producing bytes tells the daemon *when to look*, not what state
+   to report.
 
 They are combined by a deterministic fold, not a probabilistic fusion. The
 sources have a natural strict ranking, and the verdict has to be *explainable*
@@ -59,7 +61,7 @@ be both unnecessary and opaque. The order the fold applies is:
 
 1. a fresh hook event from a registered pane;
 2. visible blocker chrome on the live viewport;
-3. activity, which means `working`;
+3. visible working chrome, which means `working`;
 4. visible idle chrome, which means `idle`;
 5. otherwise hold the previous state, or `unknown`.
 

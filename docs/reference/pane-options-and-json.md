@@ -42,7 +42,7 @@ options carry rollups and hints.
 |---|---|---|
 | `@agent_name`, `@agent_pid` | pane | identity (pid: process-group leader found by the walk) |
 | `@agent_state`, `@agent_detail` | pane | the verdict (state) and its detail token |
-| `@agent_source` | pane | provenance of the current state: `hook` / `capture` / `activity` / `process` |
+| `@agent_source` | pane | provenance of the current state: `hook` / `capture` / `process`. `activity` is a legacy value still accepted on read; nothing produces it any more (a viewport hash change stopped being state evidence) |
 | `@agent_evidence_at` | pane | epoch **ms** of the evidence behind the current state |
 | `@agent_since` | pane | epoch **ms** of the state transition, written once by the first producer to record it and never rewritten while state is unchanged (the one exception is a value stranded ahead of `@agent_stamped_at` by a backward clock step) |
 | `@agent_stamped_at` | pane | per-pane freshness marker, written last in a chained stamp |
@@ -308,7 +308,7 @@ Each `agents` element carries this exact key set:
 |---|---|---|
 | `pane`, `agent`, `locator` | string | the pane, its agent name, and `session:window.pane` |
 | `state` | string or null | the stamped state token, `null` when the pane has none |
-| `source` | string or null | provenance of that state (`hook` / `capture` / `activity` / `process`) |
+| `source` | string or null | provenance of that state (`hook` / `capture` / `process`; `activity` is legacy, read-only) |
 | `evidence_age_ms` | number or null | age of the evidence behind it |
 | `hook_status` | string | `wired`, `incomplete`, `not_installed`, `hookless`, or `no_adapter` |
 | `hooks_wired` | boolean | `true` only for `wired`, so a consumer needs no token table for the common question |

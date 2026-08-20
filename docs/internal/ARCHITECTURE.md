@@ -135,7 +135,7 @@ verdicts (`tma debug explain` must say *which rule/event decided*).
 
 ```rust
 Evidence {
-  source:   HookEvent | ScreenRule | Title | ActivityDelta | ProcessFact,
+  source:   HookEvent | ScreenRule | Title | ProcessFact,
   claim:    StateClaim { state, detail },        // or lifecycle claims (agent start/end)
   at:       Timestamp,                            // injected, never read from a clock (D7)
   meta:     rule id / hook name / matcher — for explain output
@@ -284,7 +284,7 @@ emoji string in the option and reverse-maps it to an enum.
   this paragraph is the spec.
 
   Rules, all enforced via such guards, never via producer-side reads:
-  1. Hook-sourced state is overwritten by a capture/activity producer only when the
+  1. Hook-sourced state is overwritten by a capture producer only when the
      guard passes: source is not `hook`, OR the evidence is process-level (pid gone),
      OR the hook claim has aged past its freshness window *and* the state is
      capture-visible (AD2 coverage-aware decay). Round-2 carve-out, made precise in

@@ -55,11 +55,13 @@ captured evidence (see D10, X3).
 - **F7** MUST detect state from these evidence sources: live-viewport text
   (`capture-pane -p -e`), pane title (`#{pane_title}`, carries agent OSC titles —
   verified: Claude Code publishes `✳ <task>` idle / `⠐ <task>` braille-spinner working),
-  viewport content-hash delta between cycles, `#{window_activity}`, and pane flags
-  (`#{alternate_on}`, `#{scroll_position}`).
+  `#{window_activity}`, and pane flags (`#{alternate_on}`, `#{scroll_position}`).
+  The viewport content-hash delta between cycles is a **capture-scheduling input**, not a
+  detection source: an unchanged hash lets a cycle reuse the stored stamp, but a changed one
+  makes no state claim of its own (amended; it used to claim `working`).
 - **F8** MUST arbitrate sources in a fixed, documented order. Baseline: fresh agent hook
-  event (F26) beats everything; then visible blocker chrome; then activity delta ⇒
-  working; then visible idle chrome ⇒ idle; else hold previous state (stateful) or
+  event (F26) beats everything; then visible blocker chrome; then visible working
+  chrome ⇒ working; then visible idle chrome ⇒ idle; else hold previous state (stateful) or
   report `unknown` (one-shot). Hook-event authority MUST decay, but decay is
   coverage-aware: a stale hook claim is expired by *process* evidence (pid gone) for
   any state, and by *screen* evidence only for states the agent's manifest declares
@@ -72,7 +74,7 @@ captured evidence (see D10, X3).
   race; a hook claim older loses with no decay wait). Stated identically in AD4 and
   DAEMON.md. Coverage gating protects only the flips D1 tolerates.
   Freshness-window defaults (config-overridable, previously unspecified):
-  `working`/`idle` hook claims decay after 60 s without corroborating activity;
+  `working`/`idle` hook claims decay after 60 s without corroborating evidence;
   `blocked` hook claims decay only after 300 s, and only against positive contrary
   chrome on a manifest that declares `blocked` capture-visible (silence never expires
   one). Process evidence and a fresh hook event expire any claim at any age.

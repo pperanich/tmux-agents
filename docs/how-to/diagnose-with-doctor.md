@@ -82,7 +82,7 @@ Each agent pane gets a header line and one or more continuation lines:
 ```
 
 The header is pane id, agent, locator, tier, and the current stamp: state, the
-evidence source it came from (`hook`, `capture`, `activity`, or `process`), and
+evidence source it came from (`hook`, `capture`, or `process`), and
 how long ago that evidence was taken. A pane with no decodable stamp reads
 `unstamped`.
 

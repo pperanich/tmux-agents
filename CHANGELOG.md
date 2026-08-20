@@ -12,6 +12,16 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Fixed
 
+- A pane whose screen merely changed is no longer reported as `working`. Every cycle hashes the
+  viewport, and a hash differing from the stamped one used to be pushed as working evidence in its
+  own right. It carried the same timestamp as the manifest's own rules and was appended after them,
+  so on a tie it won, and `@agent_source` then blamed `activity` for verdicts a screen rule had
+  actually made. Worse, it outranked real idle chrome: typing at a finished prompt corroborated the
+  stuck `working` claim and postponed the decay that would have recovered it, so the check mark you
+  were waiting for arrived only once you stopped touching the pane. The hash keeps its real job,
+  deciding whether a cycle can skip the capture and reuse the stored stamp, and no longer claims
+  anything about state. Panes stamped `@agent_source=activity` by an older build still decode, and
+  the next verdict re-sources them.
 - The attention flag is cleared again when you select an agent's pane. The two always-on tmux hooks
   ran `tma clear-attention '#{hook_pane}'`, but tmux populates `hook_pane` only on the
   notify-pane-style hooks; on `after-select-pane` and `after-select-window` it expands empty, and an

@@ -423,7 +423,7 @@ statements rather than inference. Revised arbitration order (amends F8):
 
 1. hook event (fresh, from a registered agent pane)
 2. visible blocker chrome on the live viewport
-3. activity evidence ⇒ working
+3. visible working chrome ⇒ working
 4. visible idle chrome ⇒ idle
 5. hold previous state / `unknown`
 
