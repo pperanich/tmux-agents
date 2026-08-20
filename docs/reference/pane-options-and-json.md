@@ -47,6 +47,7 @@ options carry rollups and hints.
 | `@agent_evidence_at` | pane | epoch **ms** of the evidence behind the current state |
 | `@agent_since` | pane | epoch **ms** of the state transition, written once by the first producer to record it and never rewritten while state is unchanged (the one exception is a value stranded ahead of `@agent_stamped_at` by a backward clock step) |
 | `@agent_stamped_at` | pane | per-pane freshness marker, written last in a chained stamp |
+| `@agent_hash` | pane | scheduling only, and **its value is not interpreted**: a hash of the last captured viewport whose PRESENCE means "this pane's screen has been read at least once", which is all any reader checks before reusing a stored stamp. Nothing compares two hashes, a changed one makes no claim about state, and the algorithm is not part of this contract. Treat it as a boolean; absent on a pane detected purely from hooks |
 | `@agent_attention` | pane | presentation flag: value `1` when set, option absent otherwise. Cleared by the focus hooks (the pane arrived at, the pane departed) and by the poll cycle when a client displaying the pane was typed into after `@agent_since` |
 | `@agent_notified_at` | pane | notification-episode marker, written only by the notifier |
 | `@agent_session` | pane | owning agent session id from hook registration; the subagent guard compares incoming event session ids against this |
