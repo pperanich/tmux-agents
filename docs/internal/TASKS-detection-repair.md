@@ -228,7 +228,7 @@ idle AND working/blocked fixtures):
 > real capture at two widths? Did any never-false-block assertion get dropped or softened? Does any
 > new idle rule match its own agent's *working* fixture in a way that outranks working?
 
-**B6 — clear the R-B findings.** `WIP b6-agent`
+**B6 — clear the R-B findings.** `DONE`
 - One functional finding, six documentation/coverage ones.
 - ⚠️ **Finding 1 (functional).** gemini's idle anchor is the composer PLACEHOLDER, which gemini draws
   only while the composer is EMPTY. A pane holding a draft loses the anchor and falls back to
@@ -245,6 +245,33 @@ idle AND working/blocked fixtures):
   `opencode.toml:61-68` (stale "idle carries no rule" note), `gemini.toml:149-150` ("no state-unique
   anchor" contradicts the rule below it), `codex.toml:193-194` (measured distances wrong),
   `codex.toml:199-200` (overstates the `not` leaf's precision).
+
+**B6 outcome.** All seven cleared; suite 1192 → 1194, 0 failed.
+- Finding 1: a draft-robust anchor DOES exist, so the placeholder is gone. gemini's idle rule is now
+  `line_regex '^\s*▀{10,}\s*$'` on `tail_lines(8)`: the composer box's bottom edge, which is
+  draft-independent because the box grows UPWARD as its content wraps while its bottom edge stays
+  pinned above the two-row `workspace / sandbox / model` footer.
+  **The window is the safety, not the glyph.** Measured distance from the last captured row to that
+  edge: 5 (idle_w100), 6 (idle_w60), 4 (working_w100), 5 (working_w60) — window 8, so two extra
+  footer rows still match. Distance to the nearest `▀` on a blocked screen: 23 (blocked_w100),
+  26 (blocked_w60) — a 15-row margin. Structurally the margin cannot close: gemini's approval dialog
+  replaces the composer AND the footer and is itself eleven rows tall, so a transcript echo cannot
+  reach the bottom eight rows even flush against them.
+  R-B's suggested `visible`-region frame rule was confirmed unsafe and NOT applied; it is now a
+  control arm inside `blocked_screen_raises_no_idle_claim`, asserting that the same leaf on
+  `visible` does match both blocked captures. That is the guard against anyone widening the region.
+- Finding 5 plus one more: `blocked_screen_raises_no_idle_claim` and
+  `idle_rule_survives_a_non_empty_composer` (splices a two-row draft over the placeholder in the
+  real idle captures). Both mutation-checked: reverting the region to `visible` fails only the
+  first, reverting the anchor to the placeholder fails only the second.
+- Findings 2/6/7: `codex_manifest.rs` and `codex.toml` no longer disagree. The `› <n>. ` option row
+  is at exactly 6, INSIDE `tail_lines(6)`; the `not` leaf is the guard, the window is the
+  transcript-echo filter. Real echo distances are 10/14 (working) and 20/21 (blocked), floor ten,
+  not fourteen. The `not` leaf's false negative (a draft beginning `1. `) is now stated.
+- Findings 3/4: the stale "idle carries no rule" notes in `opencode.toml` and `gemini.toml` are
+  rewritten, following pi.toml's precedent.
+- Doc sites naming the old gemini anchor were corrected too: `DAEMON.md:301`,
+  `agent-coverage.md:314`, and the `## [Unreleased]` CHANGELOG entry.
 
 ---
 
