@@ -777,7 +777,7 @@ displays the pane **and** its last input is strictly later than the raise.
   nothing else, and that what keeps that survivable is manifests anchoring on bottom-pinned chrome.
   Also recorded at REQUIREMENTS appendix A, next to the alt-screen observation that causes it.
 
-**E4 — delete `Source::ProcessFact`.** `OPEN`
+**E4 — delete `Source::ProcessFact`.** `WIP e4-agent`
 - Decided in E3, blocked there only by file contention with E1. Six sites in three files, mechanical:
   `crates/tma-core/src/evidence.rs:19` (the variant and its doc comment), `:29` (the `provenance()`
   arm), `:166` (the assertion in `source_folds_to_provenance`), `crates/tma-core/src/fold.rs:454`
