@@ -787,6 +787,108 @@ pub(crate) struct StampArgs {
 mod tests {
     use super::*;
 
+    /// The row key a supervisor loop must feed back into `wait --since`, named in one place so the
+    /// three descriptions of it cannot drift apart. `wait::Goal::matches` compares
+    /// `AgentRow::episode_at()`, which `surfaces` emits as this key.
+    const SINCE_FEEDBACK_KEY: &str = "episode_ms";
+
+    /// The key `--since` is compared against is described in THREE places — clap's `--help`, the
+    /// `cli.md` flag table, and the `sed` recipes users copy out of the how-tos — and nothing tied
+    /// them together. That is not hypothetical: `wait --since` was changed to compare `episode_ms`
+    /// while every surface still emitted `since_ms`, the how-to recipes kept feeding `since_ms`
+    /// back, and the documented supervisor loop spun through its whole queue instead of blocking
+    /// once per episode. The recipes were fixed; the `--help` text was missed and shipped for a
+    /// release saying the opposite, because a user reading `tma wait --help` never sees `cli.md`.
+    ///
+    /// A "does this key exist" test would NOT have caught either one: `since_ms` is a perfectly
+    /// real key. Only agreement between the three catches it, so that is what this pins.
+    #[test]
+    fn every_description_of_the_since_floor_names_the_same_row_key() {
+        use clap::CommandFactory;
+
+        // 1. clap's rendered help — the surface a user reads instead of the docs site.
+        let mut help = Vec::new();
+        Cli::command()
+            .find_subcommand_mut("wait")
+            .expect("wait subcommand")
+            .write_long_help(&mut help)
+            .expect("render help");
+        let help = String::from_utf8(help).expect("utf8 help");
+        let since_help = help
+            .split("--since")
+            .nth(1)
+            .expect("--since is documented in wait's help");
+        // Take the flag's own paragraph, not the whole tail of the help.
+        let since_help: String = since_help.chars().take(400).collect();
+        // `contains` is NOT enough, and this is the trap the first version of this test fell into:
+        // the shipped-wrong help said "`since_ms` must be strictly greater — NOT `episode_ms`",
+        // which mentions the right key while instructing the wrong one. Pin the INSTRUCTION.
+        assert!(
+            since_help.contains(&format!("own `{SINCE_FEEDBACK_KEY}`")),
+            "`tma wait --help` must tell the user to feed back the row's own \
+             `{SINCE_FEEDBACK_KEY}`, or a user who never opens cli.md writes the spinning \
+             loop. If you reworded it, update this pin only after confirming the meaning \
+             survived:\n{since_help}"
+        );
+        assert!(
+            !since_help.contains("own `since_ms`"),
+            "`tma wait --help` instructs feeding back `since_ms`, which the row already \
+             clears — every lap re-satisfies instead of blocking:\n{since_help}"
+        );
+
+        // 2. the cli.md flag table row.
+        let cli_md = include_str!("../../../docs/reference/cli.md");
+        let since_row = cli_md
+            .lines()
+            .find(|l| l.contains("`--since <EPOCH_MS>`"))
+            .expect("cli.md documents --since");
+        assert!(
+            since_row.contains(SINCE_FEEDBACK_KEY),
+            "cli.md's --since row must name `{SINCE_FEEDBACK_KEY}`:\n{since_row}"
+        );
+        assert!(
+            !since_row.contains("Feed back `since_ms`"),
+            "cli.md's --since row instructs feeding back `since_ms`:\n{since_row}"
+        );
+
+        // 3. every `sed` recipe in the how-tos that extracts a floor to feed back. These are the
+        //    lines users copy verbatim, so a rename here is silent until someone's loop misbehaves.
+        let recipes = [
+            (
+                "block-a-script-on-agent-state.md",
+                include_str!("../../../docs/how-to/block-a-script-on-agent-state.md"),
+            ),
+            (
+                "custom-actions.md",
+                include_str!("../../../docs/how-to/custom-actions.md"),
+            ),
+        ];
+        let mut found = 0;
+        for (name, body) in recipes {
+            // The recipes read `sed 's/.*"<key>":\([0-9]*\).*/\1/'`; pull out <key>.
+            let needle = "sed 's/.*\"";
+            for line in body.lines().filter(|l| l.contains(needle)) {
+                let rest = &line[line.find(needle).expect("checked by filter") + needle.len()..];
+                let key = rest
+                    .split('"')
+                    .next()
+                    .unwrap_or_else(|| panic!("{name}: unparsable sed recipe: {line}"));
+                assert_eq!(
+                    key, SINCE_FEEDBACK_KEY,
+                    "{name} tells users to feed back `{key}`, but `wait --since` compares \
+                     `{SINCE_FEEDBACK_KEY}` — feeding a key the row already clears re-satisfies \
+                     on every lap instead of blocking"
+                );
+                found += 1;
+            }
+        }
+        assert!(
+            found >= 2,
+            "expected the supervisor-loop recipe in both how-tos; found {found}. If a recipe moved, \
+             point this test at it rather than deleting the guard"
+        );
+    }
+
     /// The global `--client` reads one canonical field before or after the subcommand: `tma --client
     /// X jump` and `tma jump --client X` must parse identically (a per-subcommand copy used to shadow
     /// it and mis-target the Enter-jump's `switch-client`).
