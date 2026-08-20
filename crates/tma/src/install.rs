@@ -1476,6 +1476,34 @@ mod tests {
         }
     }
 
+    /// `pane-focus-out` is the one hook that would close the session-departure gap, and the one
+    /// that must never be installed. Unlike every other refusal in this module, refusing the NAME
+    /// buys nothing: the hook fires with `#{pane_id}` already naming the departed pane, so the
+    /// plain arrival clear would clear it with no `DepartureKind` involved. The refusal has to live
+    /// here, at the install set. Reasons, all measured on 3.6a and recorded in ARCHITECTURE.md:
+    /// tmux suppresses the notification whenever another attached client still has that window
+    /// current — including the control-mode client the daemon parks on every monitored session, so
+    /// the clear would be inert exactly where tma is most instrumented; the same edge fires on a
+    /// clean detach and on every overlay, `prefix-a`'s own `display-popup` included; and below
+    /// tmux 3.3 it is not emitted at all unless `focus-events` is on.
+    #[test]
+    fn pane_focus_out_is_not_a_hook_tma_installs() {
+        const NAME: &str = "pane-focus-out";
+        for focus_events in [false, true] {
+            assert!(
+                !desired_hooks(focus_events).contains(&NAME),
+                "installing {NAME} clears the pane you detached from and the pane you opened a \
+                 popup over, and does nothing at all while the daemon holds a control client on \
+                 the session. Read the doc comment above and ARCHITECTURE.md before adding it"
+            );
+        }
+        assert!(
+            !ALL_TMUX_HOOKS.contains(&NAME),
+            "{NAME} is not ours to touch: the uninstall sweep walks these names and strips any \
+             entry that looks like ours, and this is a hook users legitimately wire themselves"
+        );
+    }
+
     #[test]
     fn each_hooks_command_carries_exactly_its_own_kind() {
         let bin = Path::new("/opt/tma/tma");

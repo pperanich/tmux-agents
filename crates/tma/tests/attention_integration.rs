@@ -271,6 +271,20 @@ fn select_pane(s: &Scratch, pane: &str) {
     assert!(s.tmux(&["select-pane", "-t", pane]).status.success());
 }
 
+/// The name of the one attached client, for the `-c` of a `switch-client` / `detach-client`. Every
+/// caller has just attached one and needs to act on it by name, since these servers grow a second
+/// (control-mode) client in one test.
+fn attached_client(s: &Scratch) -> String {
+    let name = String::from_utf8_lossy(&s.tmux(&["list-clients", "-F", "#{client_name}"]).stdout)
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    assert!(!name.is_empty(), "need the attached client's name");
+    name
+}
+
 /// Raise the flag on `pane`, run `nav`, and wait until `witness`'s flag comes off — proving the hook
 /// ran to completion. Without that witness a "the flag survived" assertion passes whenever the hook
 /// silently did nothing, which is the failure mode these tests exist to catch. Returns whether
@@ -665,12 +679,12 @@ fn a_flag_raised_after_the_departure_survives() {
 }
 
 /// Leaving a whole SESSION is the one departure scope tma deliberately does not clear, and this is
-/// the guard on that decision. `client-session-changed` is the only notification tmux emits for a
-/// client changing session, and it fires even for `switch-client -t <the session you are already
-/// on>`, where `client_last_session` still names a session left however long ago — the same shape
-/// as the retired `after-select-window`, with no second hook to escape to this time. So the name
-/// maps to no departure, and a hook string someone wires onto it by hand can only clear the pane it
-/// arrived at.
+/// one of the three guards on that decision (the others are `pane_focus_out_is_not_a_hook_tma_installs`
+/// and the two `pane-focus-out` characterisation tests below). `client-session-changed` fires even
+/// for `switch-client -t <the session you are already on>`, where `client_last_session` still names
+/// a session left however long ago — the same shape as the retired `after-select-window`. So the
+/// name maps to no departure, and a hook string someone wires onto it by hand can only clear the
+/// pane it arrived at.
 ///
 /// Driven through the real hook with a real PTY client, because that is what makes the test
 /// non-vacuous: the client genuinely switched from `s1` to `s2`, so `client_last_session` really
@@ -691,11 +705,11 @@ fn a_hand_wired_session_hook_can_only_clear_the_pane_you_arrived_at() {
     let watched = s.get("s1:0.0", "#{pane_id}");
     let arrival = s.get("s2:0.0", "#{pane_id}");
 
-    // An attach is ITSELF a `client-session-changed`, and its firing reaches the hook through
-    // tmux's global notification queue, which is not ordered against a command this process sends
-    // on its own client queue — so installing the hook after the attach still races it. Install
-    // first and use that firing: a sentinel on the pane the attach arrives at, waited out, is
-    // positive proof the hook is wired and quiet before the part under test begins.
+    // An attach is ITSELF a `client-session-changed`. Installing the hook BEFORE the attach turns
+    // that into a free liveness sentinel: the flag below must come off the pane the attach arrives
+    // at, which is positive proof the hook is wired and firing before the part under test begins.
+    // Installing afterwards would prove nothing until the switch, and may also race the attach's
+    // own firing through tmux's notification queue.
     install_hook(&s, "client-session-changed");
     s.set_opt(&watched, "@agent_attention", "1");
     match s.attach_client("s1") {
@@ -715,10 +729,7 @@ fn a_hand_wired_session_hook_can_only_clear_the_pane_you_arrived_at() {
         "precondition: attaching fires the hook and clears the pane it arrives at, and nothing \
          below is meaningful until that firing has been consumed"
     );
-    let client = String::from_utf8_lossy(&s.tmux(&["list-clients", "-F", "#{client_name}"]).stdout)
-        .trim()
-        .to_string();
-    assert!(!client.is_empty(), "need the attached client's name");
+    let client = attached_client(&s);
 
     // `arrival` is the witness: the arrival clear must take its flag down, or a hook that silently
     // did nothing would pass this test.
@@ -735,5 +746,165 @@ fn a_hand_wired_session_hook_can_only_clear_the_pane_you_arrived_at() {
          hook fires with a STALE `client_last_session` on a no-op `switch-client -t <current \
          session>`, which is what tma's own `Tmux::focus` issues on every same-session jump. Read \
          `DepartureKind::from_hook_name` and ARCHITECTURE.md before making this pass"
+    );
+}
+
+// ---- why `pane-focus-out` is not the answer to the session gap ------------------------
+
+/// `pane-focus-out` is the hook the session-departure gap keeps almost being closed with, and on a
+/// default server it looks perfect: on `focus-events off` it fires on a genuine session switch and
+/// on none of the three no-ops, naming the departed pane straight in `#{pane_id}`. This test pins
+/// the first of the two measured reasons tma still does not install it.
+///
+/// A clean `detach-client` fires the same edge. Detaching is the "leave it running and come back
+/// tomorrow" flow the done mark exists for, and wiring the hook would take the mark down on the way
+/// out — while a client that is KILLED rather than detached leaves it standing, so the behaviour
+/// would also differ between closing your terminal and losing your ssh connection. Nothing at hook
+/// time separates a detach from a session switch: both are one `server_client_set_session` call.
+///
+/// The assertion is positive (the flag must COME OFF), so it cannot pass vacuously: a hook that
+/// never fired would leave the flag up and fail here.
+#[test]
+fn a_hand_wired_focus_out_hook_clears_a_pane_you_only_detached_from() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let mut s = Scratch::new("focusoutdetach");
+    assert!(s
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
+        .status
+        .success());
+    let watched = s.get("s1:0.0", "#{pane_id}");
+    match s.attach_client("s1") {
+        AttachOutcome::Attached => {}
+        AttachOutcome::NoPython => {
+            eprintln!("skipping: python3 unavailable for the PTY attach");
+            return;
+        }
+        AttachOutcome::Failed => {
+            panic!("PTY client failed to attach after python3 ran (regression, not env)")
+        }
+    }
+    let client = attached_client(&s);
+    // Installed AFTER the attach, unlike the `client-session-changed` guard above, and for the
+    // opposite reason: an attach fires `pane-focus-in`, and a hook already on the server when the
+    // client arrives leaves a `clear-attention` in flight that can land after the flag goes up and
+    // take the credit the detach is supposed to earn. Installing here means the detach is the only
+    // thing that can have fired.
+    install_hook(&s, "pane-focus-out");
+    s.set_opt(&watched, "@agent_attention", "1");
+    assert_eq!(
+        s.pane_option(&watched, "@agent_attention"),
+        "1",
+        "precondition: the flag must still be up going into the detach"
+    );
+    assert!(s.tmux(&["detach-client", "-t", &client]).status.success());
+    assert!(
+        tma_test_support::wait_until(tma_test_support::POLL_CEILING, || s
+            .pane_option(&watched, "@agent_attention")
+            .is_empty()),
+        "a `pane-focus-out` hook did NOT clear {watched} on detach. If tmux stopped firing that \
+         edge on `server_client_set_session(c, NULL)`, one of the two reasons the session gap \
+         stays open has gone away and the decision is worth reopening — see ARCHITECTURE.md"
+    );
+}
+
+/// The second measured reason, and the decisive one: tmux fires `pane-focus-out` only when NO
+/// attached client still has that window current. A control-mode client counts as an attached,
+/// focused viewer (E2), and tma's daemon parks exactly one on every monitored session — so the
+/// session-departure clear would be silently inert for daemon users while the pane and window
+/// clears kept working. A departure rule whose existence depends on whether the daemon is running
+/// is not a rule that can be written down.
+///
+/// Liveness is proved the C6 way rather than with a witness pane: the correct behaviour under the
+/// control client is that no hook runs at all, so nothing about that half can distinguish "wired
+/// and suppressed" from "not wired". The second switch, after the control client is gone, is the
+/// proof — it must clear.
+#[test]
+fn a_control_mode_client_suppresses_the_session_departure_focus_out() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let mut s = Scratch::new("focusoutctrl");
+    for name in ["s1", "s2"] {
+        assert!(s
+            .tmux(&["new-session", "-d", "-s", name, "exec sleep 100000"])
+            .status
+            .success());
+    }
+    let watched = s.get("s1:0.0", "#{pane_id}");
+    match s.attach_client("s1") {
+        AttachOutcome::Attached => {}
+        AttachOutcome::NoPython => {
+            eprintln!("skipping: python3 unavailable for the PTY attach");
+            return;
+        }
+        AttachOutcome::Failed => {
+            panic!("PTY client failed to attach after python3 ran (regression, not env)")
+        }
+    }
+    let client = attached_client(&s);
+    // After the attach, for the reason spelled out in the detach test above.
+    install_hook(&s, "pane-focus-out");
+
+    // The daemon's shape: `tmux -C attach-session -t <session>`, no tty. stdin stays a live pipe
+    // (control mode reads commands from it and exits on EOF); stdout goes to null rather than a
+    // pipe nobody drains, so a chatty server cannot wedge the client on a full buffer.
+    let mut control = Command::new("tmux")
+        .args(["-L", &s.socket, "-C", "attach-session", "-t", "s1"])
+        .env_remove("TMUX")
+        .env_remove("TMUX_PANE")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .expect("spawn control-mode client");
+    assert!(
+        tma_test_support::wait_until(tma_test_support::POLL_CEILING, || {
+            s.get("s1:0.0", "#{session_attached}") == "2"
+        }),
+        "precondition: the control client must count as a second attached viewer of s1"
+    );
+
+    s.set_opt(&watched, "@agent_attention", "1");
+    assert!(s
+        .tmux(&["switch-client", "-c", &client, "-t", "s2"])
+        .status
+        .success());
+    assert!(
+        !tma_test_support::wait_until(std::time::Duration::from_millis(600), || s
+            .pane_option(&watched, "@agent_attention")
+            .is_empty()),
+        "tmux fired `pane-focus-out` for {watched} while a control client was still viewing s1. \
+         That is the opposite of what E2 and `window_pane_update_focus` say, and it would make \
+         `pane-focus-out` a live candidate for the session gap again — reopen the decision"
+    );
+
+    // Liveness: the same switch, with nothing else viewing s1, must clear.
+    assert!(s
+        .tmux(&["switch-client", "-c", &client, "-t", "s1"])
+        .status
+        .success());
+    let _ = control.kill();
+    let _ = control.wait();
+    assert!(
+        tma_test_support::wait_until(tma_test_support::POLL_CEILING, || {
+            s.get("s1:0.0", "#{session_attached}") == "1"
+        }),
+        "the control client must be gone before the liveness half"
+    );
+    s.set_opt(&watched, "@agent_attention", "1");
+    assert!(s
+        .tmux(&["switch-client", "-c", &client, "-t", "s2"])
+        .status
+        .success());
+    assert!(
+        tma_test_support::wait_until(tma_test_support::POLL_CEILING, || s
+            .pane_option(&watched, "@agent_attention")
+            .is_empty()),
+        "the hook never fired even with s1 unwatched, so the suppression assertion above proved \
+         nothing: this test would have passed vacuously"
     );
 }

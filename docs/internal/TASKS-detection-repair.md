@@ -93,6 +93,25 @@ Established with live probes; cited so no agent burns time rediscovering them.
   a second `tmux` invocation costs a full extra round trip.
 - Idle fixtures already exist at both widths for all five manifests
   (`crates/tma-core/fixtures/{codex,cursor,gemini,opencode,pi}_idle_w{60,100}.txt`).
+- **Session-change hook facts** (F/F2, tmux 3.6a unless noted). `client-session-changed` fires
+  exactly ONCE per switch, in the ARRIVAL session's context; an attach is itself a
+  `client-session-changed` (`cmd_attach_session` → `server_client_set_session`), which is why a
+  probe that installs its hook before attaching reads two firings and misdiagnoses the second;
+  `client_last_session` is STALE on `switch-client -t <the session you are already on>`, because
+  `server_client_set_session` updates `last_session` only under `c->session != s` but notifies
+  unconditionally (identical in 3.2).
+- **`pane-focus-out` also fires on a session change**, and the record used to deny it. Measured
+  with `focus-events` OFF (the default), isolated socket, real PTY client: it fires on a genuine
+  `switch-client` in BOTH directions naming the departed pane in `#{pane_id}`, and on none of the
+  three no-ops (pane, window, session). It ALSO fires on a clean `detach-client` (not on a killed
+  client), and on every overlay — `display-menu`, `display-popup`, `display-panes` — because
+  `server_client_set_overlay` calls `window_update_focus` ungated. It does NOT fire while any other
+  attached client still has that window current, control-mode clients included, which is both a
+  safety property and what makes it inert under tma's daemon. With `focus-events on` it adds every
+  pane switch, every window switch, and the terminal's own focus-loss report. Nested tmux
+  propagates it only when the INNER server has `focus-events on`. Below tmux 3.3 it is not emitted
+  at all without `focus-events on` (3.2 `server-client.c:1368` runs the focus scan behind
+  `if (focus)`; 3.3 moved focus to event call sites). Full write-up in ARCHITECTURE.md.
 - **A `tmux -C` client is a real viewer** (E2, tmux 3.6a, pipes and no tty as `control.rs`
   spawns it): `session_attached` 0→1, `window_active_clients` 0→1,
   `flags=attached,focused,control-mode`. On the **current window of a session with no other
@@ -457,12 +476,14 @@ preserved structurally: walking away means not navigating, so no hook fires.
   (arbitrary, not determinate), `install.rs` distinctness reason (CURRENT, not drift).
 - Suite: 1201 → **1206 passing, 0 failed** (`cargo fmt --all --check` clean, clippy silent).
 
-**Known gap, recorded for batch D/E, not a defect of C:** `switch-client` fires neither focus hook
-(verified: `switch-client -t s2` from a client on `s1` produced nothing), so departing a whole
-SESSION while an agent is finishing there leaves exactly the residue seen-on-leave set out to kill.
-Batch D's ordered-input clear does not reach it either — the user is by then typing in a different
-session. If it is worth closing, `client-session-changed` is the hook that fires, and the departed
-session's current window's active pane is what it would have to resolve.
+**Known gap, recorded for batch D/E, not a defect of C — SETTLED in batch F, re-settled in F2:**
+departing a whole SESSION while an agent is finishing there leaves exactly the residue seen-on-leave
+set out to kill, and batch D's ordered-input clear does not reach it either (the user is by then
+typing in a different session). C's reading of the mechanism was wrong twice and both corrections
+are below: `switch-client` does NOT fire "neither focus hook" — it fires `client-session-changed`,
+and `session-window-changed` too when it changes the target session's current window (C7), and
+`pane-focus-out` as well (F2). The decision is WONTFIX; see batch F, batch F2, and ARCHITECTURE.md
+under "the session departure that stays open".
 
 > **Review gate R-C.** Focus: can a departure clear a pane the user never saw? Does an old binary
 > survive the new hook string? Are all three replacement tests present?
@@ -970,10 +991,10 @@ re-running the same experiment with the hook installed after the attach, and by 
   (`cmd-switch-client.c:137-144`), so it holds across the supported range. A
   `switch-client -t <the session you are already on>` therefore fires the hook with a
   `client_last_session` naming a session left however long ago. **This is C6's defect verbatim, one
-  scope up** — and this time there is no second hook to escape to: `client-session-changed` is the
-  only notification tmux emits for a client changing session (every `notify_client` /
-  `notify_session` call site in 3.6a was read), and nothing in the hook-time format vocabulary says
-  "the session really changed".
+  scope up**, and nothing in the hook-time format vocabulary says "the session really changed".
+  ⚠️ **F also claimed `client-session-changed` was the only notification a session change emits.
+  That is FALSE — `pane-focus-out` fires too. Batch F2 measured it and re-decided on that basis;
+  read F2 before building on anything in this outcome note.**
 - **Measured, not argued.** On an isolated 3.6a socket with a real pty client, the departure clear
   wired up for real (the shipped hook-string shape, `TMA_HOOK_KIND=client-session-changed`, the live
   binary, `from_hook_name` temporarily mapping the name): a genuine `s1 → s2` switch correctly
@@ -1023,8 +1044,10 @@ re-running the same experiment with the hook installed after the attach, and by 
   `after-select-window` paragraph it parallels.
 - `a_hand_wired_session_hook_can_only_clear_the_pane_you_arrived_at`
   (`crates/tma/tests/attention_integration.rs`), the C6 shape: a real PTY client attached to `s1`,
-  the real hook string installed on `client-session-changed` AFTER the attach (the attach is itself
-  a firing), a real `switch-client -t s2`. The arrival pane is the WITNESS — its flag must come off,
+  the real hook string installed on `client-session-changed` BEFORE the attach — the attach is
+  itself a firing, so it doubles as a liveness sentinel that has to be consumed before the part
+  under test begins (the F3 outcome originally recorded this backwards; R-F 2) — then a real
+  `switch-client -t s2`. The arrival pane is the WITNESS — its flag must come off,
   so a hook that silently did nothing fails instead of passing. **Mutation-checked**: adding a
   `SessionChange` arm with the format above turns it red with the defect named. Non-vacuous by
   construction, since the client genuinely switched and `client_last_session` really names `s1`.
@@ -1059,7 +1082,7 @@ nothing else, naming the departed pane directly in `#{pane_id}` with no nested f
 reproduce. Whatever the outcome, batch F's false claim has to come out of all five places it was
 written, because the obvious probe falsifies it in seconds.
 
-**F2-1 — resolve the asymmetry and characterise the hook.** `WIP f2-agent`
+**F2-1 — resolve the asymmetry and characterise the hook.** `DONE`
 - Reconcile R-F's "one direction produced no `pane-focus-out`" against the follow-up probe's "both
   directions fired". One of the two mis-measured; which one changes the answer.
 - Full characterisation, `focus-events` OFF **and** ON: every navigation kind (pane, window, no-op
@@ -1071,7 +1094,7 @@ written, because the obvious probe falsifies it in seconds.
   (default off). Weigh it against R-D finding 3: with `focus-events on` the focus-report bytes
   already move `client_activity`, so alt-tabbing already clears a marker today via batch D.
 
-**F2-2 — decide, on the measurements.** `WIP f2-agent`
+**F2-2 — decide, on the measurements.** `DONE`
 - Wire it, or keep the gap. Both are legitimate; the decision record must rest on measured
   behaviour, and must state explicitly what changes for a `focus-events on` user vs a default user.
 - If wired: batch C's bar. Enumerate and prove every firing path clears only a pane the user saw;
@@ -1083,7 +1106,7 @@ written, because the obvious probe falsifies it in seconds.
   `a_hand_wired_session_hook_can_only_clear_the_pane_you_arrived_at` to cover `pane-focus-out`,
   which otherwise guards half the door.
 
-**F2-3 — clear the remaining R-F findings.** `WIP f2-agent`
+**F2-3 — clear the remaining R-F findings.** `DONE`
 - R-F 2: F3's outcome says the guard test installs its hook AFTER the attach; it installs it BEFORE
   (`attention_integration.rs:694-696`) and uses the attach's own firing as a liveness sentinel.
 - R-F 3: batch F's facts never reached §1, breaking the plan's convention (C6 and E2 both added
@@ -1097,6 +1120,109 @@ written, because the obvious probe falsifies it in seconds.
 - R-F 7 (nit): `CHANGELOG.md` grew a `### Documentation` heading; every other section is
   Added/Fixed/Changed/Breaking.
 
+**F2-1 outcome — the asymmetry was real, and its cause is the thing that decides the batch.**
+Both probes were right. `pane-focus-out` is emitted only when NO attached, focused client still has
+that window current (`window_pane_update_focus`, 3.6a `window.c:481`), so with one client a genuine
+switch fires in both directions, and with a second client parked on one of the two sessions the
+switch away from THAT session fires nothing while the other direction does. Reproduced on demand:
+same socket, same commands, one PTY client → symmetric; add a second client (real or `tmux -C`) on
+`s1` → `s1 → s2` silent, `s2 → s1` fires. R-F's probe is not in front of me, so this does not prove
+what its setup was, only that the asymmetry it reported has a mechanism and is reproducible on
+demand. What is settled either way: the hook is not disqualified by `focus-events` contingency the
+way R-F framed it, and the suppression is not directional — it is per-viewer.
+
+**Characterisation, tmux 3.6a, isolated socket, real PTY client** (`### STEP` markers driving a
+logging hook on every candidate; the two runs differ only in `set -g focus-events`):
+
+| event | `focus-events off` | `focus-events on` |
+| --- | --- | --- |
+| attach | focus-IN only | focus-IN only |
+| pane switch | — | PFO on the departed pane |
+| no-op `select-pane` | — | — |
+| window switch | — | PFO on the departed window's pane |
+| no-op `select-window` | — | — |
+| session switch (out-of-band, key-driven, from `run-shell`, `-t sess:win`) | **PFO on the departed pane** | same |
+| no-op `switch-client -t <current>` | — | — |
+| session switch, another client on the departed session | — | — |
+| session switch, a `tmux -C` client on the departed session | — | — |
+| terminal focus-out report reaching the client | PFO | PFO |
+| … but does the terminal send one? | no (tmux emits DECSET 1004 only under the option) | yes |
+| `display-menu` / `display-popup` / `display-panes` open | **PFO** | **PFO** |
+| overlay close | focus-IN | focus-IN |
+| clean `detach-client` | **PFO** | **PFO** |
+| client SIGKILLed (dropped link) | — | — |
+| nested tmux, outer navigates away (outer at either setting) | inner fires iff the INNER server has `focus-events on` | same |
+
+`#{pane_id}` at PFO time is the departed pane; there is no nested format and no
+`client_last_session` involved. Below tmux 3.3 the whole table's left column is empty: 3.2 runs the
+focus check from the server loop behind `if (focus)` (`server-client.c:1368`), and 3.3 moved focus
+to event call sites (CHANGES, "Change focus to be driven by events rather than scanning panes").
+The 3.3–3.5 shape was not verified — only 3.2 and 3.6a sources were read.
+
+**F2-2 outcome — the gap STAYS OPEN, on different and better grounds than batch F gave.**
+Batch F's central claim was false and is corrected everywhere. The mechanism objection is gone:
+`pane-focus-out` distinguishes a genuine session switch from every no-op, which is exactly what F
+said no hook could do, and it does it without the stale-name problem. It is still not wired, for
+four measured reasons, in descending weight:
+1. **Inert exactly where tma is most instrumented.** A control-mode client counts as an attached,
+   focused viewer (E2) and the daemon parks one per monitored session, so the clear would never
+   fire for daemon users while the pane and window clears kept working. A departure rule that
+   exists only when the daemon is off cannot be stated, and it would make the daemon subtractive.
+2. **A clean detach fires the same edge** and takes the mark down on the way out — the end-of-day
+   flow the mark exists for — while a KILLED client fires nothing, so closing your terminal and
+   losing your ssh link would behave differently. No hook-time fact separates the two.
+3. **Every overlay fires it, ungated by `focus-events`** — including tma's own `prefix-a`
+   `display-popup` picker, so opening the list of done marks would clear the one on the pane you
+   are sitting on. Weakest of the four: the keystroke that opened it already clears the same mark
+   through batch D within a cycle. But it is a second, unconditional path, and a script-opened
+   popup reaches it with no input at all.
+4. **Nothing below tmux 3.3**, so the clear would be present or absent by tmux version.
+The semantic case that closed F stands unchanged and is now the tiebreak rather than the argument:
+a session is a workspace you come back to, and "where did something finish" across sessions is what
+`tma status` and `prefix-j` answer.
+- **What changes for a `focus-events on` user vs a default user, stated plainly, since nothing
+  shipped:** nothing. tma installs no `pane-focus-out` hook under either setting. The one thing
+  `focus-events on` still changes is what batch D already documented: the focus report your
+  terminal sends on alt-tab is input, so it clears the mark on the pane a client of yours is
+  displaying, exactly as a keystroke would (R-D 3).
+- The `Tmux::focus` no-op `switch-client` finding from F is untouched and still recorded: it makes
+  the `client-session-changed` false-departure rate "half of all jumps". It does not bear on
+  `pane-focus-out`, which ignores that no-op.
+
+**F2-3 outcome — what shipped.** No production behaviour changed.
+- R-F 4 cleared: `read.rs`'s `the_retired_window_hook_name_carries_no_departure` is now
+  `only_the_two_departure_hooks_map_to_a_departure`, which is what its body has asserted since F3
+  added the `client-session-changed` case and F2 added `pane-focus-out`.
+- The "only notification" claim is gone from all five places R-F listed: `read.rs`'s
+  `from_hook_name` doc (replaced with the `pane-focus-out` reasoning), ARCHITECTURE ×2, this plan's
+  F2 outcome, the integration guard's doc comment, and `install-agent-hooks.md` (rewritten to tell
+  a user what BOTH hand-wirable hooks actually do).
+- `install.rs` gains `pane_focus_out_is_not_a_hook_tma_installs`, asserting the name is in neither
+  `desired_hooks(false)`, `desired_hooks(true)`, nor `ALL_TMUX_HOOKS` — the last deliberately, since
+  the uninstall sweep strips our content from every name in that list and this is a hook users
+  legitimately wire themselves. **The refusal has to live at the install set**: unlike every other
+  refusal in `from_hook_name`, refusing the NAME buys nothing here, because the hook hands the
+  departed pane over as `#{pane_id}` and the plain arrival clear would take it from there. The
+  `from_hook_name` unit test now asserts that too, with that reason in the message.
+- Two characterisation guards in `attention_integration.rs`, both with a real PTY client:
+  `a_hand_wired_focus_out_hook_clears_a_pane_you_only_detached_from` and
+  `a_control_mode_client_suppresses_the_session_departure_focus_out` (whose liveness half is the
+  C6 pattern — a second switch with the control client gone must clear — because the correct
+  behaviour under the control client is that no hook runs at all). Each fails loudly if tmux ever
+  stops behaving that way, which is the condition under which the decision should be reopened.
+- **Mutation-checked, four mutants, all caught.** (a) `dispatch.rs`'s arrival unset replaced with an
+  unset of a different key: both new tests fail (plus four existing). (b) the control client parked
+  on `s2` instead of `s1`: the suppression assertion fails with its own message. (c) and (d) the
+  detach test's hook installed on `pane-focus-in` and on `session-window-changed`: fails both ways.
+- **A vacuity trap found and closed while mutation-checking, worth knowing.** The detach test
+  originally installed its hook BEFORE the attach, mirroring the `client-session-changed` guard.
+  With `pane-focus-out` that is wrong: an attach fires `pane-focus-in`, and a `pane-focus-in` hook
+  already on the server leaves a `tma clear-attention` in flight that lands ~200 ms later, AFTER the
+  test raises its flag — so mutant (c) PASSED, with the attach's clear credited to the detach. The
+  `client-session-changed` guard wants the pre-attach install (the attach's own firing is its
+  liveness sentinel); this one wants the opposite, and both reasons are now in the comments.
+- Suite: 1243 → **1246 passing, 0 failed**.
+
 > **Review gate R-F2.** Focus: is the characterisation table reproducible, and does the decision
 > follow from it rather than from batch F's momentum? If wired, does any firing path clear a pane
 > the user never saw? If not wired, is the "only notification" claim gone from all five places?
@@ -1105,7 +1231,7 @@ written, because the obvious probe falsifies it in seconds.
 
 ## Guard map: where this comes back, and what stands watch
 
-Left by the R-E re-run, extended by batch F. Four places a future maintainer most likely
+Left by the R-E re-run, extended by batches F and F2. Four places a future maintainer most likely
 reintroduces one of these bugs.
 
 1. **Collapsing `since_ms` and `episode_ms` into one key.** Two adjacent JSON numbers, equal on
@@ -1124,17 +1250,24 @@ reintroduces one of these bugs.
    deliberately-unmapped idle reminder as the counterexample. **Know its limit**: it pins today's
    equivalence, so it catches a manifest author flipping one entry, but it goes vacuous along with
    the field if someone deletes `turn_end` and derives it. The guard against THAT is prose.
-3. **Wiring `client-session-changed` to clear the session you departed** (batch F). It looks like
-   the last obvious hole in seen-on-leave, the departed pane IS resolvable in one format, and a
-   first cut passes every hand test — because the no-op that breaks it is
+3. **Wiring a session departure clear** (batches F and F2). Two hooks tempt, for opposite reasons.
+   `client-session-changed` looks like the last obvious hole in seen-on-leave and the departed pane
+   IS resolvable in one format, so a first cut passes every hand test — the no-op that breaks it is
    `switch-client -t <the session you are already on>`, which nobody types on purpose but which
-   `Tmux::focus` issues on every same-session jump. Guard:
-   `crates/tma/tests/attention_integration.rs`'s
+   `Tmux::focus` issues on every same-session jump. `pane-focus-out` has none of that staleness and
+   on a bare one-client server it looks flawless, which is the more dangerous trap: it is inert
+   whenever another client (tma's own daemon control client included) is attached to the session
+   you left, it fires on a clean detach and on every popup, and it does not exist below tmux 3.3.
+   Guards, all in `crates/tma/tests/attention_integration.rs` unless noted:
    `a_hand_wired_session_hook_can_only_clear_the_pane_you_arrived_at` (mutation-checked against a
-   working implementation) plus the `from_hook_name` unit assertion. **Know its limit**: both pin
-   tma's own mapping, so they say nothing about a user who wires the format straight into a hook
-   string of their own. The guard against that is the prose in ARCHITECTURE and
-   `install-agent-hooks.md`.
+   working implementation) and the `from_hook_name` unit assertion for the first;
+   `a_hand_wired_focus_out_hook_clears_a_pane_you_only_detached_from`,
+   `a_control_mode_client_suppresses_the_session_departure_focus_out`, and
+   `install.rs`'s `pane_focus_out_is_not_a_hook_tma_installs` for the second. **Know their limit**:
+   they pin tma's own install set and mapping, so they say nothing about a user who wires either
+   hook by hand. The guard against that is the prose in ARCHITECTURE and `install-agent-hooks.md`.
+   Note the asymmetry: refusing the NAME is enough for `client-session-changed` and worthless for
+   `pane-focus-out`, which hands the departed pane straight to the arrival clear as `#{pane_id}`.
 4. **Removing the `!standing` gate** in `crates/tma-runtime/src/event/mapping.rs`. Someone will hit
    the held gap ("my second completion didn't raise while the first mark was up"), see the gate, and
    drop it — ringing the desktop twice per codex turn, since codex reports one turn end on both
@@ -1149,16 +1282,28 @@ reintroduces one of these bugs.
   A script would work or hang depending on which pane a human sat in.
 - **Any windowed presence test** ("cleared if the user typed within the last N seconds"). Large N
   destroys the walk-away signal; small N does not fix quiet reading. Ordered beats windowed.
-- **`pane-focus-out` as the leave hook.** It also fires when the *client* loses focus, so alt-tabbing
-  to a browser would clear the flag.
+- **`pane-focus-out` as the leave hook.** Rejected in design for one reason (it fires when the
+  *client* loses focus, so alt-tabbing to a browser would clear the flag), re-examined in F2, and
+  kept rejected for four better ones. The original reason has largely expired: tmux enables
+  DECSET 1004 only under `focus-events on`, and with that option on the focus-report bytes already
+  clear the mark through batch D (R-D 3). What kills it is measured elsewhere — it is suppressed
+  whenever any other attached client (a control-mode one included, so tma's own daemon) still has
+  that window current, so the clear is inert exactly where tma is most instrumented; it fires on a
+  clean detach; it fires on every `display-menu` / `display-popup` / `display-panes`, tma's own
+  `prefix-a` picker included; and below tmux 3.3 it is not emitted at all at the default option.
+  Guards: `pane_focus_out_is_not_a_hook_tma_installs`,
+  `a_hand_wired_focus_out_hook_clears_a_pane_you_only_detached_from`,
+  `a_control_mode_client_suppresses_the_session_departure_focus_out`. Full record in
+  ARCHITECTURE.md. **Do not resurrect it on the strength of the default-config probe alone** — on a
+  bare server with one client it looks perfect, which is exactly the trap.
 - **`monitor-silence` / `alert-silence`.** Weaker than reading `window_activity` directly, and it
   requires mutating a user-facing global (`silence-action`, whose default `other` suppresses the
   alert for the current window anyway).
 - **`#{pane_unseen_changes}` as a seen primitive.** It means copy-mode changes only.
 - **Region- or chrome-scoped hashing.** Composer and working chrome share the footer, so no region
   split separates them; and a rule over that region is strictly more precise than a hash of it.
-- **A departure clear on `client-session-changed`** (batch F). It is the only session-change
-  notification tmux has, it fires for `switch-client -t <the session you are already on>` too, and
+- **A departure clear on `client-session-changed`** (batch F). It fires for
+  `switch-client -t <the session you are already on>` too, and
   `client_last_session` is stale there — so it clears done marks in sessions the user never touched.
   `Tmux::focus` issues exactly that no-op on every same-session jump. Measured with the fix wired up
   for real; see batch F's outcome and ARCHITECTURE. Leaving a session keeps its mark, on purpose.

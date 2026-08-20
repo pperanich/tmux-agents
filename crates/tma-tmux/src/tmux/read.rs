@@ -84,17 +84,24 @@ impl DepartureKind {
     /// only do the arrival clear, which is the pre-seen-on-leave behaviour.
     ///
     /// `client-session-changed` is absent for the same reason, one scope up, and that absence is
-    /// also deliberate. It is the ONLY notification tmux emits for a client changing session (every
-    /// `notify_client`/`notify_session` call site in 3.6a was read), and it fires unconditionally
-    /// whenever a client is given a non-NULL session — including `switch-client -t <the session you
-    /// are already on>`, where `client_last_session` still names a session left however long ago.
-    /// Measured on 3.6a and read in the 3.2 source: `last_session` is updated only when the session
-    /// really changes, while the notification is outside that test, so nothing at hook time
-    /// separates a real departure from a no-op. tma's own `Tmux::focus` issues exactly that no-op
-    /// `switch-client` on every same-session jump. So a session departure cannot be resolved
-    /// without clearing marks the user never saw; the residue it would close is a mark standing on
-    /// a session you walked away from, which the input clear takes down the moment you come back
-    /// and type. Recorded in ARCHITECTURE.md under "the session departure that stays open".
+    /// also deliberate. It fires unconditionally whenever a client is given a non-NULL session —
+    /// including `switch-client -t <the session you are already on>`, where `client_last_session`
+    /// still names a session left however long ago. Measured on 3.6a and read in the 3.2 source:
+    /// `last_session` is updated only when the session really changes, while the notification is
+    /// outside that test, so nothing at hook time separates a real departure from a no-op. tma's
+    /// own `Tmux::focus` issues exactly that no-op `switch-client` on every same-session jump.
+    ///
+    /// It is NOT the only hook a session change fires, and the record used to say it was.
+    /// `pane-focus-out` fires too — on the pane the departed session was showing, named directly in
+    /// `#{pane_id}`, with no nested format and no stale-name problem, and it is emitted for none of
+    /// the three no-ops (pane, window, session). It is refused on different and entirely measured
+    /// grounds, set out in ARCHITECTURE.md under "the session departure that stays open": tmux
+    /// suppresses it whenever any other attached client still has that window current, which
+    /// includes the control-mode client tma's own daemon parks on every monitored session; the same
+    /// edge also fires on a clean `detach-client` and on every overlay, `prefix-a`'s
+    /// `display-popup` picker included; and below tmux 3.3 it is not emitted at all unless
+    /// `focus-events` is on. So the residue stays open: a mark standing on a session you walked
+    /// away from, which the input clear takes down the moment you come back and type.
     pub fn from_hook_name(hook: &str) -> Option<Self> {
         match hook {
             "after-select-pane" => Some(Self::SelectPane),
@@ -635,10 +642,11 @@ mod tests {
     }
 
     #[test]
-    fn the_retired_window_hook_name_carries_no_departure() {
+    fn only_the_two_departure_hooks_map_to_a_departure() {
         // Not cosmetic: `after-select-window` fires on a no-op selection of the window you are
         // already in, and `window_last_flag` is stale there. Refusing the name is what keeps a hook
-        // string left over from an older install to the arrival clear alone.
+        // string left over from an older install to the arrival clear alone. The session-scope
+        // names below are refused for their own reasons, each recorded where it is asserted.
         assert_eq!(DepartureKind::from_hook_name("after-select-window"), None);
         assert_eq!(
             DepartureKind::from_hook_name("session-window-changed"),
@@ -656,6 +664,14 @@ mod tests {
              stale on a no-op `switch-client -t <current session>` — the shape tma's own \
              `Tmux::focus` issues on every same-session jump. See the doc comment above and \
              ARCHITECTURE.md before changing it"
+        );
+        assert_eq!(
+            DepartureKind::from_hook_name("pane-focus-out"),
+            None,
+            "this hook needs no mapping — it hands the departed pane straight to the arrival \
+             clear as `#{{pane_id}}` — which is exactly why tma must not INSTALL it. Refusing the \
+             name would not make a hand-wired entry safe; `pane_focus_out_is_not_a_hook_tma_\
+             installs` is the guard that matters. See ARCHITECTURE.md"
         );
     }
 

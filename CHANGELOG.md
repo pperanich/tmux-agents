@@ -10,14 +10,17 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
-### Documentation
+### Changed
 
 - The done mark's clear-on-departure rule now says what it covers: a pane or a window, never a
   whole session. Switching to another session with `switch-client` leaves the mark standing on the
-  pane you were watching, deliberately — tmux announces a session change identically whether the
-  session changed or not, and names a stale session as the one you left when it did not, so a
-  departure clear there would drop done marks in sessions you had not been near. Coming back and
-  typing takes the mark down as it always has.
+  pane you were watching, deliberately, and coming back and typing takes it down as it always has.
+  If you were thinking of wiring the session clear yourself, the docs now say what each candidate
+  hook actually does: `client-session-changed` cannot tell a real switch from
+  `switch-client -t <the session you are already on>`, and `pane-focus-out` — which can — also
+  fires when you detach and when any popup or menu opens over the pane, and stays silent whenever
+  another client (a tma daemon's included) is attached to the session you left. No behaviour
+  changed; nothing new is installed.
 
 ## [0.4.1] - 2026-08-20
 

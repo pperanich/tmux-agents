@@ -236,13 +236,24 @@ nothing anywhere. A pane switch in some other window clears
 only that window's departed pane; every other flag stands.
 
 Departure means a pane or a window, never a whole session: `switch-client` to
-another session leaves the mark standing on the pane you were watching, and there
-is no hook to install that would change it. tmux fires the same notification for
-`switch-client -t <the session you are already on>` as for a real switch, and the
-session it names as the one you left is stale on that no-op — so clearing there
-would silently drop done marks in sessions you had not been near. The mark comes
-down when you return: your first keystroke in that pane, or your next pane or
-window switch inside that session.
+another session leaves the mark standing on the pane you were watching. The mark
+comes down when you return: your first keystroke in that pane, or your next pane
+or window switch inside that session.
+
+That limit is a choice, and there are two hooks you could reach for if you wanted
+to change it yourself. Neither is safe, in different ways.
+`client-session-changed` fires the same for `switch-client -t <the session you are
+already on>` as for a real switch, and the session it names as the one you left is
+stale on that no-op, so a departure clear there drops done marks in sessions you
+had not been near. `pane-focus-out` has no such staleness — it fires on a real
+session change and on none of the no-ops, naming the departed pane directly — but
+it also fires when you cleanly detach, when any menu or popup opens over the pane
+(including the `prefix-a` picker), and, with `focus-events on`, on every pane and
+window switch as well. And it does not fire at all while another client is still
+attached to the session you left — which, if you run the tma daemon, is always,
+because the daemon parks a control-mode client on every session it watches. (It
+also does not exist below tmux 3.3 unless `focus-events` is on.) tma installs
+neither hook; if you wire one by hand, that is the behaviour you are choosing.
 
 The hooks are not the only clear. If you never navigate at all — the agent
 finishes under your eyes and you just keep typing at it — the poll cycle takes

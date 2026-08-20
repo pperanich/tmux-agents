@@ -38,12 +38,15 @@ onto two other axes so the state token stays stable:
   long that takes; navigation that moves nothing clears nothing either, since
   selecting the pane or the window you are already in is not a departure.
   Navigation means a pane or a window: switching to another *session* does not
-  clear, on purpose, and that limit is not going to move. tmux announces a
-  session change with the same notification whether the session actually changed
-  or not, and the session it names as the one you left is stale on the no-op — so
-  a departure clear there would erase done marks in sessions you had not touched.
-  A mark left standing on a session you walked out of is the safe half of that
-  trade, and it comes down on your first keystroke back inside it. A
+  clear, on purpose. A session is a workspace you come back to, and "which session
+  did something finish in" is the question `tma status` and `prefix-j` exist to
+  answer; leaving-means-seen is calibrated to the pane you were staring at, not to
+  a workspace you walked out of. The mechanics agree: the notification tmux fires
+  for a session change fires identically when the session did not change, and the
+  one hook that can tell those apart also fires when you detach, when a popup opens,
+  and not at all while any other client is attached to the session you left. A mark
+  left standing on a session you walked out of is the safe half of that trade, and
+  it comes down on your first keystroke back inside it. A
   finished agent is `idle` with attention still set, which
   the surfaces render as the distinct **done** glyph. A mark that came down goes
   back up on the NEXT completion, and it has to be raised by the hook that reports
