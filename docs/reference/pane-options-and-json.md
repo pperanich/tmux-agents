@@ -18,7 +18,8 @@ seconds. Millisecond resolution is what keeps two episodes opening in the same
 wall-clock second distinguishable.
 
 `@agent_attention` is a presence flag: the literal value `1` when set, and the
-option is absent otherwise. Writers order a chained stamp so `@agent_stamped_at`
+option is absent otherwise. It is compared against `@agent_since` by the
+ordered-input clear, which is why the raise instant has to stay write-once. Writers order a chained stamp so `@agent_stamped_at`
 is written last; a reader that sees `stamped_at` older than `since` or
 `evidence_at` caught a chained write mid-flight and should treat the tuple as
 in-progress.
@@ -46,7 +47,7 @@ options carry rollups and hints.
 | `@agent_evidence_at` | pane | epoch **ms** of the evidence behind the current state |
 | `@agent_since` | pane | epoch **ms** of the state transition, written once by the first producer to record it and never rewritten while state is unchanged (the one exception is a value stranded ahead of `@agent_stamped_at` by a backward clock step) |
 | `@agent_stamped_at` | pane | per-pane freshness marker, written last in a chained stamp |
-| `@agent_attention` | pane | presentation flag: value `1` when set, option absent otherwise |
+| `@agent_attention` | pane | presentation flag: value `1` when set, option absent otherwise. Cleared by the focus hooks (the pane arrived at, the pane departed) and by the poll cycle when a client displaying the pane was typed into after `@agent_since` |
 | `@agent_notified_at` | pane | notification-episode marker, written only by the notifier |
 | `@agent_session` | pane | owning agent session id from hook registration; the subagent guard compares incoming event session ids against this |
 | `@agent_subagents` | pane | space-separated live subagent session ids; SubagentStart appends, SubagentStop removes; bookkeeping only, never top-level state. While it is non-empty, only an event whose session matches `@agent_session` may write state; an event that cannot be attributed (either side missing) is ignored |

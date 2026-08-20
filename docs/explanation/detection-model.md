@@ -28,14 +28,16 @@ onto two other axes so the state token stays stable:
   the ball is not with the human; an agent that *halts* asking for confirmation
   is `blocked/permission` on its own prompt evidence.
 - `@agent_attention` is a presentation flag meaning "this changed and you have
-  not seen it yet". It is set on a noteworthy transition and cleared by
-  navigation: on the pane you move to, and on the pane you move away from. The
-  second half is what covers an agent finishing while you sit there watching it —
-  with only the first, that flag stayed up until you happened to navigate back.
-  Not navigating clears nothing, so leaving an agent running and walking away
-  still leaves the mark waiting for you — and neither does navigation that moves
-  nothing: selecting the pane or the window you are already in clears no flag
-  anywhere. A finished agent is `idle` with attention still set, which
+  not seen it yet". It is set on a noteworthy transition and cleared two ways.
+  By navigation: on the pane you move to, and on the pane you move away from. And
+  by input: your next keystroke at a pane a client of yours is displaying, if that
+  keystroke lands after the mark went up. In one line, **the done mark survives
+  until your next input while that pane is on screen, or until you navigate off
+  it.** Nothing else takes it down. Walking away clears nothing, so leaving an
+  agent running and going for coffee still leaves the mark waiting for you however
+  long that takes; navigation that moves nothing clears nothing either, since
+  selecting the pane or the window you are already in is not a departure. A
+  finished agent is `idle` with attention still set, which
   the surfaces render as the distinct **done** glyph. Keeping **done** on this
   separate flag rather than making it a fifth state token is deliberate: the
   closed `state` vocabulary stays four tokens, and a script reading `state` never
@@ -43,6 +45,17 @@ onto two other axes so the state token stays stable:
   record: navigating clears attention, but a blocked episode you glanced at
   and walked away from is still blocked, so the notifier keeps its own separate
   marker.
+
+  The input half reads two facts tmux already keeps: which pane each client is
+  displaying, and when that client last received real terminal input
+  (`#{client_activity}`, which moves for a keystroke, the prefix key or the mouse,
+  and never for pane output or for `tma`'s own polling). It is an ordering against
+  the raise, never a window: "you typed in the last N seconds" would eat the mark
+  for the very case the mark exists to serve. Two limits are honest ones. A
+  control-mode client (iTerm2's `-CC`) has its activity clock frozen at attach, so
+  under `-CC` this half does nothing and navigation is the only clear. And a person
+  who reads the output without touching the keyboard looks exactly like a person
+  who is not there, so their mark stands until they type or move.
 
 ## Three evidence sources, one ranking
 

@@ -235,6 +235,16 @@ so no hook fires and nothing clears, and navigation that moves nothing clears
 nothing anywhere. A pane switch in some other window clears
 only that window's departed pane; every other flag stands.
 
+The hooks are not the only clear. If you never navigate at all — the agent
+finishes under your eyes and you just keep typing at it — the poll cycle takes
+the mark down on your next keystroke, provided a client of yours is displaying
+that pane and the keystroke lands after the mark went up. That needs no hook and
+no install; it is the same walk-away rule read the other way round, and it is
+what makes the invariant *the done mark survives until your next input while that
+pane is on screen, or until you navigate off it*. Under a control-mode client
+(iTerm2's `-CC`) tmux freezes the client's input clock at attach, so there the
+hooks are the only clear you get.
+
 `TMA_HOOK_KIND` in the command is how `clear-attention` knows which of the two
 hooks fired, which is what tells it where the departed pane is: still in this
 window, or back in the window you left. It is an environment variable rather than

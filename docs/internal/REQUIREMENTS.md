@@ -364,7 +364,11 @@ captured evidence (see D10, X3).
 ### Performance
 
 - **N1** Poll-cycle budget: 1 `list-panes` + 1 `ps` + ≤1 `capture-pane` per *agent*
-  pane + option stamping. Skip capture when the pane's hash inputs (`window_activity`,
+  pane + option stamping, plus — only on a cycle where some pane carries
+  `@agent_attention` — 1 `list-clients` for the ordered-input clear and one batched
+  unset for whatever it clears. Measured at ~3.2 ms on a scratch server, the same as
+  the `list-panes` it sits beside; a fleet with nothing waiting to be read pays
+  neither. Skip capture when the pane's hash inputs (`window_activity`,
   title) are unchanged and state is settled. Target: cycle wall time <100 ms with 10
   agents / 40 panes; verify empirically before phase 2. Measured on a scratch
   server at that size: cold sweep ~104 ms median, a marginal ~4% overshoot; warm

@@ -12,6 +12,23 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Changed
 
+- The done mark now clears on your next keystroke at a pane you are already sitting on. Leaving is
+  covered by the tmux hooks; this is the case they cannot see, because it involves no navigation at
+  all: the agent finishes under your eyes and you just keep typing at it. The poll cycle now asks
+  tmux which pane each attached client is displaying and when that client was last typed into, and
+  takes the mark down only when that input came *after* the mark went up. The whole invariant, in
+  one line: **the done mark survives until your next input while that pane is on screen, or until
+  you navigate off it.**
+
+  It is an ordering, not a timeout, and that distinction is the design. "Cleared if you typed in
+  the last thirty seconds" would erase the mark for the very thing it exists for — type a prompt,
+  walk away, come back to a check mark. Since an absent person types nothing, a mark raised after
+  your last keystroke stands for as long as you are gone. Two limits are worth knowing. Under a
+  control-mode client (iTerm2's `-CC`) tmux freezes the client's input clock at attach, so there
+  the hooks remain the only clear. And someone who reads a pane without touching the keyboard looks
+  exactly like someone who is not there, so their mark waits for them. `tma subscribe --events`
+  gains `done` → `idle` edges from this, meaning "the user saw it".
+
 - The done mark now clears when you leave an agent's pane, not only when you arrive at one. The
   case it was missing is the ordinary one: an agent finishes while you are sitting there watching
   it, you move to another window, and the flag stays up on the pane you were just looking at —

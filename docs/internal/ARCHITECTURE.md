@@ -59,7 +59,7 @@ Everything else is qualification or presentation.
 |---|---|---|
 | `@agent_state` | `idle` `working` `blocked` `unknown` — closed, frozen (F14) | whose move is it |
 | `@agent_detail` | `permission` `question` `error` `rate_limit` `background` `compacting` … — open, additive | why / qualification; empty allowed |
-| `@agent_attention` | set on a noteworthy transition, cleared on pane focus | "unseen since it happened" |
+| `@agent_attention` | set on a noteworthy transition, cleared on pane focus or on your next keystroke at the pane | "unseen since it happened" |
 
 Mappings are **normative, not per-manifest** (adversarial review: manifest-decided
 mappings make `@agent_state` semantics agent-dependent, gutting the closed-vocabulary
@@ -77,10 +77,10 @@ screens *into* this table; they do not define it.
 warned against glob-matching detail in tmux conditionals until then.
 
 The attention flag is presentation state only — set on noteworthy transition, cleared
-by navigation (the pane arrived at, and the pane departed). It is **not** the
-notification-episode marker; that is the separate `@agent_notified_at` stamp (AD4,
-F22), because focus-then-leave-unanswered clears attention while the blocked episode
-continues.
+by navigation (the pane arrived at, and the pane departed) or by input ordered after
+the raise (below). It is **not** the notification-episode marker; that is the separate
+`@agent_notified_at` stamp (AD4, F22), because focus-then-leave-unanswered clears
+attention while the blocked episode continues.
 
 Clearing mechanics, corrected by round-2 empirical review:
 
@@ -167,9 +167,20 @@ Clearing mechanics, corrected by round-2 empirical review:
   too: recorded-but-absent-server-wide is reported as its own state, distinct from
   never installed.
 
-Known accepted edge: a user already focused on the pane when it transitions gets no
-select event, so attention persists until the next pane change; harmless because
-they are looking at the pane.
+- The navigation hooks cannot see the user who never navigates, so the poll cycle
+  carries a second, ordered clear: `list-clients` says which pane each client is
+  displaying and when that client was last typed into (`#{client_activity}`, epoch
+  seconds), and the flag comes down iff that input is strictly later than the raise
+  instant in `@agent_since`. Ordered rather than windowed on purpose — "typed within
+  the last N seconds" would suppress the mark for someone who typed a prompt and left,
+  which is the signal's headline use. Cost is one `list-clients` per cycle, and only
+  while some pane actually carries the flag. Two limits are accepted: a control-mode
+  (`-CC`) client's activity clock freezes at attach, so the layer no-ops there, and a
+  reader who never types is indistinguishable from an absent one.
+
+Known accepted edge: the ordered clear needs one keystroke, so a user sitting on a
+pane in total silence keeps the mark until they touch the keyboard or navigate;
+harmless because they are looking at the pane.
 
 **Revisit if** a consumer need appears that detail + attention cannot express without
 parsing, or agents converge on a state the triad genuinely lacks.

@@ -521,6 +521,15 @@ This is self-healing, not state-driving: at 30–60 s it is ~30× cheaper than t
 1–2 s poll loop and its latency only bounds the *repair* of anomalies, not normal
 detection. Design invariant: **events drive state; the sweep repairs it.**
 
+One ordering constraint rides on the sweep. The poll cycle also runs the ordered-input
+attention clear (a `list-clients` read, and only when some pane carries the flag), and
+the serve loop dispatches notifications *after* the sweep from that same persisted
+flag. Running the clear inside the sweep could therefore retire a completion nobody had
+been told about yet, so the daemon's sweep defers it: the cycle reports the candidate
+panes and the loop clears them one step after `dispatch_notify`. Every non-daemon
+caller of the cycle clears inline, which is what keeps a one-shot surface's rows
+consistent with the writes it just made.
+
 ## Notification dedup
 
 The episode marker is the persisted `@agent_notified_at` pane option, written only by

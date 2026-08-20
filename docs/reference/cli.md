@@ -113,7 +113,7 @@ your other sessions exactly as an unscoped one does.
 | `completions` | Print a shell completion script on stdout (`tma completions zsh`). |
 | `debug` | Manifest-authoring and inspection tools. |
 | `event` | Internal, unstable: bridge one agent hook event to a stamp. |
-| `clear-attention` | Internal: clear the attention flag on the pane named and, when the tmux hook that fired it says a departure happened, on the pane just left; then nudge any resident `tma watch`. Invoked by the auto-installed tmux focus hooks. |
+| `clear-attention` | Internal: clear the attention flag on the pane named and, when the tmux hook that fired it says a departure happened, on the pane just left; then nudge any resident `tma watch`. Invoked by the auto-installed tmux focus hooks. Navigation is not the only clear — the poll cycle also drops the flag on a pane a client is displaying once that client has been typed into after the flag went up. |
 | `supervise` | Internal: the detached-action supervisor. Spawned by the `act` broker's detach path to hold the single-flight lock for the child's lifetime, kill it at the deadline, then clear the lock and fire the completion notification. Never user-invoked. |
 
 `event` is invoked only through the `tma-hook` wrapper an agent's config
@@ -324,7 +324,7 @@ Other options:
 
 | option | meaning |
 |---|---|
-| `--until <STATES>` | Required. The state(s) to wait for, comma-separated: `idle`, `working`, `blocked`, `unknown`, and `done` (idle plus attention, the finished-and-unreviewed surface). `wait` returns as soon as a cycle observes the target in any of them. |
+| `--until <STATES>` | Required. The state(s) to wait for, comma-separated: `idle`, `working`, `blocked`, `unknown`, and `done` (idle plus attention, the finished-and-unreviewed surface). `wait` returns as soon as a cycle observes the target in any of them. `done` is by definition unreviewed: if you sit at the pane and type once the agent has finished, the mark clears and the wait carries on. Wait on `idle` when a human is at the keyboard. |
 | `--since <EPOCH_MS>` | Only a state that BEGAN after this epoch-ms timestamp satisfies (the row's `since_ms` must be strictly greater). Works with every target. |
 | [selector flags](#selector-flags) | Scope `--agent`/`--any`/`--all`/`--count`. `--agent` is both the scope and the by-name target, so the flag that names an agent is the flag that selects it. Rejected alongside `--pane`, whose id is already unique (exit 2). |
 | `--timeout <SECS>` | Give up after this many seconds and exit 124 (the `timeout(1)` convention). Absent waits forever; compose with `timeout(1)` for an external belt. |
@@ -557,7 +557,9 @@ line:
 
 The states are the **disjoint** reading: a finished-but-unreviewed pane is `done`,
 not `idle`, so setting the attention flag on an idle pane is a real `idle` →
-`done` edge and jumping to it (which clears attention) is `done` → `idle`.
+`done` edge, and anything that clears attention is `done` → `idle`: jumping to the
+pane, navigating off it, or typing at it while it is on your screen. Read that
+edge as "the user saw it".
 
 Two edges have an open end, spelled as the empty string:
 

@@ -38,7 +38,9 @@ $ tma subscribe --json --events
 Use it when the transitions themselves are the data: a log, a counter, a
 notification hook of your own. `from` and `to` are the disjoint reading of state,
 so a finished-but-unreviewed pane is `done` rather than `idle`, and clearing
-attention by jumping to it is a real `done` → `idle` edge. A pane that appeared
+attention is a real `done` → `idle` edge: jumping to the pane, moving off it, or
+simply typing at it once it is in front of you. Read that edge as "the user saw
+it", not "the work was undone". A pane that appeared
 since the last cycle carries `"from": ""` and one that vanished carries `"to":
 ""`; the empty string rather than `unknown` is what lets you tell "the pane is
 there and unreadable" from "there is no pane". A pane whose state held still

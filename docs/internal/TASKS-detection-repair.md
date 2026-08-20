@@ -494,11 +494,11 @@ session's current window's active pane is what it would have to resolve.
 Goal: the residue you actually reported — sitting on the pane, never navigating. Clear iff a client
 displays the pane **and** its last input is strictly later than the raise.
 
-**D1 — client view reader.** `WIP batch-d-agent`
+**D1 — client view reader.** `DONE`
 - `list-clients -F '#{pane_id}<SEP>#{client_activity}<SEP>#{client_control_mode}'`, appended to the
   existing `list-panes` call as `\; list-clients …` (one process). Filter out control-mode clients.
 
-**D2 — the predicate, pure and unit-tested.** `WIP batch-d-agent`
+**D2 — the predicate, pure and unit-tested.** `DONE`
 - Beside `is_done` in `crates/tma-core/src/row.rs`, or a small module. Signature roughly
   `seen(displayed: &[(pane_id, activity_secs)], pane, raised_at_ms) -> bool`.
 - Strict `>`, never `>=`. Floor `activity_secs * 1000`. The raise instant is `@agent_since`
@@ -507,21 +507,67 @@ displays the pane **and** its last input is strictly later than the raise.
   (**walk-away — must not clear**); newer activity (must clear); two clients where the wrong one is
   active; a control-mode client (must be ignored).
 
-**D3 — wire into the cycle.** `WIP batch-d-agent`
+**D3 — wire into the cycle.** `DONE`
 - `crates/tma-runtime/src/cycle.rs`, end of `run_cycle`. Gate on `!stampede_skip` **and** some row
   carrying attention, so the zero-config floor pays nothing in steady state.
 - **Mutate `report.rows` to match**, or `tma status` lags a cycle behind its own clear.
 
-**D4 — sequence the clear after notification dispatch.** `WIP batch-d-agent`
+**D4 — sequence the clear after notification dispatch.** `DONE`
 - `crates/tma-daemon/src/daemon/serve.rs:377-379`. `notify.rs:50-56` gates on the persisted flag, so
   a clear landing between raise and dispatch eats the desktop notification. The race pre-exists;
   do not widen it. If a notify test turns flaky, fix the ordering — **do not add a sleep**.
 
-**D5 — docs + changelog.** `WIP batch-d-agent`
+**D5 — docs + changelog.** `DONE`
 - Document the invariant in one line: *the done mark survives until your next input while that pane
   is on screen, or until you navigate off it.*
 - Note the two honest limits: no-op for control-mode (`-CC`) clients, and the reader who never types.
 - Note that `subscribe --events` gains `done → idle` edges, meaning "the user saw it".
+
+**Batch D outcome** (for R-D):
+- tmux facts RE-VERIFIED on an isolated 3.6a socket before building on them, with a real pty client:
+  `list-clients -F '#{pane_id}<SEP>#{client_activity}<SEP>#{client_control_mode}'` gives that
+  client's current window's active pane, epoch SECONDS, and `0`/`1`. `send-keys` did not move
+  `client_activity`; real terminal input did. A `-CC` client reported `cm=1` and its activity froze
+  at attach across 8 s and a real keystroke, exactly as §1 says.
+- **Both formats exist at the tmux 3.2 floor** (read `format.c` on the 3.2 tag: `client_activity` is
+  a `FORMAT_TABLE_TIME` entry, `client_control_mode` its own callback returning `"1"`/`"0"`). No
+  version gate is needed, and the reader treats anything but a literal `0` as control mode so an
+  unreadable field can only fail to clear.
+- **Two deviations from the plan's letter, both deliberate.**
+  1. D1 said to append `\; list-clients` to the existing `list-panes` call. Not done: the gate D3
+     asks for (pay nothing unless some pane carries attention) is only decidable AFTER the cycle has
+     rows, so folding the read into the pane call would spend the round trip on EVERY cycle instead
+     of the rare one. It is its own `Tmux::client_views`, measured at ~3.2 ms — the same as the
+     `list-panes` beside it. N1's budget is amended to say so rather than leaving it silent.
+  2. D1 said to filter control-mode clients in the reader. The filter lives in the PREDICATE
+     instead, with `control_mode` carried on `ClientView`, because D2 requires a unit case proving a
+     control-mode client is ignored — a policy filtered away upstream cannot be tested or
+     mutation-checked. The reader parses the field; the predicate decides.
+- D2 is `tma_core::seen` (a small module, not `row.rs`: the predicate takes a pane id and two
+  timestamps, and is not about rows). Nine unit cases, including the walk-away one, both boundary
+  directions of the floored strict `>`, a control-mode client ignored, a real client beside a
+  control-mode one still clearing, and a saturating overflow guard.
+- D3 is gated on `!stampede_skip` AND `raised_panes()` being non-empty, and mutates `report.rows`.
+  One extra guard the plan does not name: a row whose `@agent_since` is 0 (unknown raise instant)
+  is skipped, because zero is a time every client's activity postdates.
+- D4: the daemon's sweep now runs `run_cycle_with(SeenClear::Deferred)`, which reports the
+  candidates instead of clearing them; the serve loop clears one step AFTER `dispatch_notify`. No
+  notify test moved, no sleep was added. Worth a reviewer's eye: the race is only closed INSIDE the
+  daemon. A one-shot `tma status` from a status line still clears inline and can, in principle,
+  retire a flag the daemon has not yet dispatched — that is the pre-existing race (the focus hooks
+  have always been able to do the same), narrowed rather than widened.
+- Tests: 9 unit + 4 integration (`crates/tma-runtime/tests/seen_integration.rs`, driven with a REAL
+  pty client through the shared `attach_client` harness). The walk-away case proves liveness by then
+  moving the raise back behind the same keystroke and watching the next cycle clear it, so a dead
+  pass cannot pass it; the clearing case carries a witness pane in an undisplayed window that must
+  survive. Five mutants, all caught: predicate always true (3 fail), clear a no-op (3 fail),
+  `SeenClear::Deferred` clearing inline (the defer test), dropping the `pane_id` match (the witness
+  test), dropping the row mutation (the row assertion). A sixth, `>` weakened to `>=`, is caught by
+  the same-second unit case.
+- Suite: 1207 → **1220 passing, 0 failed** (`cargo fmt --all --check` clean, clippy silent).
+- Not covered by an integration test, and honestly so: the `-CC` no-op. The shared attach helper
+  drives a plain client; a control-mode client was verified by live probe and is pinned by the unit
+  case, not by the suite.
 
 > **Review gate R-D.** Focus: can the predicate clear on a pane the human never touched? Is the
 > walk-away case still safe? Did any cycle-cost bound get raised silently?
