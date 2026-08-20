@@ -11,7 +11,9 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use common::{DaemonGuard, Scratch};
+use rustix::process::Signal;
+
+use common::{AttachOutcome, DaemonGuard, Scratch};
 use tma_test_support as common;
 
 fn now_secs() -> u64 {
@@ -834,6 +836,164 @@ fn done_transition_fires_when_opted_in() {
 }
 
 // ---------------------------------------------------------------------------------------------
+// 8b. The sweep's ordered-input clear runs STRICTLY AFTER the notification dispatch. Both read the
+//     same persisted `@agent_attention`, so a clear that ran first would swallow the desktop
+//     notification for a completion the user has already been typing past. Until this case existed
+//     the ordering was held by source order and a comment: the whole suite passed with the two
+//     blocks swapped.
+// ---------------------------------------------------------------------------------------------
+
+/// A detached session whose pane swallows keystrokes: `sleep` reads nothing and writes nothing, so
+/// the attached client can type without producing pane output. Output would wake the daemon's
+/// control client and dispatch notifications on iterations the sweep never ran, which is precisely
+/// what this case must exclude.
+fn new_quiet_session(s: &Scratch, name: &str) -> (String, u32) {
+    assert!(s
+        .tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            name,
+            "-x",
+            "80",
+            "-y",
+            "24",
+            "exec sleep 100000",
+        ])
+        .status
+        .success());
+    let pane = s.get(name, "#{pane_id}");
+    assert!(pane.starts_with('%'), "got pane {pane:?}");
+    let pid: u32 = s.get(name, "#{pane_pid}").parse().unwrap();
+    (pane, pid)
+}
+
+/// The attached PTY client's `#{client_activity}` (epoch seconds) as ms. Control-mode clients are
+/// skipped exactly as the predicate skips them: the daemon parks one on this very session and its
+/// clock froze at attach.
+fn pty_activity_ms(s: &Scratch) -> u64 {
+    let out = s.tmux(&[
+        "list-clients",
+        "-F",
+        "#{client_control_mode}:#{client_activity}",
+    ]);
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .filter_map(|l| l.strip_prefix("0:"))
+        .filter_map(|secs| secs.trim().parse::<u64>().ok())
+        .map(|secs| secs * 1000)
+        .max()
+        .unwrap_or(0)
+}
+
+/// Type at the client's real terminal until its input clock reads strictly past `since_ms`, and
+/// return that clock. Repeated because the clock has one-second resolution and the comparison is a
+/// strict `>`: a keystroke inside the raise's own second is deliberately not "later than" it.
+fn type_past(s: &Scratch, since_ms: u64) -> u64 {
+    let deadline = Instant::now() + common::POLL_CEILING;
+    while Instant::now() < deadline {
+        s.send_client_keys("q");
+        std::thread::sleep(Duration::from_millis(200));
+        let act = pty_activity_ms(s);
+        if act > since_ms {
+            return act;
+        }
+    }
+    panic!("the PTY client's input never registered past the raise");
+}
+
+#[test]
+fn a_done_marker_the_user_typed_past_still_fires_before_it_is_cleared() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let mut s = Scratch::new_daemon("t21seen");
+    let (pane, pid) = new_quiet_session(&s, "s1");
+    let comm = comm_of(pid);
+    write_manifest(&s, &manifest(&process_names_toml(&s, "s1", pid)));
+    // The PTY client attaches BEFORE the daemon: `attach_client`'s readiness poll watches
+    // `list-clients`, which the daemon's own control client would satisfy on its own.
+    match s.attach_client("s1") {
+        AttachOutcome::Attached => {}
+        AttachOutcome::NoPython => {
+            eprintln!("skipping: python3 unavailable for the PTY attach");
+            return;
+        }
+        AttachOutcome::Failed => {
+            panic!("PTY client failed to attach after python3 ran (regression, not env)")
+        }
+    }
+
+    let cfg_dir = s.workdir.join("cfg");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let cfg = cfg_dir.join("config.toml");
+    std::fs::write(&cfg, "[notify]\non = [\"blocked\", \"done\"]\n").unwrap();
+    let daemon = spawn_daemon_with_config(&s, &sink_cmd(&s, ""), &cfg, &["--sweep-ms", "500"]);
+    s.expect_status("clients", "1");
+    wait_quiescent(&s);
+    assert!(
+        sink_lines(&s).is_empty(),
+        "nothing has completed yet: {:?}",
+        sink_lines(&s)
+    );
+
+    // A real keystroke at the real client. Everything below is ordered against THIS instant.
+    let last_input = type_past(&s, 0);
+
+    // Freeze the daemon across the raise. Without the freeze the collision cannot be staged: the
+    // loop dispatches on every wake (a bare poll timeout reconciles the pool and dirties the
+    // status), so a marker raised between two sweeps is notified hundreds of ms before the sweep
+    // that would clear it, and the ordering under test never decides anything. Stopped, the daemon
+    // meets the raise for the first time in its next iteration — which runs the overdue sweep and
+    // the dispatch back to back, the one place their order is observable.
+    signal_daemon(daemon.pid(), Signal::STOP);
+
+    // A completion raised by ANOTHER producer (a `tma status` off a status line does exactly this),
+    // one second BEFORE the keystroke above: the user has demonstrably typed past it, so the
+    // ordered clear is armed the instant the flag goes up. `@agent_attention` is written last, so a
+    // reader can never see a half-written tuple as done.
+    let raised = last_input - 1_000;
+    s.set_opt(&pane, "@agent_name", &comm);
+    s.set_opt(&pane, "@agent_state", "idle");
+    s.set_opt(&pane, "@agent_source", "capture");
+    s.set_opt(&pane, "@agent_evidence_at", &raised.to_string());
+    s.set_opt(&pane, "@agent_since", &raised.to_string());
+    s.set_opt(&pane, "@agent_stamped_at", &now_ms().to_string());
+    s.set_opt(&pane, "@agent_pid", &pid.to_string());
+    s.set_opt(&pane, "@agent_attention", "1");
+    signal_daemon(daemon.pid(), Signal::CONT);
+
+    // The dispatch has to get there first. With the clear moved ahead of it, the sweep retires the
+    // flag in that same iteration and this sink stays empty for good.
+    assert_eq!(
+        wait_sink_lines(&s, 1, common::POLL_CEILING),
+        1,
+        "the completion notified before the ordered-input clear retired it"
+    );
+    assert_eq!(sink_lines(&s)[0], format!("fire {pane}"));
+    assert!(
+        !wait_marker(&s, &pane).is_empty(),
+        "@agent_notified_at set on the done fire"
+    );
+
+    // And the clear is not merely late — it lands, on the pane the user typed at.
+    assert!(
+        wait_opt(&s, &pane, "@agent_attention", ""),
+        "the ordered-input clear still takes the marker down once the notification is out"
+    );
+    // Negative window: nothing to poll for, so allow a would-be second fire time to land.
+    std::thread::sleep(Duration::from_millis(600));
+    assert_eq!(
+        sink_lines(&s).len(),
+        1,
+        "exactly one fire for the episode: {:?}",
+        sink_lines(&s)
+    );
+}
+
+// ---------------------------------------------------------------------------------------------
 // 9. SIGHUP hot-reloads config. A daemon started with `notify.on = ["blocked"]` does NOT
 //    fire on a completion; after the config file is rewritten to add "done" and the daemon is
 //    SIGHUP'd, the still-unreviewed completion fires exactly one "done" (reload cold-start).
@@ -1120,9 +1280,13 @@ fn a_muted_pane_is_stamped_but_never_fires_until_the_mute_is_cleared() {
     assert_eq!(sink_lines(&s)[0], format!("fire {pane}"));
 }
 
-/// Send SIGHUP via `rustix::process::kill_process` (the `kill` binary is absent in minimal envs
-/// like the nix sandbox).
-fn sighup(pid: u32) {
+/// Signal the daemon via `rustix::process::kill_process` (the `kill` binary is absent in minimal
+/// envs like the nix sandbox).
+fn signal_daemon(pid: u32, sig: Signal) {
     let pid = rustix::process::Pid::from_raw(pid as i32).expect("valid pid");
-    rustix::process::kill_process(pid, rustix::process::Signal::HUP).expect("SIGHUP");
+    rustix::process::kill_process(pid, sig).expect("signal the daemon");
+}
+
+fn sighup(pid: u32) {
+    signal_daemon(pid, Signal::HUP);
 }
