@@ -20,7 +20,7 @@ pub enum Source {
     /// `SnapshotFacts`, not as ranked evidence, and the fold publishes [`Provenance::Process`]
     /// directly from precedence 2 (`fold.rs`, "foreground is not the agent"). Nothing can ever
     /// reach this variant's `provenance()` arm. Slated for deletion (plan task E4); it survives
-    /// this pass only because two of its four sites are in a file another task holds.
+    /// this pass only because two of its six sites are in a file another task holds.
     ProcessFact,
 }
 
