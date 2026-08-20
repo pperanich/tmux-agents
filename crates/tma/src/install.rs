@@ -710,7 +710,9 @@ impl TmuxHookState {
                  `set-hook -ga` lines to whichever tmux config you use (~/.tmux.conf or \
                  ~/.config/tmux/tmux.conf) to make them durable"
             )),
-            TmuxHookState::Missing => Some(format!("tmux hook {hook} missing (config reload?)")),
+            TmuxHookState::Missing => Some(format!(
+                "tmux hook {hook} missing (a config reload, or an upgrade that renamed it)"
+            )),
         }
     }
 }
@@ -1450,6 +1452,30 @@ mod tests {
     /// and asserted below rather than forbidden: `hook_command_current` only ever compares an entry
     /// against what THIS hook would be written as, so an identical neighbour reads as current, not
     /// as drift.
+    /// `ALL_TMUX_HOOKS` is the removal set `--uninstall` and drift-repair walk, and it is a
+    /// hand-maintained literal. If a hook is ever installed that is not in it, uninstall leaves
+    /// that entry behind on the user's server forever. The cardinality assert in the kind test
+    /// catches a missing KINDED hook; this catches a kindless one, and any future retired name.
+    #[test]
+    fn all_tmux_hooks_covers_everything_install_can_write() {
+        for hook in TMUX_HOOKS {
+            assert!(
+                ALL_TMUX_HOOKS.contains(hook),
+                "{hook} is installed but not in the removal set, so uninstall would orphan it"
+            );
+        }
+        assert!(
+            ALL_TMUX_HOOKS.contains(&FOCUS_HOOK),
+            "the opt-in focus hook must still be removable after focus_events is turned off"
+        );
+        for hook in RETIRED_TMUX_HOOKS {
+            assert!(
+                ALL_TMUX_HOOKS.contains(hook),
+                "retired hook {hook} must stay in the removal set, or an upgrading user keeps it"
+            );
+        }
+    }
+
     #[test]
     fn each_hooks_command_carries_exactly_its_own_kind() {
         let bin = Path::new("/opt/tma/tma");

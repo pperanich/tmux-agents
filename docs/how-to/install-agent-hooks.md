@@ -222,7 +222,7 @@ a dead hook behind. `tma install-hooks --check` compares each installed hook
 against the command this build would write and reports a mismatch as stale; the
 next `tma install-hooks <agent>` rewrites it in place.
 
-On every `select-pane` and `select-window`, `tma clear-attention` drops
+On every pane switch and every REAL window change, `tma clear-attention` drops
 `@agent_attention` on two panes: the one you just moved to, and the one you just
 left. So the `done`/blocked flag reverts to plain idle as soon as you jump to (or
 manually switch to) that pane — and also when an agent finishes while you are
@@ -231,7 +231,8 @@ clear left marked for as long as you stayed away.
 
 Clearing on departure does not touch the walk-away signal, and not by a
 threshold: leaving an agent running and going to lunch means you never navigate,
-so no hook fires and nothing clears. A pane switch in some other window clears
+so no hook fires and nothing clears, and navigation that moves nothing clears
+nothing anywhere. A pane switch in some other window clears
 only that window's departed pane; every other flag stands.
 
 `TMA_HOOK_KIND` in the command is how `clear-attention` knows which of the two

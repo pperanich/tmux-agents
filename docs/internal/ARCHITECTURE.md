@@ -124,10 +124,22 @@ Clearing mechanics, corrected by round-2 empirical review:
   `prefix <N>`. The name is retired, not merely dropped: `install-hooks` removes
   tma's `after-select-window` entry, and the binary no longer maps that name to a
   departure, so a hook string left on a server can only clear the arrival pane.
+  The residual over-clear MOVED rather than vanished, and that is worth stating:
+  `session-window-changed` fires for any real window change in ANY session,
+  attached or not, so a non-`-d` `new-window` or an `attach -t sess:win` against a
+  background session clears that session's departed pane with nobody having
+  navigated. Narrower than what it replaced — `-d` is the scripting default and
+  fires nothing, a background `select-window` over-cleared before this change too,
+  and the pane cleared is one the user genuinely last had current in that session.
+  A guaranteed every-jump over-clear traded for a rare one: take it.
   `Tmux::focus` also skips `select-window` when the destination window is already
   its session's current one (`#{window_active}` is per session), so a jump that
   moves nothing fires nobody's hook.
-- **Known gap, unfixed.** `switch-client` fires neither hook, so leaving a whole
+- **Known gap, unfixed.** `switch-client` fires `client-session-changed`, and
+  additionally `session-window-changed` when it also changes the TARGET session's
+  current window (`switch-client -t s2:1`); the bare `-t <session>` form fires
+  neither of ours. Either way neither hook ever reports the pane in the session you
+  LEFT, so leaving a whole
   session while an agent is finishing there leaves exactly the residue
   seen-on-leave was built to kill.
 - The hook kind travels in the `TMA_HOOK_KIND` **environment variable**, never as

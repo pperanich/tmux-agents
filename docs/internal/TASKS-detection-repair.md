@@ -461,6 +461,34 @@ session's current window's active pane is what it would have to resolve.
 
 ---
 
+**C7 — clear the R-C re-run findings.** `DONE`
+- R-C re-run returned PASS WITH FINDINGS (5, all documentation/nit). Cleared.
+- Recorded the thing C6's outcome note framed only as a benefit: the residual over-clear **moved
+  rather than vanished**. `session-window-changed` fires for a real window change in ANY session,
+  so a non-`-d` `new-window` or `attach -t sess:win` against a background session clears that
+  session's departed pane. Narrower than what it replaced (`-d` is the scripting default and fires
+  nothing; a background `select-window` over-cleared before this change too), and the pane cleared
+  is one the user genuinely last had current there. Net positive, but it is a real trade and batch
+  D/E will reason on top of it.
+- Corrected `install-agent-hooks.md`, which still told users the contract was "on every
+  `select-pane` and `select-window`" — the exact claim C6 falsifies, eight lines below the
+  paragraph that says the opposite.
+- Corrected ARCHITECTURE's `switch-client` gap: it fires `client-session-changed`, and ALSO
+  `session-window-changed` when it changes the target session's current window. Only the bare
+  `-t <session>` form fires neither. The consequence (neither ever reports the pane in the session
+  you LEFT) stands — but batch D/E would have built on a wrong mechanism.
+- Added `all_tmux_hooks_covers_everything_install_can_write`, driven by the `RETIRED_TMUX_HOOKS`
+  const. `ALL_TMUX_HOOKS` is the hand-maintained removal set; a hook installed but absent from it
+  is orphaned on the user's server forever. Mutation-checked.
+
+> **Review gate R-C.** `PASSED` on re-run (first run FAILED; see C6). The re-run verified the fix
+> holds at the tmux **3.2** floor by reading `session_set_current` in both 3.2 and 3.6a sources,
+> simulated the full upgrade path, and hit the one rewritten test with seven mutants — three of
+> which the ORIGINAL test would have missed, including one that would have silently permitted
+> re-adopting the buggy hook.
+
+---
+
 ## Batch D — ordered input clear (secondary layer)
 
 Goal: the residue you actually reported — sitting on the pane, never navigating. Clear iff a client
