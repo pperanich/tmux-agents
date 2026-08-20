@@ -12,7 +12,7 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Changed
 
-- The done mark now clears on your next keystroke at a pane you are already sitting on. Leaving is
+- The done mark now clears on your next input at a pane you are already sitting on. Leaving is
   covered by the tmux hooks; this is the case they cannot see, because it involves no navigation at
   all: the agent finishes under your eyes and you just keep typing at it. The poll cycle now asks
   tmux which pane each attached client is displaying and when that client was last typed into, and
@@ -26,7 +26,9 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   your last keystroke stands for as long as you are gone. Two limits are worth knowing. Under a
   control-mode client (iTerm2's `-CC`) tmux freezes the client's input clock at attach, so there
   the hooks remain the only clear. And someone who reads a pane without touching the keyboard looks
-  exactly like someone who is not there, so their mark waits for them. `tma subscribe --events`
+  exactly like someone who is not there, so their mark waits for them. One nuance the other way: if
+  you run with `focus-events on`, your terminal reports focus changes as input, so switching to
+  another application also takes the mark down — the same rule as walking off the pane. `tma subscribe --events`
   gains `done` → `idle` edges from this, meaning "the user saw it".
 
 - The done mark now clears when you leave an agent's pane, not only when you arrive at one. The
