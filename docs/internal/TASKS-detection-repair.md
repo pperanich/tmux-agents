@@ -224,9 +224,27 @@ idle AND working/blocked fixtures):
   proving it is not passing for want of any working path.
 - Suite: 1174 → 1192 passing, 0 failed.
 
-> **Review gate R-B.** Focus: is every new rule backed by a real capture at two widths? Did any
-> never-false-block assertion get dropped or softened? Does any new idle rule match its own agent's
-> *working* fixture in a way that outranks working?
+> **Review gate R-B.** `PASSED` (with findings, cleared in B6). Focus: is every new rule backed by a
+> real capture at two widths? Did any never-false-block assertion get dropped or softened? Does any
+> new idle rule match its own agent's *working* fixture in a way that outranks working?
+
+**B6 — clear the R-B findings.** `WIP b6-agent`
+- One functional finding, six documentation/coverage ones.
+- ⚠️ **Finding 1 (functional).** gemini's idle anchor is the composer PLACEHOLDER, which gemini draws
+  only while the composer is EMPTY. A pane holding a draft loses the anchor and falls back to
+  `hold previous` — the very trap batch B exists to close. R-B suggested mirroring cursor's frame
+  anchor (`▄{10,}` + `^\s*>\s`); **that suggestion is unsafe and must not be applied.** Both gemini
+  blocked fixtures contain both leaves (prior user messages render as framed transcript echoes), so
+  the rule would ship a false `idle` on the approval prompt, violating D2. Find an anchor that is
+  both draft-robust and provably absent from `gemini_blocked_w{100,60}.txt`; if none exists, KEEP the
+  placeholder and replace the manifest comment with an honest statement of the limitation.
+- **Finding 5 (coverage).** gemini has no blocked-raises-no-idle test; codex, cursor and opencode
+  each got one. Add the equivalent to `crates/tma-core/tests/gemini_manifest.rs`.
+- **Findings 2, 3, 4, 6, 7 (documentation accuracy).** `codex_manifest.rs:330-333` (the `tail_lines(6)`
+  comment contradicts `codex.toml:196-199`; the `not` leaf is the guard, not the window),
+  `opencode.toml:61-68` (stale "idle carries no rule" note), `gemini.toml:149-150` ("no state-unique
+  anchor" contradicts the rule below it), `codex.toml:193-194` (measured distances wrong),
+  `codex.toml:199-200` (overstates the `not` leaf's precision).
 
 ---
 
