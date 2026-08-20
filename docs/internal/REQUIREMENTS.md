@@ -169,7 +169,7 @@ captured evidence (see D10, X3).
   stamps (N3), 1 s guarded-poll refresh, H3 hot-reload; Enter jumps the acting
   client (F18) and clears the target's attention but keeps the sidebar open; the
   middle-tier SIGUSR1 nudge (`@tma_watch_pid`, advertised pane-scoped on the
-  sidebar's own pane, fired by the `after-select-*` attention hook) refreshes it at
+  sidebar's own pane, fired by the attention hooks) refreshes it at
   focus-change latency, ~200 ms worst case. H9 `7acb753`, 2026-07-25: on a
   wide-enough pane (>=76 columns) the body splits to carry a live ANSI preview of
   the highlighted agent's pane beside the list, re-captured on selection change and
@@ -230,7 +230,7 @@ captured evidence (see D10, X3).
 - **F30** tma writes outside its own domain in exactly two places, both requiring
   explicit invocation and symmetric removal: (a) the user's agent config (F29), and
   (b) tmux server hooks — the attention auto-clear and SIGUSR1 nudge hooks, which
-  MUST use `after-select-pane`/`after-select-window` (NOT `pane-focus-in`, which is
+  MUST use `after-select-pane`/`session-window-changed` (NOT `pane-focus-in`, which is
   gated on `focus-events`, default off — a focus-hook auto-clear silently never
   fires; verified round 2). Hook commands MUST bind their pane via `#{pane_id}`
   format expansion, never `$TMUX_PANE` (`run-shell` inherits the server's startup

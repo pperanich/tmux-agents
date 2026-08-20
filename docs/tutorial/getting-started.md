@@ -251,7 +251,7 @@ daemon:  not running (<tmpdir>/tma/<server>.sock) — tier 3 needs a running dae
 ambient: polling — `tma status` last ran 3.5s ago
 clients: 1 attached
 watch:   1 watcher running (nudged on focus change)
-hooks:   after-select-pane ✓  after-select-window ✓
+hooks:   after-select-pane ✓  session-window-changed ✓
 wrapper: ~/.cargo/bin/tma-hook ✓
 agents:  6 loaded, no issues
 actions: 4 loaded, no issues

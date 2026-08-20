@@ -19,9 +19,19 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   tmux hooks now tell `tma clear-attention` which of them fired, and it clears the pane you left as
   well as the one you moved to. Walking away is untouched, and not by a timeout: leaving an agent
   running and going to lunch means you never navigate, so no hook fires and nothing clears. A pane
-  switch in some other window clears only that window's departed pane. **Re-run
-  `tma install-hooks <agent>` to pick this up** — the hooks live in tmux server state, so upgrading
-  the binary does not rewrite them; the old command reads as drift and install replaces it in place.
+  switch in some other window clears only that window's departed pane, and navigation that moves
+  nothing — selecting the pane or the window you are already in — clears nothing anywhere.
+  **Re-run `tma install-hooks <agent>` to pick this up** — the hooks live in tmux server state, so
+  upgrading the binary does not rewrite them; the old command reads as drift and install replaces
+  it in place.
+
+  The window half hangs off tmux's `session-window-changed` notification rather than
+  `after-select-window`, and `tma install-hooks` removes the latter if an earlier build wired it.
+  tmux runs `after-select-window` even for a `select-window` onto the window you are already in,
+  where the "window you left" it reports is whatever window you left however long ago — so on that
+  hook the departure clear could take the mark off a pane you had not looked at since. `tma jump`
+  and the picker also stop issuing that no-op selection at all when the pane you asked for is in
+  the window you are already in.
 
 ### Fixed
 
@@ -51,7 +61,7 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   the next verdict re-sources them.
 - The attention flag is cleared again when you select an agent's pane. The two always-on tmux hooks
   ran `tma clear-attention '#{hook_pane}'`, but tmux populates `hook_pane` only on the
-  notify-pane-style hooks; on `after-select-pane` and `after-select-window` it expands empty, and an
+  notify-pane-style hooks; on the hooks tma installs it expands empty, and an
   empty pane argument is a no-op. So the default install cleared attention never, and the done check
   mark stayed on a pane you had already visited. The hooks now pass `#{pane_id}`, which resolves in
   all three. An existing install is repaired by re-running `tma install-hooks` — the old shape reads

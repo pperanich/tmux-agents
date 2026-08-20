@@ -33,7 +33,9 @@ onto two other axes so the state token stays stable:
   second half is what covers an agent finishing while you sit there watching it —
   with only the first, that flag stayed up until you happened to navigate back.
   Not navigating clears nothing, so leaving an agent running and walking away
-  still leaves the mark waiting for you. A finished agent is `idle` with attention still set, which
+  still leaves the mark waiting for you — and neither does navigation that moves
+  nothing: selecting the pane or the window you are already in clears no flag
+  anywhere. A finished agent is `idle` with attention still set, which
   the surfaces render as the distinct **done** glyph. Keeping **done** on this
   separate flag rather than making it a fifth state token is deliberate: the
   closed `state` vocabulary stays four tokens, and a script reading `state` never
@@ -182,7 +184,7 @@ same stamped options.
 - **Hook tier.** `tma event` direct-stamps the moment a hook fires, with no
   daemon involved. State is event-latency, and a resident `tma watch`
   refreshes within about a fifth of a second of a focus change: the
-  `after-select-pane` / `after-select-window` hooks that already clear attention
+  `after-select-pane` / `session-window-changed` hooks that already clear attention
   also walk panes for a watcher's advertised pid (`@tma_watch_pid`, set on the
   watcher's own pane so it dies with that pane) and send `SIGUSR1`, which the
   watcher treats as "refresh now". The picker popup is deliberately outside that

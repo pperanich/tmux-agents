@@ -10,7 +10,7 @@ daemon:  not running (/tmp/tma/7f665a9304f7e8ed.sock) — tier 3 needs a running
 ambient: polling — `tma status` last ran 0.1s ago
 clients: none attached — `#()` status jobs only run while a client draws the status line, so nothing polls this server (run the daemon or attach a client)
 watch:   no watcher running (`tma watch` advertises for SIGUSR1 nudges)
-hooks:   after-select-pane ✓  after-select-window ✓
+hooks:   after-select-pane ✓  session-window-changed ✓
 wrapper: /home/you/.local/bin/tma-hook ✓
 agents:  6 loaded, no issues
 actions: 4 loaded, no issues

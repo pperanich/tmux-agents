@@ -737,7 +737,7 @@ store still holding legacy 10-digit epoch-seconds stamps is normalized on read (
 ## Middle tier: signal nudges without a daemon
 
 tmux-agent-sidebar demonstrates a cheap latency upgrade below "full daemon": tmux hooks
-(`after-select-pane`, `after-select-window` — these fire unconditionally; do NOT use
+(`after-select-pane`, `session-window-changed` — these fire unconditionally; do NOT use
 `pane-focus-in`, which is gated on `focus-events` default-off, F30) send `SIGUSR1`
 to a resident surface process whose pid is advertised in a tmux option. For tma,
 `tma watch` advertises its pid in `@tma_watch_pid` **set on its own pane**
@@ -752,7 +752,7 @@ the `pid > 0` filter still blocks the process-group fan-out. `tma reload`'s SIGH
 narrows its equivalent window by re-probing the socket immediately before the kill. Shipped in H6b: the receive handler (`take_nudge`) and the
 `nudge_watchers` sender both live in `tma_runtime::nudge` — both need `libc`, which
 the `tma-ui` display crate deliberately lacks (RD4). The always-on
-`after-select-pane`/`after-select-window` hook already runs `tma clear-attention` on
+`after-select-pane`/`session-window-changed` hook already runs `tma clear-attention` on
 every focus change (on the arrival pane and, since seen-on-leave, on the departed
 one; the hook tells it which via `TMA_HOOK_KIND`); that same handler now also walks
 panes for `@tma_watch_pid`

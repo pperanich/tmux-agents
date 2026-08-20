@@ -84,8 +84,8 @@ continues.
 
 Clearing mechanics, corrected by round-2 empirical review:
 
-- Hooks used are `after-select-pane` / `after-select-window` (sidebar's proven
-  choice), **not** `pane-focus-in`: focus hooks are gated on `focus-events`, which
+- Hooks used are `after-select-pane` / `session-window-changed`, **not**
+  `pane-focus-in`: focus hooks are gated on `focus-events`, which
   defaults *off*, so a `pane-focus-in` auto-clear silently never fires on a default
   config. An optional `[focus]` / `events = true` config enables the focus-hook variant
   for completeness, with its side effect documented (`focus-events on` changes
@@ -95,21 +95,41 @@ Clearing mechanics, corrected by round-2 empirical review:
   `$TMUX_PANE` — `run-shell` inherits the server's *startup* environment, so
   `$TMUX_PANE` there is stale or foreign (verified). Not `#{hook_pane}` either,
   which is what every release up to 0.3.6 used: tmux populates it only on the
-  notify_pane-style hooks and expands it EMPTY on the `after-select-*` command
-  hooks, so the always-on pair cleared nothing at all (fixed in `ef12d02`).
+  notify_pane-style hooks and expands it EMPTY on the hooks tma installs, so the
+  always-on pair cleared nothing at all (fixed in `ef12d02`).
 - **Seen-on-leave.** The clear runs on the pane departed as well as the pane
   arrived at, because every arrival-only path leaves the commonest residue
   standing: finish while you watch, move to another window, and the flag survives
   on the pane you were just looking at. The departed pane is resolved from the
   hook's own kind — `#{P:#{?pane_last,#{pane_id},}}` at `after-select-pane`,
   `#{W:#{?window_last_flag,#{P:#{?pane_active,#{pane_id},}},}}` at
-  `after-select-window`, both scoped with `display-message -t <arrival pane>`
-  since an untargeted query answers for whichever session tmux calls best.
-  Formats, not target aliases: `-t '{last}'` is not reliable at hook time.
-  Walk-away survives *structurally* rather than by any threshold — walking away
-  means not navigating, so no hook fires. Resolving both formats on either hook
-  would break that, by clearing the previous window's active pane on every
-  ordinary pane switch.
+  `session-window-changed`, both scoped with `display-message -t <arrival pane>`
+  since an untargeted query answers for whichever session tmux calls best, which
+  from our side is arbitrary. Formats, not target aliases: `-t '{last}'` is not
+  reliable at hook time. Walk-away survives *structurally* rather than by any
+  threshold — walking away means not navigating, so no hook fires. Resolving both
+  formats on either hook would break that, by clearing the previous window's
+  active pane on every ordinary pane switch.
+- **Why the window half is a notification hook.** `after-select-window` was the
+  obvious name and it is wrong: tmux runs it even for a `select-window` onto the
+  window you are already in, where `window_last_flag` still names a window left
+  long ago — so the departure clear landed on a pane the user had not seen since
+  (`tma jump` to a pane in your own window, `prefix <N>` onto the current window,
+  `choose-tree` onto it). Nothing in the hook-time format vocabulary says "the
+  current window really changed"; tmux updates `lastw` only on a genuine switch
+  and returns early otherwise, leaving `window_last_flag` at `0` on the arrival
+  window either way. `session-window-changed` is emitted only for a real change,
+  and additionally covers changes `select-window` never sees (leaving a window by
+  creating a new one). Verified on 3.6a, detached and with a pty client driving
+  `prefix <N>`. The name is retired, not merely dropped: `install-hooks` removes
+  tma's `after-select-window` entry, and the binary no longer maps that name to a
+  departure, so a hook string left on a server can only clear the arrival pane.
+  `Tmux::focus` also skips `select-window` when the destination window is already
+  its session's current one (`#{window_active}` is per session), so a jump that
+  moves nothing fires nobody's hook.
+- **Known gap, unfixed.** `switch-client` fires neither hook, so leaving a whole
+  session while an agent is finishing there leaves exactly the residue
+  seen-on-leave was built to kill.
 - The hook kind travels in the `TMA_HOOK_KIND` **environment variable**, never as
   an argv flag, which the late binding below forces: a hook string written by a
   new install routinely invokes an older binary, where an unrecognized flag would

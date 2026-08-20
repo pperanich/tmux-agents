@@ -186,7 +186,7 @@ tmux server hooks:
 $ tma install-hooks --check
 tma: hook wiring incomplete:
   - tmux hook after-select-pane missing (config reload?)
-  - tmux hook after-select-window missing (config reload?)
+  - tmux hook session-window-changed missing (config reload?)
 run `tma install-hooks <agent>` to reinstall
 ```
 
@@ -205,8 +205,16 @@ You do not add these yourself; they are shown here so you recognize them in
 ```
 $ tmux show-hooks -g | grep clear-attention
 after-select-pane[0] run-shell "if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=after-select-pane '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=after-select-pane tma clear-attention '#{pane_id}' 2>/dev/null || true; fi"
-after-select-window[0] run-shell "if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=after-select-window '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=after-select-window tma clear-attention '#{pane_id}' 2>/dev/null || true; fi"
+session-window-changed[0] run-shell "if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=session-window-changed '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=session-window-changed tma clear-attention '#{pane_id}' 2>/dev/null || true; fi"
 ```
+
+`session-window-changed` is the window half rather than the obvious
+`after-select-window`, because tmux runs that one even when you select the window
+you are already in — and the "window you left" it reports there is whatever
+window you left however long ago, so the clear landed on a pane you had not
+looked at since. tma removes any `after-select-window` entry of its own when you
+re-run `tma install-hooks`. If you wired one by hand from an older version of
+this page, check `tmux show-hooks -g after-select-window` and remove tma's line.
 
 The command names the binary tma was installed from and falls back to whatever
 `tma` is on `$PATH` when that path is gone, so a rebuild or a move does not leave
@@ -265,7 +273,7 @@ own `tma` path:
 
 ```tmux
 set-hook -ga after-select-pane "run-shell \"if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=after-select-pane '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=after-select-pane tma clear-attention '#{pane_id}' 2>/dev/null || true; fi\""
-set-hook -ga after-select-window "run-shell \"if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=after-select-window '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=after-select-window tma clear-attention '#{pane_id}' 2>/dev/null || true; fi\""
+set-hook -ga session-window-changed "run-shell \"if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=session-window-changed '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=session-window-changed tma clear-attention '#{pane_id}' 2>/dev/null || true; fi\""
 ```
 
 Two things matter here:
