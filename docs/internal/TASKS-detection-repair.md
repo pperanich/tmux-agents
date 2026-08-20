@@ -649,7 +649,7 @@ displays the pane **and** its last input is strictly later than the raise.
 
 ## Batch E — deferred, only on explicit go-ahead
 
-**E1 — idle→idle re-signal.** `WIP e1-agent`
+**E1 — idle→idle re-signal.** `DONE`
 - A second real completion with no observed `Working` between raises nothing, and there is no
   recovery. Fix belongs in the **event intake**, not the fold: `event/mapping.rs:194-198` receives a
   hook that *means* "a turn ended" and throws that away by re-deriving `set_attention` from
@@ -661,6 +661,81 @@ displays the pane **and** its last input is strictly later than the raise.
   "in this state since" and the uptime display reads it.
 - Adding a key is compat-safe (options are keyed by name; positional layout is per-invocation, not a
   wire format). Add it to `REMOVABLE` (`render.rs:541`) or uninstall leaves it behind.
+
+**E1 outcome.**
+- **The bug is REACHABLE, and reproduced before anything was built** — on an isolated 3.6a socket,
+  driving the real `tma event` intake: a codex pane, `notify` fired twice with `@agent_attention`
+  unset in between, raised the mark neither time. The stronger finding is that "second" is
+  understating it: on that wiring NO completion ever raised, because `prev` is `Idle` from the
+  registration onward.
+- **How a real second turn skips `Working`.** Checked all six hook maps. Five are symmetric — one
+  channel carries both the turn-start (`UserPromptSubmit` / `beforeSubmitPrompt` / `BeforeAgent` /
+  `user-prompt-submit` / `before_agent_start`) and the turn-end event, so wiring that delivers one
+  delivers the other. **codex is not**: `tma install-hooks codex` writes TWO channels, the `notify`
+  key in `config.toml` and the `hooks.json` events, and only the latter needs a one-time in-TUI
+  trust (`/hooks`) before it fires (`agent-coverage.md:16`, and the installer prints
+  `CODEX_TRUST_NOTICE`). An untrusted pane therefore has NO working-claiming event at all while its
+  turn ends keep arriving. Daemonless, nothing rescues it; with a daemon, only a turn long enough
+  to span a poll does. Two narrower routes, not relied on: any dropped working event is
+  unrecoverable by construction (that is the "no recovery" in the task), and for claude alone a
+  contradicting idle claim past the decay window can flip a long turn's stored state to `Idle`
+  mid-turn (`working` is in its `[capture].visible`), after which the real `Stop` is this same edge.
+- **`turn_end` sits on the `[[hooks.map]]` ENTRY, not inside `Claim`.** The rejected-list entry
+  ("a third `Claim` variant") stands and was not touched; `StateClaim` was not extended either.
+  Two reasons beyond that: `Claim` is shared with `[[rules]]`, where a screen-matched `idle` means
+  "the composer is up", never "a turn ended" — most agents' idle chrome co-renders mid-turn — so
+  the flag would be meaningless on half its uses; and turn-endness is a property of the EVENT.
+  It also kept the change out of `evidence.rs`, which E2/E3 hold.
+- **Deriving it from `state = "idle"` was considered and rejected.** It would be zero-schema and is
+  correct for all six bundled manifests today, but it silently makes every idle-claiming hook a
+  re-raiser: a user mapping an idle-REMINDER notification (claude has exactly such an event, kept
+  deliberately unmapped) would get the mark back every time the reminder fired, which is the
+  unclearable-mark failure the fold is barred from causing. A drift test
+  (`every_bundled_turn_end_is_an_idle_claim_and_every_idle_claim_is_a_turn_end`) pins today's
+  equivalence, so the explicit flag cannot quietly diverge from it either.
+- **One thing the plan does not name, and it is load-bearing: the raise is gated on the mark being
+  DOWN.** `set_attention` for `Idle` is `prev == Working || (turn_end && !standing)`. Codex reports
+  ONE turn end on BOTH channels (`Stop` then `notify`, ms apart) and opencode's plugin maps two
+  SDK events onto its one `stop` token, so an ungated `turn_end` would raise twice and — since the
+  dedup now re-arms on `turn_at` — ring the desktop notification twice per turn. Nothing observable
+  separates the pair from two genuine turns except that the user cleared the mark in between, so
+  that is what the rule uses. The honest cost: a second completion while the FIRST mark still
+  stands records no new `turn_at`, so `wait --until done --since T` cannot see it. The mark is
+  already up and unacknowledged, and this is what the pre-E1 tree did for that case anyway, so it
+  is a gap held rather than opened.
+- **`@agent_turn_at` went on the `StampedState` tuple (`AGENT_OPTIONS`), not `EXTRA_PANE_OPTIONS`.**
+  It is episode state in the state lane: written in the same guarded chain as `@agent_notified_at`,
+  cleared by the same deregister, and read by the same dedup predicate that already takes
+  `notified_at`/`since`. `EXTRA_PANE_OPTIONS` is documented as "NOT part of the tuple" and holds
+  parallel lanes (context gauge, model, action lock). Both consumers already hold a decoded
+  `StampedState`/`AgentRow`; the alternative made one of them reach into the raw options map for a
+  field the other reads off the tuple. The cost is real but is churn, not risk: 28 exhaustive
+  struct literals plus the round-trip tests, and the round-trip test updating is the proof the key
+  decodes. `to_millis` covers it, so a legacy-seconds value scales like every other epoch.
+- **`@agent_since` did not move**, verified live: it stays at the registration instant across three
+  turn ends while `@agent_turn_at` advances. The cycle never writes `turn_at`; the row carries the
+  stored value through, and drops it when the tuple is removed.
+- **Both comparisons are `StampedState::episode_at()` = `max(since, turn_at)`** — the daemon's
+  `fire_trigger` and its marker clamp, and `wait`'s `--since` floor via `AgentRow::episode_at()`.
+  A pane that never had a turn end reads `since` alone, so every comparison degrades to exactly
+  what it was. `turn_at` only ever advances on a completion while `since` advances on every
+  transition, so outside an idle run `since` always dominates and no stale completion resurfaces.
+- Free and correct fallout: `subscribe --events` now emits the `idle → done` edge for a second
+  completion, because `StateToken::of` already classes idle+attention as `done`.
+- **Six mutants, each caught by exactly the intended test**: `set_attention` back to
+  `prev == Working` (the unit regression + the integration case), dropping the `!standing` gate
+  (the codex-pair case + the integration case), daemon dedup back to `s.since`, `wait` back to
+  `row.since`, pi's manifest forgetting `turn_end`, and `TURN_AT` missing from `REMOVABLE`.
+- **Live end-to-end re-run after the fix**, same isolated socket, `notify.on = ["blocked","done"]`
+  with an instrumented sink: turn 1 raises and fires once; the second channel's report of the same
+  turn adds no `turn_at` and no second fire; the user clears; turn 2 raises again and fires
+  (2 total); turn 3 with the mark still standing adds neither; deregister leaves zero `@agent_*`
+  options behind, `@agent_turn_at` included.
+- Suite: 1222 → **1235 passing, 0 failed** (`cargo fmt --all --check` clean, clippy silent).
+- Worth a reviewer's eye: the `!standing` gate reads `@agent_attention` from the pane read taken at
+  event time, so a seen-clear landing between that read and the write costs one raise. The race is
+  one-directional (it can only fail to raise, never raise falsely) and is the same shape as the
+  pre-existing clear-vs-dispatch race D4 narrowed.
 
 **E2 — verify the control-mode alert-suppression footgun.** `DONE`
 - Claim: an attached control-mode client counts as a viewer, so tma's daemon may be silently
