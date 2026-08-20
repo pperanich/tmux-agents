@@ -378,6 +378,16 @@ pub(super) fn serve(
             break;
         }
 
+        // The sweep's deferred ordered-input clear, STRICTLY after that dispatch: both read the same
+        // persisted `@agent_attention`, and the dispatch is what turns a completion into a desktop
+        // notification, so a clear landing first would swallow it. Nothing here dirties status — the
+        // sweep that produced these candidates already did, and the clear is a retraction the next
+        // cycle reports anyway.
+        let seen = capture.take_deferred_seen();
+        if !seen.is_empty() {
+            tma_runtime::seen::clear_seen(tmux, &seen);
+        }
+
         // Wake subscribers on any state-affecting work (`status_dirty`). The push is only a WAKE hint;
         // `tma wait` re-runs its authoritative cycle, so the coarse gate is correct (spurious costs one cycle).
         //

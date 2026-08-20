@@ -41,6 +41,7 @@ mod http;
 pub mod json;
 pub mod notify;
 pub mod nudge;
+pub mod seen;
 pub mod ui;
 
 /// The tmux I/O handle and its error, re-exported so consumers can name the type runtime's public

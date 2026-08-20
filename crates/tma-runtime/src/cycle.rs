@@ -44,7 +44,24 @@ pub struct CycleReport {
     pub skipped_dead: usize,
     /// Whether the stampede guard short-circuited producing this cycle.
     pub stampede_skipped: bool,
+    /// Panes still carrying `@agent_attention` at the end of a [`SeenClear::Deferred`] cycle, with
+    /// each one's `@agent_since`: the input for the caller's own [`crate::seen::clear_seen`] pass.
+    /// Always empty on an inline cycle, which has already run that pass itself.
+    pub deferred_seen: Vec<(String, u64)>,
     pub elapsed: Duration,
+}
+
+/// When a cycle runs the ordered-input clear ([`crate::seen`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SeenClear {
+    /// Inside the cycle, before it returns: the rows already reflect it. Every one-shot surface.
+    #[default]
+    Inline,
+    /// Not at all — the panes are reported in [`CycleReport::deferred_seen`] and the caller clears
+    /// them when it is ready. The daemon defers, because its notification dispatch reads the same
+    /// persisted flag: a clear landing first would eat the desktop notification for a completion
+    /// that had not been announced yet.
+    Deferred,
 }
 
 /// Does a per-pane tmux error mean one pane died mid-cycle (skip it) rather than the server being
@@ -60,11 +77,23 @@ pub(crate) fn is_dead_pane(err: &TmuxError) -> bool {
 }
 
 /// Run one poll cycle against the tmux server (tier 1). Reads every pane once, consumes
-/// fresh stamps, and produces (captures + guarded-stamps) stale agent panes.
+/// fresh stamps, and produces (captures + guarded-stamps) stale agent panes. The ordered-input
+/// clear runs inline; [`run_cycle_with`] is the variant that defers it.
 pub fn run_cycle(
     tmux: &Tmux,
     manifests: &[LoadedManifest],
     cfg: &FoldConfig,
+) -> Result<CycleReport, TmuxError> {
+    run_cycle_with(tmux, manifests, cfg, SeenClear::Inline)
+}
+
+/// [`run_cycle`] with an explicit ordered-input-clear policy. Only the daemon passes
+/// [`SeenClear::Deferred`]; everything else wants the clear inside the cycle that reports the rows.
+pub fn run_cycle_with(
+    tmux: &Tmux,
+    manifests: &[LoadedManifest],
+    cfg: &FoldConfig,
+    seen_clear: SeenClear,
 ) -> Result<CycleReport, TmuxError> {
     let start = Instant::now();
     let now = crate::now_ms();
@@ -414,6 +443,22 @@ pub fn run_cycle(
         let mut tail = std::mem::take(&mut *CONTEXT_TAIL.lock().unwrap_or_else(|e| e.into_inner()));
         crate::rollout::poll_context_tails(tmux, &panes, manifests, &mut tail, &home, now);
         *CONTEXT_TAIL.lock().unwrap_or_else(|e| e.into_inner()) = tail;
+    }
+
+    // Ordered-input clear: a done marker the user has demonstrably read since it was raised comes
+    // down here, on the pane they are sitting on and never navigated away from. Skipped entirely on
+    // a stampede-skipped cycle (the producer that did poll ran it) and on a fleet with nothing
+    // flagged, so the zero-config floor pays no extra round trip in steady state.
+    if !stampede_skip {
+        let raised = crate::seen::raised_panes(&report.rows);
+        if !raised.is_empty() {
+            match seen_clear {
+                SeenClear::Inline => {
+                    crate::seen::clear_seen_rows(tmux, &mut report.rows);
+                }
+                SeenClear::Deferred => report.deferred_seen = raised,
+            }
+        }
     }
 
     // Claim the cycle for the stampede guard once we have actually produced.

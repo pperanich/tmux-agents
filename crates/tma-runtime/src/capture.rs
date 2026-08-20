@@ -60,6 +60,10 @@ pub struct CaptureState {
     clock: u64,
     /// `-F` conditional-write support, resolved once and cached (see [`stamp`]).
     guarded: Option<bool>,
+    /// The last sweep's deferred ordered-input clear: `(pane_id, @agent_since)` for every pane still
+    /// carrying `@agent_attention`. Drained by the serve loop AFTER notification dispatch, which
+    /// reads the same persisted flag (see [`cycle::SeenClear`]).
+    deferred_seen: Vec<(String, u64)>,
 
     // ---- introspection counters (status file; tests + operators) ----
     /// Total on-demand single-pane captures (quiet edge + contradiction).
@@ -91,6 +95,7 @@ impl CaptureState {
             hooks: HashMap::new(),
             clock: 0,
             guarded: None,
+            deferred_seen: Vec::new(),
             on_demand_captures: 0,
             quiet_captures: 0,
             contradiction_captures: 0,
@@ -281,13 +286,19 @@ impl CaptureState {
     /// The reconciliation sweep: the full poll cycle ([`cycle::run_cycle`]), the only multi-
     /// `capture-pane` fan-out. Self-healing only (discovers agents, clears dead ones, corrects hook
     /// drift). Records the capture/agent count + wall time and prunes the hook map to live panes.
+    ///
+    /// The cycle's ordered-input clear is DEFERRED here rather than run inline: the serve loop
+    /// dispatches notifications after the sweep, from the same persisted `@agent_attention`, so a
+    /// clear inside the sweep could retire a completion nobody had been told about yet. The panes
+    /// wait in [`CaptureState::take_deferred_seen`].
     pub fn run_sweep(
         &mut self,
         tmux: &Tmux,
         manifests: &[LoadedManifest],
     ) -> Result<(), TmuxError> {
         let start = Instant::now();
-        let report = cycle::run_cycle(tmux, manifests, &self.cfg)?;
+        let report = cycle::run_cycle_with(tmux, manifests, &self.cfg, cycle::SeenClear::Deferred)?;
+        self.deferred_seen = report.deferred_seen;
         self.last_sweep_wall_ms = start.elapsed().as_millis();
         self.sweeps += 1;
         self.sweep_captures = report.captures;
@@ -301,6 +312,12 @@ impl CaptureState {
         }
         self.hooks.retain(|pane, _| live.contains(pane));
         Ok(())
+    }
+
+    /// Take the sweep's deferred ordered-input-clear candidates, leaving none behind: the caller
+    /// owns the pass and a candidate must never be replayed against a later sweep's flags.
+    pub fn take_deferred_seen(&mut self) -> Vec<(String, u64)> {
+        std::mem::take(&mut self.deferred_seen)
     }
 
     /// Record one activity edge against a hook-capable pane's counter; returns whether it is now

@@ -6,6 +6,7 @@ use std::process::Command;
 
 use tma_core::snapshot::ProcInfo;
 use tma_core::stamp::opt;
+use tma_core::ClientView;
 
 use super::{SessionInfo, Tmux, TmuxError, SEP};
 
@@ -185,6 +186,47 @@ impl Tmux {
             }
         }
         Ok(found)
+    }
+
+    /// What each attached client is looking at and when it was last typed into, for the
+    /// ordered-input clear ([`tma_core::seen::seen_by_input`]). One row per client; empty on a
+    /// server nobody is attached to, which is the common no-op.
+    ///
+    /// `#{pane_id}` resolves in the client's own context, so it names that client's current window's
+    /// active pane — the pane on its screen, not whichever pane tmux would call active server-wide.
+    /// `#{client_activity}` is epoch seconds, and `#{client_control_mode}` marks the `-CC` clients
+    /// whose activity clock freezes at attach; both exist at the tmux 3.2 floor (N10).
+    ///
+    /// Read as its own `list-clients` rather than appended to the cycle's `list-panes`, because the
+    /// caller only asks once some pane actually carries `@agent_attention` — folding it into the
+    /// pane read would spend the round trip on every cycle instead of the rare one.
+    pub fn client_views(&self) -> Result<Vec<ClientView>, TmuxError> {
+        let format = format!("#{{pane_id}}{SEP}#{{client_activity}}{SEP}#{{client_control_mode}}");
+        let out = self.run(&["list-clients", "-F", &format])?;
+        let mut views = Vec::new();
+        for line in out.lines() {
+            let mut fields = line.split(SEP);
+            let (Some(pane), Some(activity), Some(control)) =
+                (fields.next(), fields.next(), fields.next())
+            else {
+                continue;
+            };
+            // A client with no pane or an unreadable activity stamp is not evidence of anything, so
+            // it is dropped rather than defaulted. Anything but a literal `0` counts as control mode
+            // for the same reason: whatever we could not read can only fail to clear.
+            let Ok(activity_secs) = activity.parse::<u64>() else {
+                continue;
+            };
+            if pane.is_empty() {
+                continue;
+            }
+            views.push(ClientView {
+                pane_id: pane.to_string(),
+                activity_secs,
+                control_mode: control != "0",
+            });
+        }
+        Ok(views)
     }
 
     /// Enumerate attached clients by name (`list-clients -F`), empty when none. `tma doctor` reads
