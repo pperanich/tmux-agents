@@ -10,6 +10,36 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- Nix-installed agents are detected again. `wrapProgram` renames a binary to `.<name>-wrapped`, and
+  tmux reports that name verbatim as `#{pane_current_command}` — truncated to `.opencode-wrapp` on
+  macOS, which is 15 characters. No manifest matched it, so tma decided the agent was not what owned
+  the pane's screen and capped the pane at `unknown`: a bare `?` in the status bar. The screen tier
+  went with it, since that check runs before any screen rule, so even a permission dialog could not
+  be seen. tma now strips the wrapper decoration before matching, which covers every agent at once.
+  Claude, OpenCode and pi installs from a Nix profile are all affected; Claude hid it best, because a
+  live hook claim kept the state right while its screen fallback was dead.
+- The pane's foreground is now settled against the terminal's own foreground process group rather
+  than the command name alone. A name can only answer that question while the executable is called
+  what the manifest expects, which is what Nix broke. The process-group check is a veto — it cannot
+  tell a launcher's child from its parent — but it removes a false positive the name never could:
+  Cursor, Gemini and pi all match a bare `node`, so an unrelated `node` in the foreground (a dev
+  server, a build watcher) used to read as that agent being on screen.
+- An OpenCode pane no longer sits at `?` until you send it a message. OpenCode fires
+  `session.created` only for a brand-new session, so a TUI waiting at its prompt and
+  `opencode --continue` announced nothing, and OpenCode's only screen rule was for `blocked`. The
+  plugin now registers when it loads, which marks the pane idle — the honest state for a waiting
+  prompt. Re-run `tma install-hooks opencode` to pick this up.
+
+### Added
+
+- OpenCode's `working` state is now detected on screen, not only through its plugin, anchored on the
+  in-flight status row's `esc interrupt` hint. A pane whose hooks are not wired, or whose hook claim
+  has aged out, reads `working` during a turn instead of `unknown`. Its `idle` remains hook-only:
+  idle is the absence of that row rather than any chrome of its own, so as with pi a hookless pane
+  holds `working` after a turn ends until a hook moves it.
+
 ## [0.3.5] - 2026-08-18
 
 ### Fixed
