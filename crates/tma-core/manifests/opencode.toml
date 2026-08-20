@@ -7,6 +7,11 @@ min_engine_version = "0.1"
 # symlink). Both spellings are listed so a non-Homebrew install that keeps the
 # `opencode` comm still matches. Verified live: a pane running `opencode` showed
 # `#{pane_current_command} = opencode.exe`.
+#
+# A nix build needs no third spelling: nix's `wrapProgram` renames the binary to
+# `.opencode-wrapped` (tmux reports it truncated, `.opencode-wrapp`), and `normalize_comm`
+# strips that wrapper decoration before the match. Left unstripped it broke
+# `foreground_is_agent`, which capped every nix-installed OpenCode pane at `unknown`.
 [identity]
 process_names = ["opencode.exe", "opencode"]
 
@@ -23,7 +28,11 @@ process_names = ["opencode.exe", "opencode"]
 [hooks]
 covers = ["working", "idle", "blocked", "lifecycle"]
 
-# session.created — mark the pane an OpenCode pane, record @agent_session, idle.
+# session.created — mark the pane an OpenCode pane, record @agent_session, idle. The plugin also
+# fires this token once at load, before any session event: `session.created` is emitted only for a
+# brand-new session, so a waiting prompt and `opencode --continue` otherwise registered nothing and
+# sat at `unknown`. That first fire carries no session id (unknown at load); the `session.created`
+# edge that follows a real new session records it.
 [[hooks.map]]
 event = "session-start"
 claim = { lifecycle = "start" }
@@ -45,15 +54,26 @@ claim = { state = "idle" }
 event = "permission-required"
 claim = { state = "blocked", detail = "permission" }
 
-# Capture fallback: only `blocked` has invariant, false-positive-resistant chrome.
-# OpenCode's OSC title is the static string "OpenCode" (no state-bearing spinner, unlike
-# Claude), and its idle/working screens differ only by a per-message `▣ … · <elapsed>`
-# footer that is present in both — too fragile to key on. So working/idle are hook-only;
-# the screen fallback contributes `blocked`, which is exactly the state a hookless/quiet
-# pane most needs (a permission prompt stops output, so the daemon's quiet-edge capture
-# lands right on it). Honest: declare only what the rules below reliably detect.
+# Capture fallback: `blocked` and `working`. The blocked dialog is the state a hookless/quiet
+# pane most needs (a permission prompt stops output, so the daemon's quiet-edge capture lands
+# right on it); `working` was added 2026-08-19 (see the rule below).
+#
+# `idle` still carries NO rule, and that is the honest reading: idle is the ABSENCE of the
+# working status row, not any positive chrome of its own. The per-message `▣ … · <elapsed>`
+# footer the original audit looked at renders in both states, and the row that replaces the
+# working bar at idle is the pane's cwd — per-pane text, not a matchable token. As with pi
+# (same shape: a `working` rule, no idle rule), the working→idle landing is the `stop` hook's
+# job; a hookless pane that finishes a turn therefore HOLDS `working` until a hook or a
+# blocker moves it. Registration now happens at plugin load, so a hookless OpenCode pane is
+# the rare case rather than the startup default.
+#
+# The OSC title is NOT usable and this is evidence, not assumption. The original audit found
+# it static ("OpenCode"); on 1.18.18 it is state-bearing (`OC | Running <command>`) — but it
+# is STALE-STICKY: captured live 2026-08-19, the title still read `OC | Running sleep 40; echo
+# done` a full minute after the turn settled and the working row was gone from the screen. A
+# title rule would pin such a pane to `working` forever, so the screen row is the only anchor.
 [capture]
-visible = ["blocked"]
+visible = ["blocked", "working"]
 
 # --- blocked: the tool-permission dialog ------------------------------------------------
 # Anchored on the dialog's invariant chrome: the `Permission required` header together
@@ -75,3 +95,27 @@ match = { all = [
   { contains = "Allow once" },
   { contains = "Reject" },
 ] }
+
+# --- working: the in-flight status row --------------------------------------------------
+# While a turn is in flight OpenCode replaces the status row's cwd with an 8-cell progress bar
+# and the literal interrupt hint. Only the TEXT is matched: the bar animates (`■`/`⬝` cells
+# shift every frame), so it is decoration, not an anchor. The engine strips ANSI before
+# matching, which matters here — OpenCode colours the two words separately, so the raw capture
+# reads `esc <SGR>interrupt` and only the stripped text is contiguous.
+#
+# Evidence, six real captures across two OpenCode versions, two providers, and both widths:
+# present in opencode_working_w100 (1.17.15, Gemini 2.5 Flash) and opencode_working_w60
+# (1.18.18, GPT-5, this pane nix-wrapped); ABSENT from both idle fixtures and all three
+# blocked fixtures. That absence is what makes it safe: the row is exclusive to a live turn,
+# so it cannot fire on a settled pane, and it cannot shout over a permission prompt (blocked
+# is priority 100 and this is 60).
+#
+# `visible` region, not a tail window: capture is `-S -50`, so on a pane shorter than the
+# capture window a prior turn's scrollback sits ABOVE the visible screen and a whole-tail
+# match could resurrect a finished turn's row. `visible` clamps to `#{pane_height}` — the same
+# leak pi's `Working...` rule closes the same way.
+[[rules]]
+state = "working"
+priority = 60
+region = "visible"
+match = { contains = "esc interrupt" }

@@ -14,7 +14,7 @@ each table reflects events actually observed firing with a full payload.
 |---|---|---|---|---|
 | Claude Code | `settings.json` `hooks` block or plugin manifest | working / idle / blocked / lifecycle | statusline push shim: per-turn `context_window.used_percentage`, parsed by `claude-statusline-json` (event channel) | The `Notification` matcher distinguishes permission prompts from idle reminders. `tma install-hooks claude` writes the block and the statusline context shim. |
 | Codex CLI | two channels: a `notify` program in `config.toml` (payload as a trailing argv arg) and a Claude-style `hooks.json` in `CODEX_HOME` (payload on stdin, real session id) | working / idle / blocked / lifecycle, all hook-covered; blocked also screen-carried | rollout `token_count` file-tail, parsed by `codex-rollout-jsonl` (file-tail channel): the per-turn `token_count` event carries `total_token_usage` + `model_context_window`, so the percent needs no model table | `tma install-hooks codex` writes both. The `hooks.json` entries need one-time in-TUI trust (`/hooks`) before they fire. Discovery keys the pane's rollout file off `@agent_session`; its cross-version stability is the fixture caveat in ACTIONS.md open question 6. |
-| OpenCode | JS plugin in `~/.config/opencode/plugin/` | working / idle / blocked / lifecycle (registration only); blocked also screen-carried | — | No session-end or subagent hooks; deregistration rides the pid-change / pane-close path. `tma install-hooks opencode` writes the plugin. Answers `approve`/`deny` over its HTTP API rather than keystrokes (API lane, below). |
+| OpenCode | JS plugin in `~/.config/opencode/plugin/` | working / idle / blocked / lifecycle (registration only); blocked and working also screen-carried | — | No session-end or subagent hooks; deregistration rides the pid-change / pane-close path. `tma install-hooks opencode` writes the plugin. Answers `approve`/`deny` over its HTTP API rather than keystrokes (API lane, below). |
 | Gemini CLI | `settings.json` `hooks` object, native event names | working / idle / blocked / lifecycle, hook- and screen-carried | — (turn-granularity token counts only) | Reuses the Claude JSON editor over `~/.gemini/settings.json`. Local config is gated behind a per-folder trust prompt. |
 | Cursor CLI | user-level `~/.cursor/hooks.json` in cursor's own shape, plus a `statusLine` shim in `~/.cursor/cli-config.json` | working / idle / lifecycle via hooks; blocked screen-only | statusLine push shim: per-turn `context_window` (`total_input_tokens` / `context_window_size`), parsed by `cursor-statusline-json` (event channel). The `statusLine` mechanism works but is undocumented (highest churn risk) — a payload change degrades to an absent gauge | Cursor exposes no permission hook, so blocked rides a screen rule. `tma install-hooks cursor` writes cursor's own hooks JSON shape and the statusLine context shim. |
 | pi | extension module in `~/.pi/agent/extensions/` | working / idle / lifecycle via the extension; no blocked | `getContextUsage()` push shim: the extension forwards pi's `ctx.getContextUsage()` (a precomputed `percent` + absolute `contextWindow`) on the turn-settled event, parsed by `pi-context-json` (event channel) | pi auto-runs tools with no approval state, so there is no blocked signal at all. `tma install-hooks pi` drops the extension. |
@@ -190,13 +190,31 @@ to `tma-hook opencode <token>` with the payload on stdin.
 
 | OpenCode event | tma event | state effect |
 |---|---|---|
-| `session.created` | `session-start` | pane registered, state `idle` |
+| plugin load / `session.created` | `session-start` | pane registered, state `idle` |
 | `session.status` = busy / `chat.message` / `tool.execute.before` | `user-prompt-submit` | `working` |
 | `session.idle` / `session.status` = idle | `stop` | `idle` |
 | `permission.asked` | `permission-required` | `blocked` |
 
-Only `blocked` is reliably visible on screen, so `[capture].visible =
-["blocked"]`.
+`blocked` and `working` are visible on screen, so `[capture].visible = ["blocked",
+"working"]`. The working anchor is the in-flight status row's `esc interrupt` hint,
+present for the whole of a live turn and gone the moment it settles; only the text is
+matched, since the `■`/`⬝` progress bar beside it animates. `idle` carries no rule — it
+is the absence of that row, not chrome of its own — so, exactly as with pi, a hookless
+pane that finishes a turn holds `working` until a hook moves it.
+
+The OSC title is not usable. The original audit found it static (`OpenCode`); on 1.18.18
+it is state-bearing (`OC | Running <command>`) but goes stale, still reading `Running`
+a minute after the turn settled, which would pin such a pane to `working` forever. That makes registration the only thing standing between a quiet pane
+and `unknown`, which is why the plugin fires `session-start` at load and not just on
+`session.created`: OpenCode emits `session.created` for a brand-new session only, so a
+TUI waiting at its prompt and `opencode --continue` (a restored session) both used to
+sit at `?` until the first message. The load-time fire carries no session id — the
+`session.created` edge that follows a real new session records it.
+
+`permission.updated` is accepted as a synonym for `permission.asked`. The
+`@opencode-ai/sdk` typings shipped alongside 1.18.18 name only the former while the
+1.18.18 binary contains only the latter, so the plugin answers to both and a rename
+lands inert instead of silently dropping `blocked`.
 
 Two further event-bus signals were captured live (driving `opencode serve`'s
 `/event` SSE stream through the HTTP API, 2026-07-29) and deliberately left both

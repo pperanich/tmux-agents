@@ -61,6 +61,17 @@ export const TmaBridge = async (input) => {
   // `@agent_api_endpoint`, trailing slash trimmed. Absent (older API) ⇒ the broker's config fallback.
   const apiEndpoint =
     input && input.serverUrl ? String(input.serverUrl).replace(/\/+$/, "") : "";
+
+  // Register at plugin load, before any session event. `session.created` fires only for a
+  // BRAND-NEW session, so a TUI sitting at the prompt and `opencode --continue` (a restored
+  // session) both emitted nothing at all — and OpenCode's `[capture] visible` is `blocked` only,
+  // so with no hook claim the fold floor left those panes at `unknown` ("?" in the status bar)
+  // until the first message. Both reproduced live on 1.18.18. Registration alone stamps idle
+  // (event::decide maps Register ⇒ idle), which is the honest state for a waiting prompt.
+  // Session-less: the id is unknown here, and the `session.created` / `session.status` edges that
+  // follow carry the real one. Plugin load happens once per process, so this cannot loop.
+  fire("session-start", { session_id: "", api_endpoint: apiEndpoint });
+
   return {
     event: async ({ event }) => {
       if (!event || !event.type) return;
@@ -79,7 +90,11 @@ export const TmaBridge = async (input) => {
         case "session.idle":
           fire("stop", { session_id });
           return;
+        // `permission.asked` is what the 1.18.18 binary emits (verified: the shipped
+        // `@opencode-ai/sdk` typings name a `permission.updated` the runtime has no string for).
+        // Accept both so a rename lands inert rather than silently dropping `blocked`.
         case "permission.asked":
+        case "permission.updated":
           fire("permission-required", {
             session_id,
             permission: typeof props.permission === "string" ? props.permission : "",

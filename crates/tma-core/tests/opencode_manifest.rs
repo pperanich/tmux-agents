@@ -98,6 +98,7 @@ fn has_state(ev: &Evaluation, state: AgentState) -> bool {
 /// Rule index in `opencode.toml`, in declaration order.
 mod rule {
     pub(crate) const BLOCKED_PERMISSION: usize = 0;
+    pub(crate) const WORKING_STATUS_ROW: usize = 1;
 }
 
 fn matched(ev: &Evaluation, index: usize) -> bool {
@@ -190,13 +191,12 @@ fn blocked_chrome_overrides_stale_working_hook() {
 fn idle_and_working_screens_do_not_false_block() {
     // Real idle and mid-turn (working) captures. Neither carries the permission-dialog chrome,
     // so the blocked rule must stay silent — blocked-as-a-false-alarm is the defect the
-    // three-token anchor guards against. Working/idle themselves are hook-covered, not
-    // screen-detected (see the manifest `[capture].visible = ["blocked"]`), so the fold holds
-    // the prior state under these captures rather than restating one from the screen.
+    // three-token anchor guards against.
     for name in [
         "opencode_idle_w100.txt",
         "opencode_idle_w60.txt",
         "opencode_working_w100.txt",
+        "opencode_working_w60.txt",
     ] {
         let ev = evaluate(name);
         assert!(
@@ -226,8 +226,13 @@ fn bundled_manifest_declares_expected_hooks_and_coverage() {
     let m = manifest();
     // Homebrew reports the resolved binary comm `opencode.exe`; `opencode` covers other installs.
     assert_eq!(m.identity.process_names, ["opencode.exe", "opencode"]);
-    // Only `blocked` is capture-visible — working/idle ride hooks, and the OSC title is static.
-    assert_eq!(m.capture.visible, [AgentState::Blocked]);
+    // `blocked` and `working` are capture-visible; `idle` still is not, being the absence of the
+    // working row rather than positive chrome. The OSC title is unusable either way: it is
+    // state-bearing on 1.18.18 but goes stale after a turn settles.
+    assert_eq!(
+        m.capture.visible,
+        [AgentState::Blocked, AgentState::Working]
+    );
 
     let hooks = m.hooks.as_ref().expect("opencode is hook-capable");
     let events: Vec<&str> = hooks.map.iter().map(|h| h.event.as_str()).collect();
@@ -258,4 +263,56 @@ fn bundled_manifest_declares_expected_hooks_and_coverage() {
         perm.matcher.is_none(),
         "permission-required is unconditional"
     );
+}
+
+// ---- rule #1: working, anchored on the in-flight status row -------------------------
+
+/// The interrupt hint is present for the whole of a live turn and absent the moment it settles.
+/// Both working fixtures carry it — 1.17.15 at w100 (Gemini 2.5 Flash) and 1.18.18 at w60
+/// (GPT-5) — so the anchor holds across two OpenCode versions, two providers, and both widths.
+#[test]
+fn working_status_row_reads_working() {
+    for name in ["opencode_working_w100.txt", "opencode_working_w60.txt"] {
+        let ev = evaluate(name);
+        assert!(
+            matched(&ev, rule::WORKING_STATUS_ROW),
+            "{name}: the in-flight status row must read as working"
+        );
+        assert!(
+            has_state(&ev, AgentState::Working),
+            "{name}: working evidence"
+        );
+    }
+}
+
+/// The other half, and the reason the rule is safe to run on every capture: a settled pane and a
+/// permission dialog carry no interrupt hint, so the rule cannot resurrect a finished turn or
+/// shout over a blocker.
+#[test]
+fn settled_and_blocked_screens_do_not_read_working() {
+    for name in [
+        "opencode_idle_w100.txt",
+        "opencode_idle_w60.txt",
+        "opencode_blocked_permission_w100.txt",
+        "opencode_blocked_permission_w60.txt",
+        "opencode_blocked_edit_w60.txt",
+    ] {
+        let ev = evaluate(name);
+        assert!(
+            !matched(&ev, rule::WORKING_STATUS_ROW),
+            "{name}: no interrupt hint, so no working claim"
+        );
+        assert!(
+            !has_state(&ev, AgentState::Working),
+            "{name}: no working evidence"
+        );
+    }
+}
+
+/// The priority ordering that matters in practice: a permission dialog must win even if the
+/// working row were somehow on screen too. Blocked is priority 100, working 60.
+#[test]
+fn blocked_outranks_working_on_a_dialog_screen() {
+    let v = fold_verdict("opencode_blocked_permission_w100.txt", None);
+    assert_eq!(v.state, AgentState::Blocked);
 }
