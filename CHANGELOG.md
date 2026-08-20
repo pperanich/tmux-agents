@@ -19,6 +19,12 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   re-satisfy on every lap instead of blocking for the next completion. The loop recipes now read
   `episode_ms`; `since_ms` is unchanged and still `@agent_since`.
 
+  **If you have a supervisor loop that feeds `since_ms` back into `wait --since`, switch it to
+  `episode_ms`.** It keeps working as-is on every pane that never completes twice inside one idle
+  run, and on one that does it spins rather than blocks. Before this release the same loop silently
+  missed that second completion instead, so neither reading was correct — this is the version where
+  the right one exists.
+
 ### Fixed
 
 - A second completion now raises the done mark again. Once you had seen the first one and it came
