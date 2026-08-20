@@ -919,16 +919,17 @@ fires neither, so a marker raised on the pane you were watching survives the swi
 regression (nothing cleared on departure before batch C) and batch D's ordered-input clear takes it
 down once you return and type, which is why it did not block v0.4.1.
 
-**F1 — solve the `client-session-changed` mystery before designing anything.** `WIP batch-f-agent`
-- Probed before this batch: a bare `switch-client -t s2` fires `client-session-changed` TWICE, once
-  per session context (`pane=%0 sess=s1`, then `pane=%1 sess=s2`), so the departed session's pane
+**F1 — solve the `client-session-changed` mystery before designing anything.** `DONE`
+- Probed before this batch (⚠️ **this reading is wrong — see the F1 outcome**): a bare
+  `switch-client -t s2` fires `client-session-changed` TWICE, once per session context
+  (`pane=%0 sess=s1`, then `pane=%1 sess=s2`), so the departed session's pane
   IS nameable at hook time. But installing tma's existing clear command on that hook did NOT clear
   the departed pane, while both invocations ran and both exited 0.
 - `run_clear_attention` swallows every failure by design, so rc=0 proves nothing. Instrument the
   real tmux command (`render.rs` `unset_pane_option`, `read.rs`, `dispatch.rs`) rather than infer.
 - Until the mechanism is known, any fix is guesswork. Report it whatever it turns out to be.
 
-**F2 — decide the design on the probe, not the argument.** `WIP batch-f-agent`
+**F2 — decide the design on the probe, not the argument.** `DONE`
 - Either wire the hook, or resolve the gap as WONTFIX and say why. **Keeping the gap is a legitimate
   outcome**: the marker means "finished, unreviewed", and batch C's premise (leaving = seen) is
   strongest for a pane you were staring at and weakest for a session you walked away from.
@@ -938,25 +939,124 @@ down once you return and type, which is why it did not block v0.4.1.
 - If not wired, remove the gap from ARCHITECTURE's outstanding list by RESOLVING it, not by leaving
   it dangling.
 
-**F3 — tests + docs.** `WIP batch-f-agent`
+**F3 — tests + docs.** `DONE`
 - Whatever ships, follow the witness-pane pattern (`crates/tma/tests/attention_integration.rs`) so a
   hook that silently does nothing fails loudly instead of passing vacuously. Mutation-check every
   new test.
 - Docs: ARCHITECTURE, `install-agent-hooks.md`, `detection-model.md`, CHANGELOG as applicable.
 - Gate as always; baseline 1242 passing, 0 failed at v0.4.1.
 
+**F1 outcome — the mystery is that there was never a departure firing at all.** The pre-batch probe
+installed its logging hook BEFORE the pty client attached, and an attach is itself a
+`client-session-changed` (`cmd_attach_session` → `server_client_set_session`, `s != NULL`). So the
+two lines read as "once per session context" were the ATTACH (`pane=%0 sess=s1`, `client_last_session`
+EMPTY) and then the switch (`pane=%1 sess=s2`). Installing the hook after the attach gives exactly
+ONE line per switch, always in the ARRIVAL session's context. That also explains why the clear "did
+not land": nothing ever asked it to clear `%0`. The `FIRE pane=%0 … %0 attention STILL SET` line was
+the attach's arrival clear running before the flag was raised, and `FIRE pane=%1 → cleared` was the
+switch's arrival clear doing its job. Neither invocation was ever handed a departure. Confirmed by
+re-running the same experiment with the hook installed after the attach, and by reading
+`server_client_set_session` in the 3.6a source.
+- Corollary the probe's reading hid: the departed pane IS resolvable at hook time, in ONE format —
+  `#{S:#{?#{==:#{session_name},#{client_last_session}},#{W:#{?window_active,#{P:#{?pane_active,#{pane_id},}},}},}}`
+  — and it resolves correctly through tma's own `display-message -p -t <arrival pane>`, no `-c`
+  needed. The gap was never a resolution problem.
+
+**F2 outcome — the gap STAYS OPEN, on evidence, and is now resolved rather than dangling.**
+- **Why it cannot be wired: tmux notifies outside the changed-or-not test.**
+  `server_client_set_session` (3.6a `server-client.c:390`) updates `c->last_session` only under
+  `s != NULL && c->session != NULL && c->session != s`, then calls
+  `notify_client("client-session-changed", c)` unconditionally. Identical in the 3.2 source
+  (`cmd-switch-client.c:137-144`), so it holds across the supported range. A
+  `switch-client -t <the session you are already on>` therefore fires the hook with a
+  `client_last_session` naming a session left however long ago. **This is C6's defect verbatim, one
+  scope up** — and this time there is no second hook to escape to: `client-session-changed` is the
+  only notification tmux emits for a client changing session (every `notify_client` /
+  `notify_session` call site in 3.6a was read), and nothing in the hook-time format vocabulary says
+  "the session really changed".
+- **Measured, not argued.** On an isolated 3.6a socket with a real pty client, the departure clear
+  wired up for real (the shipped hook-string shape, `TMA_HOOK_KIND=client-session-changed`, the live
+  binary, `from_hook_name` temporarily mapping the name): a genuine `s1 → s2` switch correctly
+  cleared `s1`'s pane; a **no-op `switch-client -t s1` cleared the done mark on `s2`'s current
+  pane**; and the exact three-command sequence `Tmux::focus` issues for a cross-window jump inside
+  `s1` cleared it too.
+- **tma is the loudest producer of that no-op.** `Tmux::focus`
+  (`crates/tma-tmux/src/tmux/display.rs`) runs `switch-client` unconditionally — C6 gave
+  `select-window` a `#{window_active}` short-circuit and left this one alone — so every `tma jump` /
+  picker Enter that stays inside the current session fires a false departure. Not changed here: the
+  short-circuit is only reachable when the caller names a client (`focus(None, …)` is targetless),
+  and `switch-client` also resets the client's key table, which skipping would make inconsistent
+  between same-session and cross-session jumps. Recorded for whoever revisits the hook, since it
+  makes the false-departure rate roughly "half of all jumps" rather than "the occasional
+  `choose-tree`".
+- **Other firing paths, all probed on 3.6a**: attach (fires, `client_last_session` empty →
+  no departure, safe); `choose-tree` / `prefix s` onto the session you are on (fires, same no-op
+  staleness — driven key-first through a pty client); `switch-client -l` / `-n` (genuine, safe);
+  `switch-client -t sess:win` (fires CSC *and* `session-window-changed`, so the window departure is
+  already handled and the CSC half is pure over-clear); detach (`server_client_set_session(c, NULL)`,
+  no notification, `last_session` nulled); `kill-session` of an unattached session (nothing);
+  `kill-session` of the attached one (`server_destroy_session` sets `c->last_session = NULL` before
+  reassigning, so no false departure either way). Two clients on one session: client A switching
+  away resolves the pane client B is **still displaying** — the same class as the pane/window hooks,
+  but far likelier at session scope, since sharing a session between clients is what sessions are for.
+- **The trade is one-sided, which is what decides it.** The residue held open is a mark standing on
+  a session you walked out of; it is counted by `tma status` and offered by `prefix-j` until you
+  return, and it comes down on your first keystroke there (batch D) or your next pane/window switch
+  (batch C). The residue a fix would introduce is a silently destroyed record of a completion nobody
+  ever saw. Every one-directional choice in this project runs the same way (§1's floored strict `>`,
+  D2's never-false-block): fail to clear, never clear falsely.
+- **The semantic case for closing it was weak anyway.** The mark means "finished, unreviewed", and
+  walking out of a session is the clearest case of NOT having reviewed it. Batch C's premise
+  (leaving = seen) is calibrated to the pane you were staring at; a session is a workspace you come
+  back to, and cross-session "where did something finish" is what `tma status` and `prefix-j`
+  exist to answer.
+- **What a future attempt would need**, so nobody re-derives it: a per-client memo of the
+  last-seen `#{session_id}` (rename-stable, unlike the name `client_last_session` gives). tmux has
+  no per-client option scope, so it would live in server options keyed by `#{client_name}` — a tty
+  path the NEXT client on that terminal reuses — with an unknown first fire after install, a
+  read-modify-write on every session change, and its own GC. That is a new persistent state lane
+  inside a hook that must never error, for a residue that self-heals on the next keystroke.
+
+**F3 outcome — one guard, no behaviour change.**
+- `DepartureKind::from_hook_name` gains `client-session-changed` to its unit test as an asserted
+  `None`, with the reason in the failure message, and the reasoning in the doc comment beside the
+  `after-select-window` paragraph it parallels.
+- `a_hand_wired_session_hook_can_only_clear_the_pane_you_arrived_at`
+  (`crates/tma/tests/attention_integration.rs`), the C6 shape: a real PTY client attached to `s1`,
+  the real hook string installed on `client-session-changed` AFTER the attach (the attach is itself
+  a firing), a real `switch-client -t s2`. The arrival pane is the WITNESS — its flag must come off,
+  so a hook that silently did nothing fails instead of passing. **Mutation-checked**: adding a
+  `SessionChange` arm with the format above turns it red with the defect named. Non-vacuous by
+  construction, since the client genuinely switched and `client_last_session` really names `s1`.
+- Docs: ARCHITECTURE's "Known gap, unfixed" bullet is replaced by the decision record (mechanism,
+  measurements, the `Tmux::focus` finding, the memo dead end); `detection-model.md` and
+  `install-agent-hooks.md` both say plainly that departure means a pane or a window and never a
+  session, and why; CHANGELOG carries the user-facing half.
+- Suite: 1242 → **1243 passing, 0 failed**. No production code changed.
+- **Trap worth knowing before the next mutation check in this repo**: reverting the mutated source
+  with `cp` did not always make cargo rebuild `target/debug/tma`, so a "passing" run can be reading
+  the mutated binary through `CARGO_BIN_EXE_tma`. It cost a false flake diagnosis here. `touch` the
+  reverted file and confirm the artifact (`strings target/debug/tma | grep <mutant marker>`) before
+  believing either colour.
+
+> **Review gate R-F.** Focus: is the "leave it open" argument load-bearing or convenient? Does the
+> new test fail against a real implementation of the fix (not just a stubbed one)? Is anything in
+> the F2 outcome an inference rather than a measurement? Does any doc still promise a clear that
+> does not happen?
+
 ---
 
 ## Guard map: where this comes back, and what stands watch
 
-Left by the R-E re-run. Three places a future maintainer most likely reintroduces one of these bugs.
+Left by the R-E re-run, extended by batch F. Four places a future maintainer most likely
+reintroduces one of these bugs.
 
 1. **Collapsing `since_ms` and `episode_ms` into one key.** Two adjacent JSON numbers, equal on
    almost every row, read like a mistake. Deleting `episode_ms` restores the supervisor-loop spin;
    redefining `since_ms` breaks the uptime column. **Code guard is strong** — `crates/tma/src/wait.rs`
    closes the emitted→compared loop through the real serializer AND the real `Goal`, and
    `crates/tma/tests/wait_integration.rs` pins the `since_ms` spin as an asserted contrast.
-   **Doc guard is MISSING**, and F1 above is the proof it matters: nothing checks that the `sed`
+   **Doc guard is MISSING**, and the R-E re-run's F1 is the proof it matters: nothing checks that the `sed`
    recipes in `docs/how-to/block-a-script-on-agent-state.md` and `custom-actions.md` name a key a
    real row actually carries, and nothing checks `--help` against `cli.md`. If one thing is added
    after this project, make it that test.
@@ -967,7 +1067,18 @@ Left by the R-E re-run. Three places a future maintainer most likely reintroduce
    deliberately-unmapped idle reminder as the counterexample. **Know its limit**: it pins today's
    equivalence, so it catches a manifest author flipping one entry, but it goes vacuous along with
    the field if someone deletes `turn_end` and derives it. The guard against THAT is prose.
-3. **Removing the `!standing` gate** in `crates/tma-runtime/src/event/mapping.rs`. Someone will hit
+3. **Wiring `client-session-changed` to clear the session you departed** (batch F). It looks like
+   the last obvious hole in seen-on-leave, the departed pane IS resolvable in one format, and a
+   first cut passes every hand test — because the no-op that breaks it is
+   `switch-client -t <the session you are already on>`, which nobody types on purpose but which
+   `Tmux::focus` issues on every same-session jump. Guard:
+   `crates/tma/tests/attention_integration.rs`'s
+   `a_hand_wired_session_hook_can_only_clear_the_pane_you_arrived_at` (mutation-checked against a
+   working implementation) plus the `from_hook_name` unit assertion. **Know its limit**: both pin
+   tma's own mapping, so they say nothing about a user who wires the format straight into a hook
+   string of their own. The guard against that is the prose in ARCHITECTURE and
+   `install-agent-hooks.md`.
+4. **Removing the `!standing` gate** in `crates/tma-runtime/src/event/mapping.rs`. Someone will hit
    the held gap ("my second completion didn't raise while the first mark was up"), see the gate, and
    drop it — ringing the desktop twice per codex turn, since codex reports one turn end on both
    channels and opencode maps two SDK events onto one `stop` token. Guard is good: a unit test and
@@ -989,5 +1100,10 @@ Left by the R-E re-run. Three places a future maintainer most likely reintroduce
 - **`#{pane_unseen_changes}` as a seen primitive.** It means copy-mode changes only.
 - **Region- or chrome-scoped hashing.** Composer and working chrome share the footer, so no region
   split separates them; and a rule over that region is strictly more precise than a hash of it.
+- **A departure clear on `client-session-changed`** (batch F). It is the only session-change
+  notification tmux has, it fires for `switch-client -t <the session you are already on>` too, and
+  `client_last_session` is stale there — so it clears done marks in sessions the user never touched.
+  `Tmux::focus` issues exactly that no-op on every same-session jump. Measured with the fix wired up
+  for real; see batch F's outcome and ARCHITECTURE. Leaving a session keeps its mark, on purpose.
 - **A third `Claim` variant** for "something happened". Over-modelling: `SnapshotFacts` is the
   documented vehicle for non-claim facts, and the semantics are not wanted once activity is deleted.

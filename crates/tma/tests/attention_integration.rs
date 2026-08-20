@@ -9,7 +9,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
-use common::Scratch;
+use common::{AttachOutcome, Scratch};
 use tma_test_support as common;
 
 /// The `tma` binary for tests inside the `tma` package.
@@ -661,5 +661,79 @@ fn a_flag_raised_after_the_departure_survives() {
             .pane_option(&right, "@agent_attention")
             .is_empty()),
         "sitting on a pane must never clear it: focus alone is not 'seen'"
+    );
+}
+
+/// Leaving a whole SESSION is the one departure scope tma deliberately does not clear, and this is
+/// the guard on that decision. `client-session-changed` is the only notification tmux emits for a
+/// client changing session, and it fires even for `switch-client -t <the session you are already
+/// on>`, where `client_last_session` still names a session left however long ago — the same shape
+/// as the retired `after-select-window`, with no second hook to escape to this time. So the name
+/// maps to no departure, and a hook string someone wires onto it by hand can only clear the pane it
+/// arrived at.
+///
+/// Driven through the real hook with a real PTY client, because that is what makes the test
+/// non-vacuous: the client genuinely switched from `s1` to `s2`, so `client_last_session` really
+/// names `s1` and a future session arm would really resolve and clear `watched`.
+#[test]
+fn a_hand_wired_session_hook_can_only_clear_the_pane_you_arrived_at() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let mut s = Scratch::new("sesshook");
+    for name in ["s1", "s2"] {
+        assert!(s
+            .tmux(&["new-session", "-d", "-s", name, "exec sleep 100000"])
+            .status
+            .success());
+    }
+    let watched = s.get("s1:0.0", "#{pane_id}");
+    let arrival = s.get("s2:0.0", "#{pane_id}");
+
+    // An attach is ITSELF a `client-session-changed`, and its firing reaches the hook through
+    // tmux's global notification queue, which is not ordered against a command this process sends
+    // on its own client queue — so installing the hook after the attach still races it. Install
+    // first and use that firing: a sentinel on the pane the attach arrives at, waited out, is
+    // positive proof the hook is wired and quiet before the part under test begins.
+    install_hook(&s, "client-session-changed");
+    s.set_opt(&watched, "@agent_attention", "1");
+    match s.attach_client("s1") {
+        AttachOutcome::Attached => {}
+        AttachOutcome::NoPython => {
+            eprintln!("skipping: python3 unavailable for the PTY attach");
+            return;
+        }
+        AttachOutcome::Failed => {
+            panic!("PTY client failed to attach after python3 ran (regression, not env)")
+        }
+    }
+    assert!(
+        tma_test_support::wait_until(tma_test_support::POLL_CEILING, || s
+            .pane_option(&watched, "@agent_attention")
+            .is_empty()),
+        "precondition: attaching fires the hook and clears the pane it arrives at, and nothing \
+         below is meaningful until that firing has been consumed"
+    );
+    let client = String::from_utf8_lossy(&s.tmux(&["list-clients", "-F", "#{client_name}"]).stdout)
+        .trim()
+        .to_string();
+    assert!(!client.is_empty(), "need the attached client's name");
+
+    // `arrival` is the witness: the arrival clear must take its flag down, or a hook that silently
+    // did nothing would pass this test.
+    let survived = survives_navigation(&s, &watched, &arrival, || {
+        assert!(s
+            .tmux(&["switch-client", "-c", &client, "-t", "s2"])
+            .status
+            .success());
+    });
+    assert!(
+        survived,
+        "a hook wired onto `client-session-changed` cleared {watched}, the pane the departed \
+         session was showing. That is a session departure, and tma does not resolve one: the same \
+         hook fires with a STALE `client_last_session` on a no-op `switch-client -t <current \
+         session>`, which is what tma's own `Tmux::focus` issues on every same-session jump. Read \
+         `DepartureKind::from_hook_name` and ARCHITECTURE.md before making this pass"
     );
 }

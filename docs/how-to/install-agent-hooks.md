@@ -235,6 +235,15 @@ so no hook fires and nothing clears, and navigation that moves nothing clears
 nothing anywhere. A pane switch in some other window clears
 only that window's departed pane; every other flag stands.
 
+Departure means a pane or a window, never a whole session: `switch-client` to
+another session leaves the mark standing on the pane you were watching, and there
+is no hook to install that would change it. tmux fires the same notification for
+`switch-client -t <the session you are already on>` as for a real switch, and the
+session it names as the one you left is stale on that no-op — so clearing there
+would silently drop done marks in sessions you had not been near. The mark comes
+down when you return: your first keystroke in that pane, or your next pane or
+window switch inside that session.
+
 The hooks are not the only clear. If you never navigate at all — the agent
 finishes under your eyes and you just keep typing at it — the poll cycle takes
 the mark down on your next real terminal input, provided a client of yours is

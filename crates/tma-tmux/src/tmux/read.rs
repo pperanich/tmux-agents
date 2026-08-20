@@ -82,6 +82,19 @@ impl DepartureKind {
     /// changed; verified on 3.6a, attached and key-driven, over four separate no-op selections.
     /// Because the name no longer maps, a hook string left behind by an older install can still
     /// only do the arrival clear, which is the pre-seen-on-leave behaviour.
+    ///
+    /// `client-session-changed` is absent for the same reason, one scope up, and that absence is
+    /// also deliberate. It is the ONLY notification tmux emits for a client changing session (every
+    /// `notify_client`/`notify_session` call site in 3.6a was read), and it fires unconditionally
+    /// whenever a client is given a non-NULL session — including `switch-client -t <the session you
+    /// are already on>`, where `client_last_session` still names a session left however long ago.
+    /// Measured on 3.6a and read in the 3.2 source: `last_session` is updated only when the session
+    /// really changes, while the notification is outside that test, so nothing at hook time
+    /// separates a real departure from a no-op. tma's own `Tmux::focus` issues exactly that no-op
+    /// `switch-client` on every same-session jump. So a session departure cannot be resolved
+    /// without clearing marks the user never saw; the residue it would close is a mark standing on
+    /// a session you walked away from, which the input clear takes down the moment you come back
+    /// and type. Recorded in ARCHITECTURE.md under "the session departure that stays open".
     pub fn from_hook_name(hook: &str) -> Option<Self> {
         match hook {
             "after-select-pane" => Some(Self::SelectPane),
@@ -636,6 +649,14 @@ mod tests {
             Some(DepartureKind::SelectPane)
         );
         assert_eq!(DepartureKind::from_hook_name("pane-focus-in"), None);
+        assert_eq!(
+            DepartureKind::from_hook_name("client-session-changed"),
+            None,
+            "mapping this name resolves a session departure from `client_last_session`, which is \
+             stale on a no-op `switch-client -t <current session>` — the shape tma's own \
+             `Tmux::focus` issues on every same-session jump. See the doc comment above and \
+             ARCHITECTURE.md before changing it"
+        );
     }
 
     #[test]

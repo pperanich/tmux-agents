@@ -10,6 +10,15 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Documentation
+
+- The done mark's clear-on-departure rule now says what it covers: a pane or a window, never a
+  whole session. Switching to another session with `switch-client` leaves the mark standing on the
+  pane you were watching, deliberately — tmux announces a session change identically whether the
+  session changed or not, and names a stale session as the one you left when it did not, so a
+  departure clear there would drop done marks in sessions you had not been near. Coming back and
+  typing takes the mark down as it always has.
+
 ## [0.4.1] - 2026-08-20
 
 ### Added

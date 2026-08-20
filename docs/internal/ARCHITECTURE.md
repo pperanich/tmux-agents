@@ -147,13 +147,47 @@ Clearing mechanics, corrected by round-2 empirical review:
   `Tmux::focus` also skips `select-window` when the destination window is already
   its session's current one (`#{window_active}` is per session), so a jump that
   moves nothing fires nobody's hook.
-- **Known gap, unfixed.** `switch-client` fires `client-session-changed`, and
-  additionally `session-window-changed` when it also changes the TARGET session's
-  current window (`switch-client -t s2:1`); the bare `-t <session>` form fires
-  neither of ours. Either way neither hook ever reports the pane in the session you
-  LEFT, so leaving a whole
-  session while an agent is finishing there leaves exactly the residue
-  seen-on-leave was built to kill.
+- **The session departure that stays open, deliberately.** Departing a pane clears
+  and departing a window clears; departing a whole SESSION does not, and that is a
+  decision rather than an omission. `switch-client` fires `client-session-changed`,
+  and additionally `session-window-changed` when it also changes the TARGET
+  session's current window (`switch-client -t s2:1`); the bare `-t <session>` form
+  fires only the first. `client-session-changed` is the only notification tmux
+  emits for a client changing session (every `notify_client` / `notify_session`
+  call site in the 3.6a source was read), it fires exactly once per switch in the
+  ARRIVAL session's context, and the pane the departed session was showing IS
+  resolvable there in one format:
+  `#{S:#{?#{==:#{session_name},#{client_last_session}},#{W:#{?window_active,#{P:#{?pane_active,#{pane_id},}},}},}}`.
+  That is not the problem. The problem is that tmux notifies **outside** the test
+  for a real change: `server_client_set_session` updates `last_session` only when
+  `c->session != s`, then calls `notify_client` unconditionally — identical in the
+  3.2 source, so this holds across the whole supported range. A
+  `switch-client -t <the session you are already on>` therefore fires the hook with
+  a `client_last_session` naming a session left however long ago, which is the
+  retired `after-select-window` defect exactly, one scope up — except that this
+  time there is no second hook to escape to, and no hook-time format says "the
+  session really changed". Measured with the departure clear wired up for real (the
+  live binary, the live hook string): a no-op `switch-client -t s1` cleared the
+  done mark on the current pane of `s2`. **tma is itself the loudest producer of
+  that no-op** — `Tmux::focus` runs `switch-client` unconditionally, so every jump
+  that stays inside the current session fires it, and the same probe showed a
+  cross-window jump inside `s1` clearing `s2`'s mark. The trade is one-sided: the
+  residue left open is a mark standing on a session you walked away from, which the
+  input clear takes down the moment you return and type and which `prefix-j` acts
+  on correctly meanwhile; the residue a fix would introduce is a silently destroyed
+  record of a completion nobody ever saw. So the name maps to no departure
+  (`DepartureKind::from_hook_name`), and a hook string wired onto it by hand
+  degrades to the arrival clear —
+  `a_hand_wired_session_hook_can_only_clear_the_pane_you_arrived_at` pins that with
+  a real PTY client, and fails if the name is ever mapped. Two further reasons not
+  to revisit it lightly: a second client on the departed session is still LOOKING at
+  that pane when the first client leaves, and the semantic case is weak in the first
+  place — the mark means "finished, unreviewed", and walking out of a session is the
+  clearest case of not having reviewed it. What a future attempt would need is a
+  per-client memo of the last-seen session (`#{session_id}`, rename-stable), which
+  tmux gives no per-client option scope for, whose first fire after install is
+  always unknown, and whose key (`client_name` is a tty path) is reused by the next
+  client on that terminal.
 - The hook kind travels in the `TMA_HOOK_KIND` **environment variable**, never as
   an argv flag, which the late binding below forces: a hook string written by a
   new install routinely invokes an older binary, where an unrecognized flag would

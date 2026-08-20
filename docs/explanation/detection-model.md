@@ -36,7 +36,14 @@ onto two other axes so the state token stays stable:
   it.** Nothing else takes it down. Walking away clears nothing, so leaving an
   agent running and going for coffee still leaves the mark waiting for you however
   long that takes; navigation that moves nothing clears nothing either, since
-  selecting the pane or the window you are already in is not a departure. A
+  selecting the pane or the window you are already in is not a departure.
+  Navigation means a pane or a window: switching to another *session* does not
+  clear, on purpose, and that limit is not going to move. tmux announces a
+  session change with the same notification whether the session actually changed
+  or not, and the session it names as the one you left is stale on the no-op — so
+  a departure clear there would erase done marks in sessions you had not touched.
+  A mark left standing on a session you walked out of is the safe half of that
+  trade, and it comes down on your first keystroke back inside it. A
   finished agent is `idle` with attention still set, which
   the surfaces render as the distinct **done** glyph. A mark that came down goes
   back up on the NEXT completion, and it has to be raised by the hook that reports
