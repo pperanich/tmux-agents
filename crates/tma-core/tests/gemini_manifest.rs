@@ -223,9 +223,9 @@ fn hooks_cover_working_idle_blocked_lifecycle() {
 fn screen_rules_ship_for_working_and_blocked() {
     let m = manifest();
     // The audit drove working + blocked screens live, so both are capture-visible with real
-    // rules. idle now HAS a screen rule too (the composer placeholder), but deliberately stays
-    // OUT of `visible`: its chrome overlaps working, so it is not evidence a turn ENDED and must
-    // never be allowed to decay an idle hook claim. The rule exists only to give the fold a
+    // rules. idle now HAS a screen rule too (the composer box's bottom edge), but deliberately
+    // stays OUT of `visible`: its chrome overlaps working, so it is not evidence a turn ENDED and
+    // must never be allowed to decay an idle hook claim. The rule exists only to give the fold a
     // positive idle claim once the working chrome leaves.
     assert_eq!(
         m.capture.visible,
@@ -296,11 +296,10 @@ fn blocked_detected_at_wide_and_narrow() {
 
 #[test]
 fn idle_screen_never_reads_working_or_blocked_at_wide_and_narrow() {
-    // The real idle composer (`> Type your message or @path/to/file` + status line) matches NONE of
-    // the working/blocked rules (no `esc to cancel` footer, no approval dialog). It now matches the
-    // idle rule, so the engine raises EXACTLY one claim, `idle` — critically it never synthesizes
-    // `blocked` from the idle screen (the forbidden direction). This negative regression proves the
-    // anchors are state-unique.
+    // The real idle composer matches NONE of the working/blocked rules (no `esc to cancel` footer,
+    // no approval dialog). It now matches the idle rule, so the engine raises EXACTLY one claim,
+    // `idle` — critically it never synthesizes `blocked` from the idle screen (the forbidden
+    // direction). This negative regression proves the anchors are state-unique.
     for name in ["gemini_idle_w100.txt", "gemini_idle_w60.txt"] {
         let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
         assert_eq!(fx.agent, "gemini");
@@ -315,12 +314,102 @@ fn idle_screen_never_reads_working_or_blocked_at_wide_and_narrow() {
         );
         assert!(
             has_state(&ev, AgentState::Idle),
-            "{name}: the composer placeholder must raise an idle claim"
+            "{name}: the composer box must raise an idle claim"
         );
         assert_eq!(
             ev.evidence.len(),
             1,
             "{name}: exactly one claim, the idle one"
+        );
+    }
+}
+
+// ---- the approval dialog reuses the composer box and must not read idle ----------
+
+#[test]
+fn blocked_screen_raises_no_idle_claim() {
+    // gemini echoes every prior user message into the transcript inside an IDENTICAL composer box:
+    // same `▄`/`▀` half-block frame, same `> ` arrow. So both leaves of a frame-shaped anchor are
+    // present on a blocked screen, and the idle rule is safe because of WHERE it looks, not what
+    // it looks for. The approval dialog replaces the composer and the status footer outright, so
+    // the bottom eight rows carry no box edge at all.
+    for name in ["gemini_blocked_w100.txt", "gemini_blocked_w60.txt"] {
+        let ev = evaluate(name);
+        assert!(
+            !has_state(&ev, AgentState::Idle),
+            "{name}: the approval dialog must not read as the live composer"
+        );
+    }
+
+    // Control, and the reason the window must not be widened to `visible`: the SAME leaf scanning
+    // the whole visible screen matches BOTH blocked captures, off the transcript echoes. Review
+    // gate R-B proposed exactly that unwindowed shape; it would ship a false `idle` on an approval
+    // prompt, the forbidden direction under REQUIREMENTS D2.
+    let unwindowed = RuleEngine::build(
+        &Manifest::parse(
+            "min_engine_version = \"0.1\"\n[identity]\nprocess_names=[\"node\"]\n\
+             [capture]\nvisible=[\"idle\"]\n\
+             [[rules]]\nstate=\"idle\"\nregion=\"visible\"\nmatch={ line_regex='^\\s*▀{10,}\\s*$' }\n",
+            "control.toml",
+        )
+        .expect("control manifest parses"),
+    )
+    .expect("control manifest compiles");
+    for name in ["gemini_blocked_w100.txt", "gemini_blocked_w60.txt"] {
+        let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
+        assert!(
+            has_state(&unwindowed.evaluate(&snapshot(&fx)), AgentState::Idle),
+            "{name}: the leak is real, an unwindowed frame rule matches the transcript echo"
+        );
+    }
+}
+
+// ---- a composer holding a draft still reads idle ---------------------------------
+
+#[test]
+fn idle_rule_survives_a_non_empty_composer() {
+    // Review gate R-B's functional finding. The first idle anchor was the composer PLACEHOLDER
+    // (`Type your message or @path/to/file`), which gemini draws only while the box is EMPTY, so a
+    // pane holding a draft lost the anchor and dropped back into the pinned-`working` trap the
+    // rule exists to close. The shipped anchor is the box's `▀` bottom edge inside `tail_lines(8)`,
+    // which is draft-independent: the box grows UPWARD, so its bottom edge keeps its distance from
+    // the status footer no matter how many rows the draft wraps to.
+    //
+    // The splice turns a real capture into the screen gemini draws with a draft in the box: the
+    // placeholder row becomes two draft rows, and one row comes off the top because the terminal
+    // scrolls rather than growing. Only the composer content changes.
+    for name in ["gemini_idle_w100.txt", "gemini_idle_w60.txt"] {
+        let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
+        let mut lines: Vec<&str> = fx.capture.lines().collect();
+        let at = lines
+            .iter()
+            .position(|l| l.contains("Type your message or @path/to/file"))
+            .unwrap_or_else(|| panic!("{name}: fixture must carry the empty-composer placeholder"));
+        lines[at] = " > refactor the fold ladder so blocked outranks working, then run";
+        lines.insert(at + 1, "   the whole suite and report the count");
+        lines.remove(0);
+        let spliced = format!("{}\n", lines.join("\n"));
+        assert!(
+            !spliced.contains("Type your message or @path/to/file"),
+            "{name}: the splice must really remove the placeholder, or it proves nothing"
+        );
+
+        let snap = PaneSnapshot {
+            tail_text: spliced,
+            ..snapshot(&fx)
+        };
+        let ev = engine().evaluate(&snap);
+        assert!(
+            has_state(&ev, AgentState::Idle),
+            "{name}: a composer holding a draft must still raise an idle claim"
+        );
+        assert!(
+            !has_state(&ev, AgentState::Blocked),
+            "{name}: a draft must never read blocked"
+        );
+        assert!(
+            !has_state(&ev, AgentState::Working),
+            "{name}: a draft must never read working"
         );
     }
 }
@@ -353,14 +442,14 @@ fn idle_screen_releases_a_pinned_working_stamp() {
 
 #[test]
 fn working_screen_also_matches_the_idle_rule_but_still_folds_working() {
-    // gemini draws the composer placeholder underneath the thinking footer, so the working screen
-    // raises BOTH claims. That is by design (claude's `⏵⏵` precedent); the fold's slot order is
-    // what resolves it. If this ever folds to idle, the ladder in `fold.rs` has been reordered.
+    // gemini keeps the composer box on screen underneath the thinking footer, so the working
+    // screen raises BOTH claims. That is by design (claude's `⏵⏵` precedent); the fold's slot order
+    // is what resolves it. If this ever folds to idle, the ladder in `fold.rs` has been reordered.
     for name in ["gemini_working_w100.txt", "gemini_working_w60.txt"] {
         let ev = evaluate(name);
         assert!(
             has_state(&ev, AgentState::Idle),
-            "{name}: the composer placeholder renders mid-turn too"
+            "{name}: the composer box renders mid-turn too"
         );
         assert!(has_state(&ev, AgentState::Working), "{name}: working too");
         let v = fold_verdict(name, None, 10);

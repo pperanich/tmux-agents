@@ -147,15 +147,15 @@ claim = { state = "blocked", detail = "permission" }
 # The title identity above makes these reachable PASSIVELY: a hookless gemini pane is now
 # identified and captured, so these rules fire without a hook registration (before, the pane had
 # to be hook-wired to be seen at all).
-# idle is NOT capture-visible: the idle composer (`> Type your message or @path/to/file`) shares
-# its chrome with working, so it carries no state-unique anchor — idle rides the AfterAgent hook.
-# Every visible state has a real fixture (and the idle negatives prove the anchors are
-# state-unique). idle has a rule too (bottom of this file) but stays OUT of `visible`: its
-# composer chrome renders mid-turn, so it is not evidence a turn ENDED and must never be allowed
-# to decay an idle hook claim. The rules scan `Region::Visible`: gemini's approval dialog and
-# thinking footer sit at the END of the conversation content (not pinned to the bottom), so a
-# whole-screen scan is needed, but clamped to the visible screen so `capture-pane -S` scrollback
-# from a prior turn cannot false-match.
+# idle is NOT capture-visible, but it DOES have a rule (bottom of this file). Its composer chrome
+# co-renders with working, so it is not evidence a turn ENDED and must never be allowed to decay
+# an idle hook claim; the rule exists only to give the fold a positive idle claim once the working
+# chrome leaves. Every visible state has a real fixture, and the idle/working negatives prove the
+# blocked anchors are state-unique.
+# The working and blocked rules scan `Region::Visible`: gemini's approval dialog and thinking
+# footer sit at the END of the conversation content (not pinned to the bottom), so a whole-screen
+# scan is needed, but clamped to the visible screen so `capture-pane -S` scrollback from a prior
+# turn cannot false-match. The idle rule is the exception and is bottom-anchored; see its own note.
 [capture]
 visible = ["working", "blocked"]
 
@@ -183,23 +183,41 @@ priority = 10
 region = "visible"
 match = { contains = "esc to cancel" }
 
-# idle: the composer placeholder (`>   Type your message or @path/to/file`), the hint gemini draws
-# inside its input box. Without a positive idle claim a pane that finished a turn raises no fresh
-# evidence at all, so every later cycle lands on `hold previous` and the row stays pinned at
-# `working` — the SessionStart/Stop hooks cover the transition, but an unwired pane has nothing.
+# idle: the bottom edge of gemini's composer box, in a bottom-anchored window.
 #
-# The placeholder is present for the whole turn, idle and working alike (verified in
-# gemini_working_w{100,60}.txt, where it sits below `⠏ Thinking... (esc to cancel, 24s)`). That
-# co-render is deliberate and mirrors claude's `⏵⏵` rule: the fold's slot order (blocked → working
-# → idle) keeps the verdict at `working` while the turn runs, and the composer only wins once the
-# thinking footer is gone. Priority sits below the working rule to say the same thing here.
-# The approval dialog replaces the composer entirely, so the anchor is absent from
-# gemini_blocked_w{100,60}.txt — a blocked screen raises no idle claim at all.
+# Without a positive idle claim a pane that finished a turn raises no fresh evidence at all, so
+# every later cycle lands on `hold previous` and the row stays pinned at `working` (the
+# SessionStart/AfterAgent hooks cover the transition, but an unwired pane has nothing).
+#
+# WHY NOT THE PLACEHOLDER TEXT. The first cut anchored on `Type your message or @path/to/file`.
+# gemini draws that hint only while the composer is EMPTY, so a pane holding a draft, or a user
+# typing ahead mid-turn, lost the anchor and dropped straight back into the pinned-`working` trap
+# this rule exists to close. The anchor below is draft-independent: the composer box grows UPWARD
+# as its content wraps, so its `▀` bottom edge stays a fixed short distance above the two-row
+# `workspace / sandbox / model` footer at the foot of the screen. Measured distance from the last
+# captured row: 5 (gemini_idle_w100), 6 (gemini_idle_w60), 4 (gemini_working_w100),
+# 5 (gemini_working_w60). The window is 8, so two extra footer rows would still match.
+#
+# WHY THE WINDOW IS THE SAFETY, not the glyph. Every prior user message is echoed into the
+# transcript inside an IDENTICAL box: same `▄`/`▀` half-block frame, same `> ` arrow. So neither
+# the frame nor the arrow is unique to the live composer anywhere on the screen, and a
+# `visible`-region frame rule matches BOTH blocked captures (checked; it would ship a false `idle`
+# on the approval prompt, the forbidden direction under REQUIREMENTS D2). Position is what is
+# unique. The approval dialog replaces the composer and the footer outright, and the dialog is
+# itself eleven rows tall in both captures, so no transcript echo above it can reach the bottom
+# eight rows even if the dialog sat flush against them. Measured distance to the nearest `▀` on a
+# blocked screen: 23 (gemini_blocked_w100) and 26 (gemini_blocked_w60), against a window of 8.
+#
+# The rule co-renders with working, deliberately, mirroring claude's `⏵⏵` rule: the fold's slot
+# order (blocked → working → idle) keeps the verdict at `working` while the thinking footer is up,
+# and the composer only wins once that footer is gone. Priority sits below the working rule to say
+# the same thing here. `tail_lines` also makes the scrollback clamp moot: a bottom-anchored window
+# is strictly inside the visible screen, so `capture-pane -S` history can never reach it.
 #
 # Note that `idle` stays OUT of [capture].visible: the composer is not evidence a turn ENDED
 # (it renders mid-turn too), so it must never be allowed to decay an idle hook claim.
 [[rules]]
 state = "idle"
 priority = 5
-region = "visible"
-match = { contains = "Type your message or @path/to/file" }
+region = "tail_lines(8)"
+match = { line_regex = '^\s*▀{10,}\s*$' }

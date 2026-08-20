@@ -311,9 +311,12 @@ real snake_case `session_id`; Gemini uses its own native event names.
 notification cannot false-block. Coverage: `[hooks].covers = ["working", "idle",
 "blocked", "lifecycle"]` and `[capture].visible = ["working", "blocked"]`. Idle
 rides the `AfterAgent` hook, and additionally has a screen rule anchored on the
-composer placeholder `Type your message or @path/to/file`; that chrome overlaps
-working, which is why idle has a rule but is not `visible` (see "Idle screen
-rules", above).
+bottom edge of the composer box (`▀▀▀…`) within a `tail_lines(8)` window; that
+chrome overlaps working, which is why idle has a rule but is not `visible` (see
+"Idle screen rules", above). The window is the safety here, not the glyph: gemini
+echoes each prior user message into the transcript inside an identical box, so the
+frame appears on a blocked screen too, but the approval dialog replaces the
+composer and the footer, leaving the bottom of the screen empty of box edges.
 
 ### Cursor mapping
 

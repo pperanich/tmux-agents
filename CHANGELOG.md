@@ -18,7 +18,7 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   all — and with nothing to weigh, every later cycle held the previous verdict. A pane that finished
   half an hour ago still read `working`, and no amount of waiting moved it, because waiting was the
   problem. All five now carry an idle rule anchored on their composer: codex's `›` arrow, cursor's
-  input frame, gemini's `Type your message or @path/to/file`, opencode's `ctrl+p commands`, pi's
+  input frame, gemini's composer box edge, opencode's `ctrl+p commands`, pi's
   input rules plus context gauge. Each anchor is backed by real captures at two widths, including a
   freshly driven post-turn cursor screen — its previous idle fixture was a fresh session, whose
   prompt text turns out not to survive the first turn. The composer is on screen mid-turn too, so

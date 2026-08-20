@@ -298,7 +298,8 @@ required and is skipped when the command auto-approves. So `Notification`/ToolPe
 were captured live at two widths, so `[capture].visible = ["working", "blocked"]` with real rules
 scanning `Region::Visible`. idle stays screen-INVISIBLE — its composer chrome overlaps working, so
 letting it into `visible` would mean working chrome could decay an idle hook claim — but as of
-batch B it does carry a positive idle RULE (`Type your message or @path/to/file`), so a pane whose
+batch B it does carry a positive idle RULE (the composer box's `▀` bottom edge, bottom-anchored in
+a `tail_lines(8)` window so a transcript echo of the same box cannot match), so a pane whose
 hooks never fired is no longer pinned at `working` after a turn. The two are separate switches:
 `[capture].visible` grants authority over a hook claim; a `[[rules]]` entry only supplies a claim
 for the fold to rank (D10).
