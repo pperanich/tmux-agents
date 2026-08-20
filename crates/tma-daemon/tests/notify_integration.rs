@@ -1103,6 +1103,74 @@ fn stamp_idle_with_context(s: &Scratch, pane: &str, comm: &str, pid: u32, pct: u
     s.set_opt(pane, "@agent_context_at", &at.to_string());
 }
 
+/// A sink that records the payload's reported episode age beside the pane, for the cases that are
+/// about `TMA_SINCE_MS` rather than the fire count.
+fn age_sink_cmd(s: &Scratch) -> String {
+    format!(
+        "printf 'fire %s %s\\n' \"$TMA_PANE\" \"$TMA_SINCE_MS\" >> {}",
+        sink_path(s).display()
+    )
+}
+
+/// `TMA_SINCE_MS` is the episode's age at dispatch. On a SECOND completion `@agent_since` is still
+/// pinned to the start of the idle run (write-once per state run), so reading it there reports how
+/// long the pane has been idle — minutes or hours — in a field a hook reads as dispatch latency.
+/// The episode instant is `max(@agent_since, @agent_turn_at)`, which is what the dedup and the
+/// marker clamp already compare. Pass `stored.since` in `fire_for` and this fails.
+#[test]
+fn a_second_completions_payload_reports_the_turns_age_not_the_idle_runs() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("t21");
+    let (pane, pid) = new_shell_session(&s, "s1");
+    let comm = comm_of(pid);
+    write_manifest(&s, &manifest(&process_names_toml(&s, "s1", pid)));
+    let cfg_dir = s.workdir.join("cfg");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let cfg = cfg_dir.join("config.toml");
+    std::fs::write(&cfg, "[notify]\non = [\"done\"]\n").unwrap();
+    let _daemon = spawn_daemon_with_config(&s, &age_sink_cmd(&s), &cfg, &["--sweep-ms", "400"]);
+    s.expect_status("clients", "1");
+    wait_quiescent(&s);
+
+    // An hour-old idle run whose marker has just been re-raised by a fresh turn end. Stamped
+    // directly: the point is the arithmetic on the stored tuple, not how it came to be stored.
+    const IDLE_RUN_MS: u64 = 3_600_000;
+    let now = now_ms();
+    s.set_opt(&pane, "@agent_name", &comm);
+    s.set_opt(&pane, "@agent_state", "idle");
+    s.set_opt(&pane, "@agent_source", "hook");
+    s.set_opt(&pane, "@agent_evidence_at", &now.to_string());
+    s.set_opt(&pane, "@agent_since", &(now - IDLE_RUN_MS).to_string());
+    s.set_opt(&pane, "@agent_stamped_at", &now.to_string());
+    s.set_opt(&pane, "@agent_pid", &pid.to_string());
+    s.set_opt(&pane, "@agent_turn_at", &now.to_string());
+    s.set_opt(&pane, "@agent_attention", "1");
+
+    assert_eq!(
+        wait_sink_lines(&s, 1, common::POLL_CEILING),
+        1,
+        "the re-raised done marker fired exactly one notification"
+    );
+    let line = sink_lines(&s).remove(0);
+    let age: u64 = line
+        .rsplit(' ')
+        .next()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or_else(|| panic!("no TMA_SINCE_MS in the sink line {line:?}"));
+    assert!(
+        line.starts_with(&format!("fire {pane} ")),
+        "the fire is for this pane: {line:?}"
+    );
+    assert!(
+        age < IDLE_RUN_MS / 2,
+        "the payload reports the new turn's age, not the idle run's: {age} ms"
+    );
+}
+
 fn wait_marker_empty(s: &Scratch, pane: &str, key: &str) -> bool {
     let deadline = Instant::now() + common::POLL_CEILING;
     loop {

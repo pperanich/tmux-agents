@@ -27,6 +27,11 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   later of the two. `tma wait --until done --since <T>` sees the second completion for the same
   reason, so a supervisor loop can act on one and wait for the next. One turn end reported on two
   channels (Codex sends both `Stop` and `notify`) still marks and rings once.
+- The notification a second completion fires reports its own age again. The payload's `since_ms`
+  (and `TMA_SINCE_MS`) is documented as how long the episode had been standing when the hook ran,
+  which for the daemon is its dispatch latency; on a re-raised mark it was reading back to the start
+  of the idle run instead, so a hook that logs or thresholds on it saw hours where it expected
+  milliseconds.
 
 ## [0.4.0] - 2026-08-20
 

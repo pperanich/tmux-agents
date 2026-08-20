@@ -216,6 +216,11 @@ impl NotifyState {
         // The payload carries the trigger word (`blocked`/`done`), not the raw landing token (`idle`
         // for a done fire); see [`Notification::state`]. Built through the shared builder, so this
         // payload is identical to the daemonless path's for the same transition.
+        //
+        // The episode start is `episode_at()`, not `since`: the payload's `since_ms` is documented
+        // as the episode's age at dispatch, and on a second completion `@agent_since` is still
+        // pinned to the start of the idle run, which would report hours instead of latency. The
+        // dedup above and the marker clamp already read the same instant.
         let n = notification_for(
             rec,
             rec.options
@@ -225,7 +230,7 @@ impl NotifyState {
             trigger.word(),
             stored.detail.as_ref().map(|d| d.as_str().to_string()),
             stored.session.clone(),
-            stored.since,
+            stored.episode_at(),
             now,
         );
         let command = self.commands.for_trigger(trigger).map(str::to_string);
