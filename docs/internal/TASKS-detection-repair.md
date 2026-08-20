@@ -800,7 +800,7 @@ when `ActivityDelta` went — so it follows here. `Provenance::Process` and `Pro
 untouched. Suite **1235 passing, 0 failed** (unchanged: the deleted assertion lived inside an
 existing test, so no test count moved); `cargo fmt --all --check` clean, clippy silent.
 
-**E5 — repair the R-E findings.** `WIP e5-agent`
+**E5 — repair the R-E findings.** `DONE`
 - R-E returned **FAIL** on one blocking finding plus five smaller ones.
 - ⚠️ **Finding 1 (blocking).** `--since` no longer escapes level-triggering. `wait.rs:73` compares
   `row.episode_at()`, `surfaces.rs:102` emits only `since_ms`, and the documented supervisor loop
@@ -840,6 +840,50 @@ existing test, so no test count moved); `cargo fmt --all --check` clean, clippy 
   not daemonless, where two concurrent `tma event` processes can both read attention absent and both
   raise. It is an over-raise, the same shape as a pre-existing blocked read-modify-write, so it is
   not fixed — the claim is narrowed instead.
+
+**E5 outcome.**
+- **Finding 1's shape: an additive `episode_ms` key on the schema-1 row, `since_ms` untouched.**
+  The alternatives were weighed and rejected. Redefining `since_ms` as the episode instant is the
+  one-key fix, but `since_ms == @agent_since` is what the uptime column and
+  `pane-options-and-json.md` both promise, and it would silently change a value every existing
+  consumer already reads. Teaching `wait` to accept a `--since-key`, or making `--since` compare
+  `since` alone, both re-open the bug E1 closed. So the compared quantity gets its own name:
+  `episode_ms = max(since_ms, @agent_turn_at)`, equal to `since_ms` on every pane that has never
+  had a second completion, which is why nothing about the common case changes. `AgentRow` has no
+  `Serialize`, so the one hand-built site (`surfaces.rs::write_row_fields`) serves `ls --json`,
+  `wait --json` and the fleet `wait --json` alike; all three key-set drift guards were updated and
+  the sorted lists keep them honest. `subscribe --events` needed nothing — an edge is not a row and
+  carries no `since`.
+- **Three tests for it, each verified RED on the pre-fix tree** (emission commented out, tests kept):
+  `surfaces::episode_ms_is_the_wait_floor_and_diverges_from_since_ms` (the key exists and the two
+  values part company), `wait::the_fed_back_floor_blocks_the_wait_the_row_came_from` (the loop
+  closed through the REAL serializer and the real `Goal`, so emitted key and compared key cannot
+  drift again), and `a_fed_back_episode_floor_blocks_the_next_lap` in `wait_integration.rs` — a live
+  scratch server, the CLI's own JSON, the recipe's own extraction: lap 1 exits 0, the fed-back
+  `episode_ms` exits 124, and the same lap fed `since_ms` exits 0, which is R-E's spin asserted as
+  a contrast rather than described.
+- Docs: the two false statements are gone (`cli.md`'s "the row's `since_ms` must be strictly
+  greater", and the recipe's "which is why feeding back the row's own `since_ms` is correct").
+  Both copies of the loop read `episode_ms`, the reference table has a row for it, and the two
+  sample rows in the tutorial and the how-to carry the key (the tutorial's "twenty keys" is now
+  twenty-one, checked by parsing the sample).
+- **Finding 2** is `stored.episode_at()` at the one call site, plus
+  `a_second_completions_payload_reports_the_turns_age_not_the_idle_runs`: an hour-old idle run with
+  a fresh turn end, stamped directly, and the sink records `TMA_SINCE_MS`. Under the old argument it
+  reports 3600087 ms. The daemonless path was left alone; it passes `now, now` and is correct.
+- **Finding 3** adds `unset_pane(t, opt::TURN_AT)` to both episode-reset arms. The deregister test
+  became `every_episode_teardown_clears_the_whole_episode_lane`, covering `render_remove`,
+  `render_publish` and `render_publish_advisory`; each arm's omission was mutation-checked and
+  fails with its own label. `REMOVABLE` already carried the key, so uninstall was never the gap.
+- **Findings 4, 5, 6** are comment/message/CHANGELOG only, as R-E scoped them. Nothing about
+  `standing`'s behaviour changed; the blocked-with-mark-up case is now stated rather than implied.
+- Suite: 1235 → **1239 passing, 0 failed** (`cargo fmt --all --check` clean, clippy silent). The
+  baseline was re-measured on a stashed tree rather than taken from the E4 note.
+- Worth a reviewer's eye: `episode_ms` is derived at serialization time from a row field that only
+  the hook intake ever writes, so a surface that builds an `AgentRow` without going through the
+  stamp decode emits `episode_ms == since_ms` and nothing complains. That is the same precondition
+  `write_row_fields` already documents for `repo`, and the drift guards pin keys rather than
+  provenance.
 
 ---
 
