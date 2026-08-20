@@ -191,13 +191,17 @@ pub fn render_publish(p: &Publish) -> Vec<StampCommand> {
         }
         cmds.push(set_plain(t, opt::SOURCE, p.source.token()));
         cmds.push(set_plain(t, opt::EVIDENCE_AT, &p.evidence_at.to_string()));
-        // Episode boundary clears attention and the notification marker.
+        // Episode boundary clears attention, the notification marker, and the last turn end: the
+        // completion `@agent_turn_at` records belongs to the agent that just went away. Under a
+        // monotone clock the fresh `since` dominates it in `episode_at()` anyway, but a backward
+        // clock step would let the dead agent's turn decide the new episode's instant.
         if p.set_attention {
             cmds.push(set_plain(t, opt::ATTENTION, "1"));
         } else {
             cmds.push(unset_pane(t, opt::ATTENTION));
         }
         cmds.push(unset_pane(t, opt::NOTIFIED_AT));
+        cmds.push(unset_pane(t, opt::TURN_AT));
     } else {
         // `@agent_since` is write-once per episode: hold the stored value while state is
         // unchanged, else record the transition. The guard wraps it so a held tuple never bumps
@@ -345,6 +349,7 @@ pub fn render_publish_advisory(
             cmds.push(unset_pane(t, opt::ATTENTION));
         }
         cmds.push(unset_pane(t, opt::NOTIFIED_AT));
+        cmds.push(unset_pane(t, opt::TURN_AT));
     } else {
         // Producer-side write-once: keep the stored `since` while the state is unchanged, else
         // record the transition — including when a clock step stranded the stored value in the
@@ -1097,18 +1102,50 @@ mod tests {
         }
     }
 
-    /// The whole episode lane comes down on a deregister. `@agent_turn_at` is the one most easily
-    /// forgotten — it is written on a different path from the rest of the tuple (only a `turn_end`
-    /// hook writes it), so a miss here would leave it on the user's server after
-    /// `install-hooks --uninstall` and after the agent deregistered.
+    /// The whole episode lane comes down at every teardown: the deregister, and both episode-reset
+    /// arms (a new pid owns the pane, so the stored tuple belongs to a dead agent). `@agent_turn_at`
+    /// is the one most easily forgotten — it is written on a different path from the rest of the
+    /// tuple (only a `turn_end` hook writes it), so a miss leaves it on the user's server after an
+    /// uninstall, or lets a dead agent's completion decide the new episode's instant the moment the
+    /// wall clock steps backward and `since` stops dominating it.
     #[test]
-    fn remove_unsets_the_whole_episode_lane() {
-        let cmds = render_remove("%7");
+    fn every_episode_teardown_clears_the_whole_episode_lane() {
+        let unset_keys = |cmds: &[StampCommand]| -> Vec<String> {
+            cmds.iter()
+                .filter(|c| c.argv.contains(&"-u".to_string()))
+                .filter_map(|c| c.argv.last().cloned())
+                .collect()
+        };
+
+        let removed = unset_keys(&render_remove("%7"));
         for key in [opt::SINCE, opt::ATTENTION, opt::NOTIFIED_AT, opt::TURN_AT] {
             assert!(
-                cmds.iter()
-                    .any(|c| c.argv.last().map(String::as_str) == Some(key)),
+                removed.iter().any(|k| k == key),
                 "render_remove must unset {key}"
+            );
+        }
+
+        // An episode reset rewrites `since` rather than unsetting it; the rest of the lane goes.
+        let mut p = publish(AgentState::Working, Provenance::Capture, Guard::ProtectHook);
+        p.episode_reset = true;
+        for (label, cmds) in [
+            ("render_publish", render_publish(&p)),
+            (
+                "render_publish_advisory",
+                render_publish_advisory(&p, Some(AgentState::Idle), 150),
+            ),
+        ] {
+            let unset = unset_keys(&cmds);
+            for key in [opt::ATTENTION, opt::NOTIFIED_AT, opt::TURN_AT] {
+                assert!(
+                    unset.iter().any(|k| k == key),
+                    "{label}'s episode reset must unset {key}"
+                );
+            }
+            assert_eq!(
+                value_for(&cmds, opt::SINCE).unwrap(),
+                "200",
+                "{label}'s episode reset writes the new since"
             );
         }
     }

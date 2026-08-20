@@ -32,6 +32,9 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   which for the daemon is its dispatch latency; on a re-raised mark it was reading back to the start
   of the idle run instead, so a hook that logs or thresholds on it saw hours where it expected
   milliseconds.
+- A pane whose agent is replaced no longer inherits the old one's last turn. The episode reset
+  already cleared the mark and the notification marker but left `@agent_turn_at` standing, which a
+  backward wall-clock step could have let decide the new episode's instant.
 
 ## [0.4.0] - 2026-08-20
 
