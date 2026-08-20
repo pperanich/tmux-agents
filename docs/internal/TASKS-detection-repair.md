@@ -494,11 +494,11 @@ session's current window's active pane is what it would have to resolve.
 Goal: the residue you actually reported — sitting on the pane, never navigating. Clear iff a client
 displays the pane **and** its last input is strictly later than the raise.
 
-**D1 — client view reader.** `OPEN`
+**D1 — client view reader.** `WIP batch-d-agent`
 - `list-clients -F '#{pane_id}<SEP>#{client_activity}<SEP>#{client_control_mode}'`, appended to the
   existing `list-panes` call as `\; list-clients …` (one process). Filter out control-mode clients.
 
-**D2 — the predicate, pure and unit-tested.** `OPEN`
+**D2 — the predicate, pure and unit-tested.** `WIP batch-d-agent`
 - Beside `is_done` in `crates/tma-core/src/row.rs`, or a small module. Signature roughly
   `seen(displayed: &[(pane_id, activity_secs)], pane, raised_at_ms) -> bool`.
 - Strict `>`, never `>=`. Floor `activity_secs * 1000`. The raise instant is `@agent_since`
@@ -507,17 +507,17 @@ displays the pane **and** its last input is strictly later than the raise.
   (**walk-away — must not clear**); newer activity (must clear); two clients where the wrong one is
   active; a control-mode client (must be ignored).
 
-**D3 — wire into the cycle.** `OPEN`
+**D3 — wire into the cycle.** `WIP batch-d-agent`
 - `crates/tma-runtime/src/cycle.rs`, end of `run_cycle`. Gate on `!stampede_skip` **and** some row
   carrying attention, so the zero-config floor pays nothing in steady state.
 - **Mutate `report.rows` to match**, or `tma status` lags a cycle behind its own clear.
 
-**D4 — sequence the clear after notification dispatch.** `OPEN`
+**D4 — sequence the clear after notification dispatch.** `WIP batch-d-agent`
 - `crates/tma-daemon/src/daemon/serve.rs:377-379`. `notify.rs:50-56` gates on the persisted flag, so
   a clear landing between raise and dispatch eats the desktop notification. The race pre-exists;
   do not widen it. If a notify test turns flaky, fix the ordering — **do not add a sleep**.
 
-**D5 — docs + changelog.** `OPEN`
+**D5 — docs + changelog.** `WIP batch-d-agent`
 - Document the invariant in one line: *the done mark survives until your next input while that pane
   is on screen, or until you navigate off it.*
 - Note the two honest limits: no-op for control-mode (`-CC`) clients, and the reader who never types.
