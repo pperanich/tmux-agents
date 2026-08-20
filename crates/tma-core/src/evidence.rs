@@ -15,13 +15,6 @@ pub enum Source {
     ScreenRule,
     /// The pane title carried recognizable chrome (spinner / idle marker).
     Title,
-    /// A process-tree fact (pid present/gone, foreground command). **Constructed nowhere, and not
-    /// reserved for anything**: process facts reach the fold as [`crate::snapshot::PaneSnapshot`] /
-    /// `SnapshotFacts`, not as ranked evidence, and the fold publishes [`Provenance::Process`]
-    /// directly from precedence 2 (`fold.rs`, "foreground is not the agent"). Nothing can ever
-    /// reach this variant's `provenance()` arm. Slated for deletion (plan task E4); it survives
-    /// this pass only because two of its six sites are in a file another task holds.
-    ProcessFact,
 }
 
 impl Source {
@@ -31,7 +24,6 @@ impl Source {
         match self {
             Source::HookEvent => Provenance::Hook,
             Source::ScreenRule | Source::Title => Provenance::Capture,
-            Source::ProcessFact => Provenance::Process,
         }
     }
 }
@@ -168,7 +160,6 @@ mod tests {
         assert_eq!(Source::HookEvent.provenance(), Provenance::Hook);
         assert_eq!(Source::ScreenRule.provenance(), Provenance::Capture);
         assert_eq!(Source::Title.provenance(), Provenance::Capture);
-        assert_eq!(Source::ProcessFact.provenance(), Provenance::Process);
     }
 
     #[test]

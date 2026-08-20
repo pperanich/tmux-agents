@@ -227,7 +227,7 @@ verdicts (`tma debug explain` must say *which rule/event decided*).
 
 ```rust
 Evidence {
-  source:   HookEvent | ScreenRule | Title | ProcessFact,
+  source:   HookEvent | ScreenRule | Title,
   claim:    StateClaim { state, detail },        // or lifecycle claims (agent start/end)
   at:       Timestamp,                            // injected, never read from a clock (D7)
   meta:     rule id / hook name / matcher — for explain output

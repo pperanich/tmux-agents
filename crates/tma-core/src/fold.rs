@@ -451,7 +451,6 @@ fn source_name(s: Source) -> &'static str {
         Source::HookEvent => "hook",
         Source::ScreenRule => "screen",
         Source::Title => "title",
-        Source::ProcessFact => "process",
     }
 }
 
@@ -1159,11 +1158,7 @@ mod tests {
     use proptest::prelude::*;
 
     fn arb_non_hook_source() -> impl Strategy<Value = Source> {
-        prop_oneof![
-            Just(Source::ScreenRule),
-            Just(Source::Title),
-            Just(Source::ProcessFact),
-        ]
+        prop_oneof![Just(Source::ScreenRule), Just(Source::Title),]
     }
 
     fn arb_state() -> impl Strategy<Value = AgentState> {

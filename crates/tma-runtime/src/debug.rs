@@ -504,7 +504,6 @@ fn source_token(s: Source) -> &'static str {
         Source::HookEvent => "hook",
         Source::ScreenRule => "screen",
         Source::Title => "title",
-        Source::ProcessFact => "process",
     }
 }
 
