@@ -676,11 +676,41 @@ displays the pane **and** its last input is strictly later than the raise.
   the outside view of a still-detached session (`choose-tree`, `list-windows`, a polling script).
   The sharper edge is `destroy-unattached`, which never fires while the daemon runs.
 
-**E3 — dead code.** `WIP e23-agent`
-- `Source::ProcessFact` is declared (`evidence.rs:20` neighbourhood) and produced nowhere.
+**E3 — dead code.** `DONE`
+- `@agent_hash`'s value is write-only since A1: `can_reuse_stamp` (`cycle.rs:593`) reads only
+  `p.hash.is_none()`, and no hash is compared anywhere. **Decision: keep, presence-only, and say so.**
+  Removing it would not remove a write — `can_reuse_stamp` still needs an "ever captured" marker, so
+  the option would come back under another name carrying strictly less information, for a saving of
+  one FNV pass over a viewport already fetched by a `capture-pane` subprocess. It is also read as
+  optional (`parse_opt_int`, `stamp.rs`), so a stamp without it already decodes and no reader breaks
+  either way. Where it now says so: `snapshot.rs` (`tail_hash`), ARCHITECTURE.md's option table, and
+  a new row in `docs/reference/pane-options-and-json.md` — it had never been listed on the public
+  contract page at all, which was the real gap.
+- `Source::ProcessFact` is declared (`evidence.rs:19`) and produced nowhere. **Decision: delete** —
+  it is not a reserved slot. Process facts reach the fold as `SnapshotFacts`, and precedence 2
+  publishes `Provenance::Process` directly (`fold.rs:154`), so no evidence record can ever carry this
+  source and `tma-core` is `publish = false`, so nothing external sees the enum. Two of its four
+  sites are in `fold.rs` (`:454` `source_name`, `:1165` the proptest generator), held by E1 for the
+  duration; deleting only the other two would not compile. Filed as **E4** and commented in place, so
+  the next reader neither re-derives it nor mistakes it for a reservation.
 - `#{alternate_on}` is read into `PaneSnapshot` and consumed only by a debug line, while every agent
-  pane is alt-screen — which is why the `scroll_position` freeze has no coverage over in-app
-  scrolling. Decide: use it to gate strategy, or document it as diagnostic.
+  pane is alt-screen. **Decision: diagnostic only, and record the blind spot it explains.** There is
+  nothing to gate with it: the two candidates are already covered (`scroll_position` is read in the
+  same format batch, so skipping it saves nothing, and identity does not need it). What was actually
+  missing is the consequence: `PaneSnapshot::scrolled` now documents that an agent scrolling its own
+  transcript never moves `#{scroll_position}`, so the freeze covers a human in tmux copy-mode and
+  nothing else, and that what keeps that survivable is manifests anchoring on bottom-pinned chrome.
+  Also recorded at REQUIREMENTS appendix A, next to the alt-screen observation that causes it.
+
+**E4 — delete `Source::ProcessFact`.** `OPEN`
+- Decided in E3, blocked there only by file contention with E1. Six sites in three files, mechanical:
+  `crates/tma-core/src/evidence.rs:19` (the variant and its doc comment), `:29` (the `provenance()`
+  arm), `:166` (the assertion in `source_folds_to_provenance`), `crates/tma-core/src/fold.rs:454`
+  (`source_name` arm), `:1165` (`arb_non_hook_source`), and
+  `crates/tma-runtime/src/debug.rs:507` (`source_token` arm).
+- Not a coverage loss: the proptest generator drops a variant that no producer can construct, and
+  `Provenance::Process` (which IS produced, `fold.rs:154`) and its `FromStr`/token arms stay.
+- Accept: `Source` has three variants, the workspace builds, and the suite count drops by nothing.
 
 ---
 

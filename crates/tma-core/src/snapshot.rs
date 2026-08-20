@@ -34,7 +34,10 @@ pub struct PaneSnapshot {
     /// stamp; the value is not compared against anything. Scheduling only — it makes no state
     /// claim. Injected so the core does not choose a hash algorithm.
     pub tail_hash: u64,
-    /// `#{alternate_on}` — alt-screen agents report 1.
+    /// `#{alternate_on}` — alt-screen agents report 1. **Diagnostic only**: nothing gates on it,
+    /// and the one consumer is `tma doctor`'s `flags` line. It is carried because it explains the
+    /// limit documented on [`PaneSnapshot::scrolled`], and every bundled agent reports 1
+    /// (REQUIREMENTS appendix A), so a pane reporting 0 is worth seeing when detection surprises you.
     pub alternate_on: bool,
     /// `#{scroll_position}`: `None` outside copy-mode, `Some(n)` in copy-mode with the viewport
     /// `n` lines above the live screen. See [`PaneSnapshot::scrolled`].
@@ -51,6 +54,17 @@ impl PaneSnapshot {
     /// Is the viewport something other than the live screen (the fold's freeze fact)? Entering
     /// copy-mode at the bottom reports offset 0, which is still the live screen, so only a
     /// positive offset freezes; treating bare copy-mode as frozen suspends detection invisibly.
+    ///
+    /// **Known blind spot.** This is tmux's scroll, not the agent's. Every bundled agent runs
+    /// alt-screen ([`PaneSnapshot::alternate_on`], REQUIREMENTS appendix A) and scrolls its own
+    /// transcript inside its TUI, which never moves `#{scroll_position}`: an agent pane whose user
+    /// is reading back through the conversation reads as *not* scrolled and keeps being matched
+    /// against whatever the TUI is currently painting. The freeze therefore covers a human in tmux
+    /// copy-mode and nothing else, and no tmux format reports an application's internal scroll, so
+    /// there is nothing to fix it with. What keeps it survivable is that the bundled manifests
+    /// anchor on chrome the TUIs pin to the bottom (spinner, composer, dialog box), which a
+    /// transcript scroll does not move; a rule anchored on transcript body text would have no
+    /// freeze protecting it.
     pub fn scrolled(&self) -> bool {
         matches!(self.scroll_position, Some(n) if n > 0)
     }

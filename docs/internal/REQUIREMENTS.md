@@ -474,7 +474,11 @@ agents outside tmux; Windows; non-English agent UIs; GUI/web surfaces.
 Live checks against a running fleet of 7 Claude Code panes:
 
 - `#{pane_current_command}` reports `claude` for directly-launched agents.
-- All agent panes show `#{alternate_on} = 1`.
+- All agent panes show `#{alternate_on} = 1`. Consequence (E3): the pane-level scroll freeze
+  (`PaneSnapshot::scrolled`, `#{scroll_position}`) is structurally blind to an agent scrolling its
+  own transcript, because that scroll happens inside the alternate screen and never moves a tmux
+  fact. The freeze covers a human in tmux copy-mode only. `alternate_on` itself gates nothing and is
+  carried as a diagnostic (`tma doctor`'s `flags` line).
 - `#{pane_title}` carries agent-published OSC titles including state and task summary:
   `✳ Update resume with …` (idle), `⠐ Understand coding agents state detection`
   (working — braille spinner, U+2800 block).
