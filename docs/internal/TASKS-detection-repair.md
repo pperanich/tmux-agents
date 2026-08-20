@@ -640,7 +640,7 @@ displays the pane **and** its last input is strictly later than the raise.
 
 ## Batch E — deferred, only on explicit go-ahead
 
-**E1 — idle→idle re-signal.** `OPEN (deferred)`
+**E1 — idle→idle re-signal.** `WIP e1-agent`
 - A second real completion with no observed `Working` between raises nothing, and there is no
   recovery. Fix belongs in the **event intake**, not the fold: `event/mapping.rs:194-198` receives a
   hook that *means* "a turn ended" and throws that away by re-deriving `set_attention` from
