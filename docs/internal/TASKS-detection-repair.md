@@ -31,6 +31,11 @@ Status vocabulary: `OPEN` (available) · `WIP <agent>` (claimed) · `DONE` · `B
    claim by running tmux on an isolated socket (`tmux -L <name> -f /dev/null …`, `kill-server` after).
    Never touch the user's default server.
 7. **Scratch files** go in the session scratchpad, never the repo.
+8. **Take a review agent's evidence; re-verify its remedy.** Gate R-B diagnosed a real defect and
+   proposed a fix that would have shipped a false `idle` over `blocked` — the one defect this
+   project most guards against. The diagnosis was worth acting on; the remedy was not. Prove any
+   suggested fix against the fixtures yourself before applying it. Same rule for this plan: it has
+   been wrong three times already (see B6 and batch B's outcome notes).
 
 ---
 
