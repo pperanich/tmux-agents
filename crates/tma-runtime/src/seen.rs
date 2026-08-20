@@ -22,6 +22,14 @@ use tma_tmux::tmux::Tmux;
 ///
 /// Nothing is reported cleared unless the write actually landed: on a failed batch the caller's
 /// view stays as it was and the next cycle retries, so a row can never claim a clear tmux refused.
+///
+/// The `since` it decides on is as old as the rows: read at the top of the cycle, acted on at the
+/// end of it (on the daemon path, after the whole sweep and the notification dispatch). A pane that
+/// re-raised inside that window is retired on evidence about the *previous* episode, and the unset
+/// is unguarded, so it lands anyway. Accepted rather than fixed: `render::unset_pane_option` has no
+/// `-F` conditional form, the focus-hook clears have exactly the same shape, and the flag
+/// self-corrects — the next cycle reads the new `since`, finds no input after it, and the marker
+/// stands again for the cost of one cycle.
 pub fn clear_seen(tmux: &Tmux, raised: &[(String, u64)]) -> Vec<String> {
     if raised.is_empty() {
         return Vec::new();
@@ -58,14 +66,13 @@ pub fn raised_panes(rows: &[AgentRow]) -> Vec<(String, u64)> {
 }
 
 /// [`clear_seen`] over a cycle's rows, clearing the flag on the rows it clears so the surface this
-/// cycle feeds shows the result of its own clear rather than lagging a cycle behind it.
-pub fn clear_seen_rows(tmux: &Tmux, rows: &mut [AgentRow]) -> usize {
-    let raised = raised_panes(rows);
-    let cleared = clear_seen(tmux, &raised);
+/// cycle feeds shows the result of its own clear rather than lagging a cycle behind it. `raised` is
+/// the caller's own [`raised_panes`] result — the same list it gated on, never recomputed here.
+pub fn clear_seen_rows(tmux: &Tmux, rows: &mut [AgentRow], raised: &[(String, u64)]) {
+    let cleared = clear_seen(tmux, raised);
     for row in rows.iter_mut() {
         if cleared.contains(&row.pane_id) {
             row.attention = false;
         }
     }
-    cleared.len()
 }

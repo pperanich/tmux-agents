@@ -454,7 +454,7 @@ pub fn run_cycle_with(
         if !raised.is_empty() {
             match seen_clear {
                 SeenClear::Inline => {
-                    crate::seen::clear_seen_rows(tmux, &mut report.rows);
+                    crate::seen::clear_seen_rows(tmux, &mut report.rows, &raised);
                 }
                 SeenClear::Deferred => report.deferred_seen = raised,
             }

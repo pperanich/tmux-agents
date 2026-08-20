@@ -194,12 +194,16 @@ fn a_marker_raised_after_your_last_input_survives() {
         return;
     }
 
-    // Type first, then walk away: the raise is everything after the last keystroke.
+    // Type first, then walk away: the raise is everything after the last keystroke. The wait
+    // re-reads the clock on every poll rather than closing over one reading — `type_past` returns
+    // as soon as the clock passes the (zero) floor, which the attach itself already satisfies, so a
+    // `q` may still be in flight. A late landing then moves the deadline instead of slipping in
+    // behind the raise and quietly turning this into the case below.
     type_past(&s, 0);
-    let last_input = client_activity_ms(&s);
-    common::poll_until("the client's activity second to elapse", || {
-        now_ms() > last_input + 1_000
+    common::poll_until("the client's last input second to elapse", || {
+        now_ms() > client_activity_ms(&s) + 1_000
     });
+    let last_input = client_activity_ms(&s);
     let raised = now_ms();
     mark_done(&s, &watched, raised);
 

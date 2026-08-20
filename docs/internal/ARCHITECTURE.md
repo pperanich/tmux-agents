@@ -59,7 +59,7 @@ Everything else is qualification or presentation.
 |---|---|---|
 | `@agent_state` | `idle` `working` `blocked` `unknown` — closed, frozen (F14) | whose move is it |
 | `@agent_detail` | `permission` `question` `error` `rate_limit` `background` `compacting` … — open, additive | why / qualification; empty allowed |
-| `@agent_attention` | set on a noteworthy transition, cleared on pane focus or on your next keystroke at the pane | "unseen since it happened" |
+| `@agent_attention` | set on a noteworthy transition, cleared on pane focus or on your next real terminal input at the pane | "unseen since it happened" |
 
 Mappings are **normative, not per-manifest** (adversarial review: manifest-decided
 mappings make `@agent_state` semantics agent-dependent, gutting the closed-vocabulary
@@ -174,9 +174,21 @@ Clearing mechanics, corrected by round-2 empirical review:
   instant in `@agent_since`. Ordered rather than windowed on purpose — "typed within
   the last N seconds" would suppress the mark for someone who typed a prompt and left,
   which is the signal's headline use. Cost is one `list-clients` per cycle, and only
-  while some pane actually carries the flag. Two limits are accepted: a control-mode
-  (`-CC`) client's activity clock freezes at attach, so the layer no-ops there, and a
-  reader who never types is indistinguishable from an absent one.
+  while some pane actually carries the flag. `client_activity` counts every byte a real
+  terminal sends, including the focus reports a terminal emits while `focus-events` is
+  on, so alt-tabbing away from a marked pane counts as having seen it — consistent with
+  the navigation half, where leaving is also seen. Two limits are accepted: a
+  control-mode (`-CC`) client's activity clock freezes at attach, so the layer no-ops
+  there, and a reader who never types is indistinguishable from an absent one.
+- **Control-mode clients are filtered because of tma itself**, not as an iTerm2
+  courtesy. The daemon parks one `tmux -C attach-session -t <session>` per monitored
+  session, and each of those clients is pinned to that session's current-window active
+  pane with an attach-time `client_activity`. A daemon that restarts after a marker goes
+  up therefore carries a timestamp postdating every standing `@agent_since`: unfiltered,
+  its own presence would clear every flagged pane in every session it watches with no
+  human in the room. Verified live (four parked clients, one per session, `cm=1`). The
+  reader treats anything but a literal `0` as control mode, so an unreadable field can
+  only fail to clear.
 
 Known accepted edge: the ordered clear needs one keystroke, so a user sitting on a
 pane in total silence keeps the mark until they touch the keyboard or navigate;
@@ -232,6 +244,17 @@ rank a hook stamp above its own stale capture verdict and will clobber `blocked`
 the fold survives the "just use a hardcoded ladder" simplification: the ladder's
 inputs must be reconstructed from the store, and the fold is the one place that logic
 lives.
+
+**Do not feed presence back into the fold.** The 2026-08-20 amendment deleted a
+viewport-hash delta that was a *guess* at "is the human here", used as state evidence.
+The ordered-input clear reintroduces the true version of that question — tmux's own
+`client_activity`, which is not a guess — but strictly in PRESENTATION: it retracts
+`@agent_attention` and touches no state. The tempting refactor is to give the fold that
+better signal ("the user is typing here, so the pane is not really idle"). It is the
+same mistake with a better sensor: presence is not evidence about what the agent is
+doing, an agent finishes whether or not you are watching, and a fold that reads presence
+becomes unreproducible from the persisted record (AD4) because the deciding input was
+never stamped.
 
 **Revisit if** two sources genuinely need weighted combination rather than ranking —
 no known case yet.

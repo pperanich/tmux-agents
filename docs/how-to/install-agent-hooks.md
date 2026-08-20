@@ -237,8 +237,10 @@ only that window's departed pane; every other flag stands.
 
 The hooks are not the only clear. If you never navigate at all — the agent
 finishes under your eyes and you just keep typing at it — the poll cycle takes
-the mark down on your next keystroke, provided a client of yours is displaying
-that pane and the keystroke lands after the mark went up. That needs no hook and
+the mark down on your next real terminal input, provided a client of yours is
+displaying that pane and that input lands after the mark went up. Input means
+anything your terminal genuinely sends, which with `focus-events on` includes the
+focus report you generate by switching to another application. That needs no hook and
 no install; it is the same walk-away rule read the other way round, and it is
 what makes the invariant *the done mark survives until your next input while that
 pane is on screen, or until you navigate off it*. Under a control-mode client

@@ -19,10 +19,10 @@ wall-clock second distinguishable.
 
 `@agent_attention` is a presence flag: the literal value `1` when set, and the
 option is absent otherwise. It is compared against `@agent_since` by the
-ordered-input clear, which is why the raise instant has to stay write-once. Writers order a chained stamp so `@agent_stamped_at`
-is written last; a reader that sees `stamped_at` older than `since` or
-`evidence_at` caught a chained write mid-flight and should treat the tuple as
-in-progress.
+ordered-input clear, which is why the raise instant has to stay write-once.
+Writers order a chained stamp so `@agent_stamped_at` is written last; a reader
+that sees `stamped_at` older than `since` or `evidence_at` caught a chained write
+mid-flight and should treat the tuple as in-progress.
 
 One exception keeps that rule from latching. A chained stamp commits in
 milliseconds, so a `since` more than 2 seconds ahead of `stamped_at` is not a

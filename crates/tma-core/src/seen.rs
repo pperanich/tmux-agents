@@ -12,6 +12,13 @@
 //! no way to get it back. Ordering against the raise instant makes an absent human generate no
 //! input, so the flag survives arbitrarily long. See the rejected-alternatives list in
 //! `docs/internal/TASKS-detection-repair.md`.
+//!
+//! **A control-mode client is not a viewer.** The filter reads like an iTerm2 `-CC` concession and
+//! is not: its first duty is ignoring **tma's own daemon**, which parks one
+//! `tmux -C attach-session -t <session>` client per monitored session, each pinned to that
+//! session's current-window active pane and each carrying an attach-time `client_activity`. Without
+//! the filter, a daemon that restarts after a marker goes up clears every flagged pane it watches
+//! with nobody in the room. See [`ClientView::control_mode`].
 
 /// One attached client's view, as `list-clients` reports it.
 ///
@@ -21,13 +28,22 @@
 pub struct ClientView {
     /// `#{pane_id}` resolved in the client's context: the pane on that client's screen.
     pub pane_id: String,
-    /// `#{client_activity}`: epoch **seconds** of the client's last real terminal input. Moves only
-    /// on input a human (or their terminal) actually sent — including the prefix key and mouse
-    /// events — never on pane output, never on `send-keys`, and never on tma's own polling, whose
-    /// command clients do not appear in `list-clients` at all.
+    /// `#{client_activity}`: epoch **seconds** of the client's last real terminal input. Moves on
+    /// input a human or their terminal actually sent — a keystroke, the prefix key, the mouse, and
+    /// the focus reports (`\e[I`/`\e[O`) a terminal sends while `focus-events` is on — never on
+    /// pane output and never on `send-keys`.
+    ///
+    /// tma's own *command* clients (every `list-panes`, every stamp write) never appear in
+    /// `list-clients`, so they cannot move it. tma's own *control* clients do appear, and that is
+    /// what [`ClientView::control_mode`] is for.
     pub activity_secs: u64,
-    /// `#{client_control_mode}`: a control-mode client (iTerm2's `-CC`), whose `client_activity`
-    /// freezes at attach time and is therefore not evidence of anything. Ignored by [`seen_by_input`].
+    /// `#{client_control_mode}`: a `tmux -C` client, whose `client_activity` freezes at attach and
+    /// is therefore not evidence that a human looked at anything. Ignored by [`seen_by_input`].
+    ///
+    /// Primarily **tma's own daemon**: one control client per monitored session, parked on that
+    /// session's current-window active pane. iTerm2's `-CC` is the same fact with a milder
+    /// consequence — there the layer merely no-ops, whereas an unfiltered daemon client actively
+    /// clears markers nobody has seen.
     pub control_mode: bool,
 }
 
@@ -131,6 +147,30 @@ mod tests {
             client("%1", 1_060),
         ];
         assert!(seen_by_input(&clients, "%1", 1_030_000));
+    }
+
+    /// The filter's first duty, with the daemon's own client as the fixture: tma parks one
+    /// `tmux -C attach-session` per monitored session, each on that session's current-window active
+    /// pane. A daemon restarted after the marker went up carries an attach stamp that postdates the
+    /// raise, so unfiltered it would clear every flagged pane in every session it watches with no
+    /// human present. Two sessions here, two parked clients, neither of them evidence.
+    #[test]
+    fn the_daemons_own_control_clients_clear_nothing() {
+        let restarted_after_the_raise = 1_060;
+        let fleet = [
+            ClientView {
+                pane_id: "%1".to_string(),
+                activity_secs: restarted_after_the_raise,
+                control_mode: true,
+            },
+            ClientView {
+                pane_id: "%7".to_string(),
+                activity_secs: restarted_after_the_raise,
+                control_mode: true,
+            },
+        ];
+        assert!(!seen_by_input(&fleet, "%1", 1_030_000));
+        assert!(!seen_by_input(&fleet, "%7", 1_030_000));
     }
 
     /// A nonsense timestamp from a corrupt read must not panic the cycle.

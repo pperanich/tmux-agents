@@ -61,8 +61,10 @@ pub struct CaptureState {
     /// `-F` conditional-write support, resolved once and cached (see [`stamp`]).
     guarded: Option<bool>,
     /// The last sweep's deferred ordered-input clear: `(pane_id, @agent_since)` for every pane still
-    /// carrying `@agent_attention`. Drained by the serve loop AFTER notification dispatch, which
-    /// reads the same persisted flag (see [`cycle::SeenClear`]).
+    /// carrying `@agent_attention` whose raise instant is known — a row reading `since == 0` is
+    /// deliberately left out, since every client's activity postdates zero. Drained by the serve
+    /// loop AFTER notification dispatch, which reads the same persisted flag (see
+    /// [`cycle::SeenClear`]).
     deferred_seen: Vec<(String, u64)>,
 
     // ---- introspection counters (status file; tests + operators) ----

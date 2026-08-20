@@ -194,8 +194,9 @@ impl Tmux {
     ///
     /// `#{pane_id}` resolves in the client's own context, so it names that client's current window's
     /// active pane — the pane on its screen, not whichever pane tmux would call active server-wide.
-    /// `#{client_activity}` is epoch seconds, and `#{client_control_mode}` marks the `-CC` clients
-    /// whose activity clock freezes at attach; both exist at the tmux 3.2 floor (N10).
+    /// `#{client_activity}` is epoch seconds, and `#{client_control_mode}` marks the `tmux -C`
+    /// clients whose activity clock freezes at attach — tma's OWN daemon first of all, which parks
+    /// one per monitored session; both formats exist at the tmux 3.2 floor (N10).
     ///
     /// Read as its own `list-clients` rather than appended to the cycle's `list-panes`, because the
     /// caller only asks once some pane actually carries `@agent_attention` — folding it into the
@@ -213,7 +214,8 @@ impl Tmux {
             };
             // A client with no pane or an unreadable activity stamp is not evidence of anything, so
             // it is dropped rather than defaulted. Anything but a literal `0` counts as control mode
-            // for the same reason: whatever we could not read can only fail to clear.
+            // for the same reason: an unreadable field can then only fail to clear, and the clients
+            // this excludes include the daemon's own (see `tma_core::seen`).
             let Ok(activity_secs) = activity.parse::<u64>() else {
                 continue;
             };
