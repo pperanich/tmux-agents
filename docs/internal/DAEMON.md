@@ -591,9 +591,19 @@ The episode marker is the persisted `@agent_notified_at` pane option, written on
 whichever process fires the notification. A notifier fires iff it records a new
 notifiable transition (a `notify.on` trigger: blocked always by default, the
 working→idle done completion when opted in — H2) AND `@agent_notified_at` predates
-the current `@agent_since`. Because `@agent_since` is write-once *per state*, the
+the episode instant. Because `@agent_since` is write-once *per state*, the
 marker dedups per state-run, not per agent episode: a blocked-then-done sequence
 re-arms at the state transition and fires once for each configured trigger.
+
+The episode instant is `max(@agent_since, @agent_turn_at)`, not `@agent_since` alone.
+Write-once is exactly what a SECOND completion runs into: a pane that finished, had its
+mark cleared, and finished again never left `idle`, so `@agent_since` cannot move and the
+marker would dedup the new completion away as one already fired. `@agent_turn_at` is
+stamped by the hook intake on a `turn_end` event that raises the mark, and nowhere else —
+so it moves only on a genuinely new completion, and a pane that never had one recorded
+reads `@agent_since` alone, exactly as before the field existed. The intake also records
+nothing while the mark is still standing, which is what keeps codex's two turn-end
+channels (`Stop` in hooks.json, `notify` in config.toml) at one fire per turn.
 Rationale (adversarial review killed two earlier designs): keying on
 `(pane_id, @agent_since)` fails because `@agent_since` is observation-time and
 producer-dependent — the key mutated mid-episode and re-fired (fixed separately by
@@ -603,7 +613,7 @@ continues. The marker lives in tmux options, not daemon memory: it is the one de
 record whose loss on daemon restart would violate F22's MUST, so it is exempt from
 the "daemon memory is disposable" rule (AD4).
 
-The marker is written as `max(now, @agent_since)`, not the bare fire time, at both write
+The marker is written as `max(now, episode instant)`, not the bare fire time, at both write
 sites (the daemon's `fire_for` and the daemonless `tma event` direct-fire). Under a monotone
 clock `now >= since`, so this is exactly `now` and dedup is unchanged; the clamp only matters
 under a backward wall-clock step that would otherwise land `now` *before* the episode's own

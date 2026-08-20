@@ -112,6 +112,7 @@ Presence of this block marks the agent hook-capable.
 | `event` | yes | string | Agent hook event name (e.g. `Notification`, `SessionStart`). |
 | `matcher` | no | string | Optional payload matcher regex (e.g. `permission_prompt|elicitation_dialog`), applied over the raw payload. |
 | `claim` | yes | table | The claim this event raises: either a state claim `{ state = "...", detail = "..." }` (detail optional) or a lifecycle claim `{ lifecycle = "start" }` / `{ lifecycle = "end" }`. |
+| `turn_end` | no | bool | Whether this event MEANS a turn ended (`false` by default). Set it on the agent's turn-end event and nowhere else. It is a property of the EVENT, not of its claim: the same `state = "idle"` is raised by screen rules too, where nothing ended. tma raises the done marker on a turn end even when the pane was already idle, which is the only way a second completion is signalled after the user cleared the first marker; an event that merely observes idleness (an idle-reminder notification) must leave it `false`, or a cleared marker would come straight back. |
 
 ## `[capture]`
 
@@ -215,6 +216,11 @@ covers = ["working", "blocked", "idle", "lifecycle"]
 event = "Notification"
 matcher = "permission_prompt|elicitation_dialog"
 claim = { state = "blocked", detail = "permission" }
+
+[[hooks.map]]
+event = "Stop"
+claim = { state = "idle" }
+turn_end = true
 
 [[hooks.map]]
 event = "SessionStart"

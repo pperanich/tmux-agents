@@ -280,6 +280,7 @@ fn execute(
             detail,
             set_attention,
             register_session,
+            record_turn,
             notify,
         } => {
             let publish = Publish {
@@ -314,13 +315,25 @@ fn execute(
                     sess,
                 ));
             }
-            // Clamp the marker past the episode's `since` so a backward wall-clock step never writes
-            // a marker that predates the episode it dedups (`notified_at < since` would re-fire).
-            // Under a monotone clock this is exactly `now`, so tested dedup is unchanged.
+            // The turn-end instant, on the same guard as the state tuple: `@agent_since` is
+            // write-once per state run and cannot move on the idle→idle edge a second completion
+            // draws, so this is what the notify dedup and `wait --since` compare against
+            // (`StampedState::episode_at`). Written only when the turn end raised the marker.
+            if *record_turn {
+                cmds.push(render::set_pane_option_guarded(
+                    pane,
+                    opt::TURN_AT,
+                    publish.guard,
+                    &now.to_string(),
+                ));
+            }
+            // Clamp the marker past the episode instant so a backward wall-clock step never writes
+            // a marker that predates the episode it dedups (which would re-fire). Under a monotone
+            // clock this is exactly `now`, so tested dedup is unchanged.
             let mark_at = now.max(
                 stored
                     .filter(|s| s.state == *state)
-                    .map_or(now, |s| s.since),
+                    .map_or(now, StampedState::episode_at),
             );
             // Write-before-fire: the guarded marker commits strictly before the display below, so a
             // crash between them drops at most one notification. It commits iff the state write won.
@@ -412,12 +425,16 @@ fn read_payload(spec: Option<&str>) -> String {
     }
 }
 
-/// Daemon cold-start dedup rule: a daemon starting mid-episode treats `@agent_notified_at >=
-/// @agent_since` as already-notified and does not re-fire (strict predates: `<` fires, equal does
-/// not). The daemonless path enforces the same invariant structurally; keeping the rule here means
-/// the marker's meaning lives in one place.
-pub fn episode_already_notified(notified_at: Option<u64>, since: u64) -> bool {
-    notified_at.is_some_and(|n| n >= since)
+/// Daemon cold-start dedup rule: a daemon starting mid-episode treats a `@agent_notified_at` at or
+/// past the episode instant as already-notified and does not re-fire (strict predates: `<` fires,
+/// equal does not). The daemonless path enforces the same invariant structurally; keeping the rule
+/// here means the marker's meaning lives in one place.
+///
+/// `episode_at` is [`StampedState::episode_at`], not `@agent_since` alone: a second completion
+/// inside one unchanged idle run moves `@agent_turn_at` and nothing else, and comparing against
+/// `since` would dedup it away as the episode the first completion already notified.
+pub fn episode_already_notified(notified_at: Option<u64>, episode_at: u64) -> bool {
+    notified_at.is_some_and(|n| n >= episode_at)
 }
 
 #[cfg(test)]
@@ -473,6 +490,7 @@ mod tests {
             source,
             evidence_at: now,
             since: now,
+            turn_at: 0,
             stamped_at: now,
             attention: false,
             notified_at: None,
@@ -517,12 +535,14 @@ mod tests {
             map_event("UserPromptSubmit", USER_PROMPT_SUBMIT, &m),
             Mapped::State {
                 state: AgentState::Working,
-                detail: None
+                detail: None,
+                turn_end: false,
             }
         );
         let working = Mapped::State {
             state: AgentState::Working,
             detail: None,
+            turn_end: false,
         };
         assert_eq!(map_event("PreToolUse", PRE_TOOL_USE, &m), working);
         assert_eq!(map_event("PostToolUse", POST_TOOL_USE, &m), working);
@@ -530,7 +550,10 @@ mod tests {
             map_event("Stop", STOP, &m),
             Mapped::State {
                 state: AgentState::Idle,
-                detail: None
+                detail: None,
+                // Claude's `Stop` is the event that MEANS a turn ended; the working-claiming
+                // events above are not, so the flag is carried, never derived from the state.
+                turn_end: true,
             }
         );
     }
@@ -543,6 +566,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Blocked,
                 detail: Some(Detail::new("permission")),
+                turn_end: false,
             }
         );
         // An idle-reminder Notification does not match the matcher ⇒ no state change.
@@ -576,6 +600,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Blocked,
                 detail: Some(Detail::new("permission")),
+                turn_end: false,
             },
             Some("65ced290-2a08-43de-aa80-d0b049d7ce30"),
             Some(&prev),
@@ -605,6 +630,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Idle,
                 detail: None,
+                turn_end: false,
             },
             None,
             Some(&prev),
@@ -619,6 +645,172 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The E1 regression. A second real completion with no observed `Working` in between: the
+    /// pane is idle, the first marker was cleared (the user saw it), and the turn-end hook fires
+    /// again. Nothing but `turn_end` can raise here — `prev == Working` is false, and the fold
+    /// sees an idle→idle edge it cannot tell from a quiet idle pane.
+    ///
+    /// Reachable today on codex: `notify` (config.toml) needs no in-TUI trust while the
+    /// working-claiming `hooks.json` events do, so an untrusted pane's every completion is this
+    /// edge. Delete `turn_end` from the manifest entry, or fold it back into `prev == Working`,
+    /// and this fails.
+    #[test]
+    fn a_second_turn_end_re_raises_a_cleared_done_marker() {
+        let mut prev = stamp(AgentState::Idle, Provenance::Hook, 100);
+        prev.attention = false; // the user saw the first completion; the marker came down
+        let plan = decide(
+            Mapped::State {
+                state: AgentState::Idle,
+                detail: None,
+                turn_end: true,
+            },
+            None,
+            Some(&prev),
+            false,
+            BLOCKED_ONLY,
+            200,
+        );
+        assert!(
+            matches!(
+                plan,
+                EventPlan::Stamp {
+                    set_attention: true,
+                    record_turn: true,
+                    ..
+                }
+            ),
+            "got {plan:?}"
+        );
+    }
+
+    /// The control arm: the same idle→idle edge from an event the manifest does NOT call a turn
+    /// end raises nothing. Without this the flag would be free to spread to any idle claim — an
+    /// idle-reminder notification would put the marker straight back every time it fired, and the
+    /// user could never clear it.
+    #[test]
+    fn an_idle_claim_that_is_not_a_turn_end_never_re_raises() {
+        let prev = stamp(AgentState::Idle, Provenance::Hook, 100);
+        let plan = decide(
+            Mapped::State {
+                state: AgentState::Idle,
+                detail: None,
+                turn_end: false,
+            },
+            None,
+            Some(&prev),
+            false,
+            BLOCKED_ONLY,
+            200,
+        );
+        assert!(
+            matches!(
+                plan,
+                EventPlan::Stamp {
+                    set_attention: false,
+                    record_turn: false,
+                    ..
+                }
+            ),
+            "got {plan:?}"
+        );
+    }
+
+    /// One turn end reported twice (codex fires `Stop` from hooks.json and `notify` from
+    /// config.toml, milliseconds apart) stays one raise and one recorded turn: the marker is still
+    /// standing from the first, and an unacknowledged completion has nothing to add. This is the
+    /// only thing separating the pair from two genuine turns, whose marker the user cleared.
+    #[test]
+    fn a_second_channel_reporting_the_same_turn_end_records_nothing() {
+        let mut prev = stamp(AgentState::Idle, Provenance::Hook, 100);
+        prev.attention = true; // raised microseconds ago by the first channel
+        prev.turn_at = 100;
+        let plan = decide(
+            Mapped::State {
+                state: AgentState::Idle,
+                detail: None,
+                turn_end: true,
+            },
+            None,
+            Some(&prev),
+            true, // notify opt-in: a second fire here would be a duplicate desktop notification
+            BLOCKED_AND_DONE,
+            101,
+        );
+        assert!(
+            matches!(
+                plan,
+                EventPlan::Stamp {
+                    set_attention: false,
+                    record_turn: false,
+                    notify: false,
+                    ..
+                }
+            ),
+            "got {plan:?}"
+        );
+    }
+
+    /// A completion the ordinary way (`working` observed, marker down) records its turn too, so
+    /// `wait --until done --since T` and the notify dedup read one basis whatever path raised the
+    /// marker.
+    #[test]
+    fn an_ordinary_working_to_idle_completion_records_its_turn() {
+        let prev = stamp(AgentState::Working, Provenance::Hook, 100);
+        let plan = decide(
+            Mapped::State {
+                state: AgentState::Idle,
+                detail: None,
+                turn_end: true,
+            },
+            None,
+            Some(&prev),
+            false,
+            BLOCKED_ONLY,
+            110,
+        );
+        assert!(
+            matches!(
+                plan,
+                EventPlan::Stamp {
+                    set_attention: true,
+                    record_turn: true,
+                    ..
+                }
+            ),
+            "got {plan:?}"
+        );
+    }
+
+    /// A blocked event never records a turn, whatever the flag says: `@agent_turn_at` is the
+    /// completion clock, and a blocked episode already re-arms the notify through `@agent_since`.
+    #[test]
+    fn a_blocked_event_records_no_turn() {
+        let prev = stamp(AgentState::Working, Provenance::Hook, 100);
+        let plan = decide(
+            Mapped::State {
+                state: AgentState::Blocked,
+                detail: Some(Detail::new("permission")),
+                turn_end: true,
+            },
+            None,
+            Some(&prev),
+            false,
+            BLOCKED_ONLY,
+            110,
+        );
+        assert!(
+            matches!(
+                plan,
+                EventPlan::Stamp {
+                    set_attention: true,
+                    record_turn: false,
+                    ..
+                }
+            ),
+            "got {plan:?}"
+        );
     }
 
     #[test]
@@ -639,6 +831,7 @@ mod tests {
                 set_attention: false,
                 register_session: Some("sess-xyz".to_string()),
                 notify: false,
+                record_turn: false,
             }
         );
     }
@@ -652,6 +845,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Blocked,
                 detail: None,
+                turn_end: false,
             },
             None,
             Some(&prev),
@@ -672,6 +866,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Blocked,
                 detail: None,
+                turn_end: false,
             },
             None,
             Some(&prev),
@@ -697,6 +892,7 @@ mod tests {
         let idle = Mapped::State {
             state: AgentState::Idle,
             detail: None,
+            turn_end: false,
         };
         let default_set = decide(idle.clone(), None, Some(&prev), true, BLOCKED_ONLY, 110);
         assert!(
@@ -722,6 +918,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Idle,
                 detail: None,
+                turn_end: false,
             },
             None,
             Some(&prev),
@@ -780,6 +977,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Working,
                 detail: None,
+                turn_end: false,
             },
             Some("sub-1"), // the subagent's own session, ≠ @agent_session
             Some(&prev),
@@ -802,6 +1000,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Blocked,
                 detail: None,
+                turn_end: false,
             },
             Some("65ced290-2a08-43de-aa80-d0b049d7ce30"), // the owner
             Some(&prev),
@@ -847,6 +1046,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Idle,
                 detail: None,
+                turn_end: false,
             },
             Some("sub-1"),
             Some(&prev),
@@ -866,6 +1066,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Idle,
                 detail: None,
+                turn_end: false,
             },
             Some("sub-1"),
             Some(&prev),
@@ -901,6 +1102,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Working,
                 detail: None,
+                turn_end: false,
             },
             Some("sub-1"),
             Some(&prev),
@@ -958,14 +1160,16 @@ mod tests {
             map_event("user-prompt-submit", OC_USER_PROMPT, &m),
             Mapped::State {
                 state: AgentState::Working,
-                detail: None
+                detail: None,
+                turn_end: false,
             }
         );
         assert_eq!(
             map_event("stop", OC_STOP, &m),
             Mapped::State {
                 state: AgentState::Idle,
-                detail: None
+                detail: None,
+                turn_end: true,
             }
         );
         assert_eq!(
@@ -973,6 +1177,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Blocked,
                 detail: Some(Detail::new("permission")),
+                turn_end: false,
             }
         );
         // OpenCode has no session-end event, and emits no subagent hooks — an unknown token is
@@ -1023,6 +1228,7 @@ mod tests {
             set_attention: true,
             register_session: None,
             notify: false,
+            record_turn: false,
         };
         assert_eq!(
             permission_request_effect(
@@ -1045,6 +1251,7 @@ mod tests {
             set_attention: false,
             register_session: None,
             notify: false,
+            record_turn: false,
         };
         assert_eq!(
             permission_request_effect("user-prompt-submit", &working, None, None, "{}"),
@@ -1108,6 +1315,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Idle,
                 detail: None,
+                turn_end: true,
             }
         );
     }
@@ -1159,6 +1367,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Working,
                 detail: None,
+                turn_end: false,
             }
         );
     }
@@ -1179,6 +1388,7 @@ mod tests {
         let working = Mapped::State {
             state: AgentState::Working,
             detail: None,
+            turn_end: false,
         };
         assert_eq!(map_event("PreToolUse", CODEX_PRE_TOOL_USE, &m), working);
         assert_eq!(map_event("PostToolUse", CODEX_POST_TOOL_USE, &m), working);
@@ -1193,6 +1403,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Blocked,
                 detail: Some(Detail::new("permission")),
+                turn_end: false,
             }
         );
     }
@@ -1206,6 +1417,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Idle,
                 detail: None,
+                turn_end: true,
             }
         );
     }
@@ -1282,6 +1494,7 @@ mod tests {
         let working = Mapped::State {
             state: AgentState::Working,
             detail: None,
+            turn_end: false,
         };
         assert_eq!(map_event("BeforeAgent", GEM_BEFORE_AGENT, &m), working);
         assert_eq!(map_event("BeforeTool", GEM_BEFORE_TOOL, &m), working);
@@ -1292,6 +1505,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Idle,
                 detail: None,
+                turn_end: true,
             }
         );
         // BeforeModel/AfterModel are deliberately UNMAPPED (multi-fire, race the final idle).
@@ -1304,6 +1518,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Blocked,
                 detail: Some(Detail::new("permission")),
+                turn_end: false,
             }
         );
         // A non-permission Notification (matcher miss) must NOT claim blocked — no other
@@ -1395,6 +1610,7 @@ mod tests {
         let working = Mapped::State {
             state: AgentState::Working,
             detail: None,
+            turn_end: false,
         };
         assert_eq!(
             map_event("beforeSubmitPrompt", CUR_BEFORE_SUBMIT_PROMPT, &m),
@@ -1423,6 +1639,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Idle,
                 detail: None,
+                turn_end: true,
             }
         );
         // The observer-only shell/thought events are deliberately UNMAPPED (they add no coverage
@@ -1478,6 +1695,7 @@ mod tests {
         let working = Mapped::State {
             state: AgentState::Working,
             detail: None,
+            turn_end: false,
         };
         assert_eq!(map_event("before_agent_start", PI_FORWARDED, &m), working);
         assert_eq!(map_event("tool_execution_start", PI_FORWARDED, &m), working);
@@ -1486,6 +1704,7 @@ mod tests {
             Mapped::State {
                 state: AgentState::Idle,
                 detail: None,
+                turn_end: true,
             }
         );
         // The deliberately-unmapped events add no coverage (redundant with the five above).

@@ -10,6 +10,24 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- A second completion now raises the done mark again. Once you had seen the first one and it came
+  down, a pane that finished a second turn without tma ever observing it *working* in between
+  raised nothing at all, and nothing recovered it — you simply got no signal for the second turn.
+  The knowledge was there and being thrown away: the hook that fires means "a turn ended", and the
+  intake was re-deriving the mark from the previous state instead, which is all the screen fold can
+  do and exactly what it cannot decide (an idle→idle edge looks the same as a pane sitting still).
+  The manifests now name their turn-end event, and the intake raises on it. Most exposed was a
+  Codex pane whose `hooks.json` entries were never trusted in the TUI: its `notify` channel needs no
+  trust and reports only turn ends, so *every* completion of that pane's life was this edge.
+- The desktop notification follows the mark. Its per-episode dedup keyed on `@agent_since`, which is
+  write-once while the state is unchanged and so could not move for a second completion on a pane
+  that never left `idle`; the new `@agent_turn_at` carries that instant and the dedup reads the
+  later of the two. `tma wait --until done --since <T>` sees the second completion for the same
+  reason, so a supervisor loop can act on one and wait for the next. One turn end reported on two
+  channels (Codex sends both `Stop` and `notify`) still marks and rings once.
+
 ## [0.4.0] - 2026-08-20
 
 ### Changed

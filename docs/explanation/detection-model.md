@@ -38,7 +38,15 @@ onto two other axes so the state token stays stable:
   long that takes; navigation that moves nothing clears nothing either, since
   selecting the pane or the window you are already in is not a departure. A
   finished agent is `idle` with attention still set, which
-  the surfaces render as the distinct **done** glyph. Keeping **done** on this
+  the surfaces render as the distinct **done** glyph. A mark that came down goes
+  back up on the NEXT completion, and it has to be raised by the hook that reports
+  the turn ending, not by the fold: the fold sees only states, and the second
+  completion of a pane that never visibly worked in between is an `idle`→`idle`
+  edge it cannot tell from a quiet idle pane. The manifest names that hook
+  (`turn_end`), the intake stamps `@agent_turn_at` when it raises, and one turn
+  end reported on two channels (codex sends both `Stop` and `notify`) still marks
+  one completion, because the second finds the mark already standing.
+  Keeping **done** on this
   separate flag rather than making it a fifth state token is deliberate: the
   closed `state` vocabulary stays four tokens, and a script reading `state` never
   has its value change shape under it. Attention is also *not* the notification

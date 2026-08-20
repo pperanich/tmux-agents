@@ -563,6 +563,87 @@ fn codex_notify_argv_payload_stamps_idle() {
     );
 }
 
+/// The E1 acceptance, end to end through the real wrapper: a codex pane whose ONLY wired channel
+/// is `notify` (the config.toml one, which needs no in-TUI trust — unlike the `hooks.json` events
+/// that claim `working`) finishes a turn, the user sees the marker and it comes down, and a second
+/// turn finishes. tma never observed `working` in between, so the fold sees idle→idle and the
+/// second completion used to raise nothing at all, with no recovery.
+///
+/// Also pins the codex double-report: `Stop` and `notify` carry one turn end between them, and the
+/// second of the pair must record nothing, or one turn would ring twice.
+#[test]
+fn a_second_turn_end_re_raises_the_marker_the_user_cleared() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new("event");
+    assert!(s
+        .tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            "s1",
+            "-x",
+            "80",
+            "-y",
+            "24",
+            "exec sleep 100000",
+        ])
+        .status
+        .success());
+    let pane = s.get("s1", "#{pane_id}");
+    let turn_complete = r#"{"type":"agent-turn-complete","thread-id":"019f99c3-7c57-7963-98e9-f496a7978257","turn-id":"019f99c4-38c9-7f63-901a-d9910886b99a","cwd":"/tmp","client":"codex-tui","input-messages":["hi"],"last-assistant-message":"done"}"#;
+
+    // Turn one ends. Nothing observed this pane before, so `prev` is absent — the old
+    // `prev == Working` rule raised nothing here either.
+    fire_argv(&s, "codex", "notify", &pane, turn_complete);
+    assert_eq!(s.get(&pane, "#{@agent_state}"), "idle");
+    assert_eq!(
+        s.get(&pane, "#{@agent_attention}"),
+        "1",
+        "a turn end raises the done marker"
+    );
+    let first_turn: u64 = s.get(&pane, "#{@agent_turn_at}").parse().unwrap();
+    let since: u64 = s.get(&pane, "#{@agent_since}").parse().unwrap();
+    assert!(first_turn > 0, "the turn end is recorded");
+
+    // The same turn end, reported again on the other channel. One turn, one record.
+    fire_argv(&s, "codex", "Stop", &pane, r#"{"session_id":"sess-1"}"#);
+    assert_eq!(
+        s.get(&pane, "#{@agent_turn_at}").parse::<u64>().unwrap(),
+        first_turn,
+        "the second channel reporting one turn end must not record a second turn"
+    );
+
+    // The user sees it: batch C's focus hook or batch D's seen-clear takes the marker down.
+    assert!(s
+        .tmux(&["set", "-pt", &pane, "-u", "@agent_attention"])
+        .status
+        .success());
+
+    // Turn two ends. No `working` was ever observed — no hook claims it on this wiring, and the
+    // stored state never left `idle`.
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    fire_argv(&s, "codex", "notify", &pane, turn_complete);
+    assert_eq!(
+        s.get(&pane, "#{@agent_attention}"),
+        "1",
+        "a SECOND completion must re-raise the done marker (E1)"
+    );
+    let second_turn: u64 = s.get(&pane, "#{@agent_turn_at}").parse().unwrap();
+    assert!(
+        second_turn > first_turn,
+        "the second completion records its own turn ({second_turn} vs {first_turn})"
+    );
+    assert_eq!(
+        s.get(&pane, "#{@agent_since}").parse::<u64>().unwrap(),
+        since,
+        "`@agent_since` must NOT move: the pane has been idle since the first landing, and the \
+         uptime display reads it"
+    );
+}
+
 /// A registration-class hook stamps `@agent_model` from the payload's top-level `model`
 /// field, it coexists with the Codex rollout tail's identical stamp (both plain last-write-wins
 /// writes, so the same value never oscillates), and ONLY registration-class events touch it — a later

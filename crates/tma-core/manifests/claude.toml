@@ -31,9 +31,13 @@ event = "Notification"
 matcher = "permission_prompt|elicitation_dialog"
 claim = { state = "blocked", detail = "permission" }
 
+# Stop — the turn ended. `turn_end` marks it as such, so a second completion raises the done
+# marker again even when tma never observed `working` in between (nothing else would: the fold
+# sees idle→idle and an edge rule cannot tell that apart from a quiet idle pane).
 [[hooks.map]]
 event = "Stop"
 claim = { state = "idle" }
+turn_end = true
 
 [capture]
 visible = ["working", "idle", "blocked"]

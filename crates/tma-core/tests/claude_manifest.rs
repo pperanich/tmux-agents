@@ -61,6 +61,7 @@ fn idle_prior(now: u64) -> StampedState {
         source: Provenance::Capture,
         evidence_at: now,
         since: now,
+        turn_at: 0,
         stamped_at: now,
         attention: false,
         notified_at: None,

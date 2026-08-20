@@ -124,6 +124,15 @@ pub struct HookMap {
     pub matcher: Option<String>,
     /// The claim this event raises — a state claim or a lifecycle claim.
     pub claim: Claim,
+    /// Whether this event MEANS "a turn ended" (Claude's `Stop`, Codex's `notify`, pi's
+    /// `agent_settled`). A property of the event, not of its claim: the same `state = "idle"` claim
+    /// is also raised by screen rules, where nothing ended. The intake raises the done marker on a
+    /// turn end even when the pane was already idle, which is the only way a SECOND completion is
+    /// signalled after the first marker was cleared. Read only for an `idle` state claim; an event
+    /// that merely observes idleness (an idle-reminder notification) must leave it false, or a
+    /// cleared marker would come straight back on the next reminder.
+    #[serde(default)]
+    pub turn_end: bool,
 }
 
 /// The `[capture]` block — the second coverage gate that the fold's coverage-aware

@@ -335,6 +335,36 @@ mod tests {
         }
     }
 
+    /// Every bundled `state = "idle"` hook entry is a turn end, and nothing else is. The flag is
+    /// what lets a SECOND completion re-raise a cleared done marker (an idle→idle edge the fold
+    /// cannot see), so a manifest that forgets it silently loses that pane's re-signal; and an
+    /// event that merely OBSERVES idleness carrying it would make the marker unclearable.
+    #[test]
+    fn every_bundled_turn_end_is_an_idle_claim_and_every_idle_claim_is_a_turn_end() {
+        use tma_core::evidence::Claim;
+        use tma_core::AgentState;
+        let set = load_raw(None).expect("the bundled corpus must build");
+        let mut turn_ends = 0;
+        for lm in &set.manifests {
+            let Some(hooks) = &lm.manifest.hooks else {
+                continue;
+            };
+            for entry in &hooks.map {
+                let idle = matches!(&entry.claim, Claim::State(sc) if sc.state == AgentState::Idle);
+                assert_eq!(
+                    entry.turn_end, idle,
+                    "{}: `{}` claims idle={idle} but turn_end={}",
+                    lm.name, entry.event, entry.turn_end
+                );
+                turn_ends += usize::from(entry.turn_end);
+            }
+        }
+        // Seven, not six: codex reports one turn end on two channels (`Stop` in hooks.json and
+        // `notify` in config.toml), which is exactly why the intake records a turn only when the
+        // marker was down.
+        assert_eq!(turn_ends, 7, "one turn-end event per agent, codex two");
+    }
+
     #[test]
     fn an_unreadable_manifest_dir_is_still_a_whole_set_error() {
         // Directory-level failure is not a per-file skip: the caller asked for a dir that is gone.

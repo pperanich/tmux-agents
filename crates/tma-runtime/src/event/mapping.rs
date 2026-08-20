@@ -1,7 +1,7 @@
 use regex::Regex;
 
 use tma_core::evidence::{Claim, Lifecycle};
-use tma_core::manifest::Manifest;
+use tma_core::manifest::{HookMap, Manifest};
 use tma_core::{AgentState, Detail, StampedState};
 
 // The hook-event vocabulary lives in `tma_runtime::manifests` (agent description). `map_event` keys
@@ -16,6 +16,11 @@ pub enum Mapped {
     State {
         state: AgentState,
         detail: Option<Detail>,
+        /// The manifest's `turn_end` flag for the entry that matched: this event MEANS a turn
+        /// ended. Carried instead of re-derived, because it is knowledge only the hook has —
+        /// `decide` would otherwise reconstruct the done edge from `prev == Working` exactly as
+        /// the fold does, and miss every completion the fold cannot see either.
+        turn_end: bool,
     },
     /// Registration (SessionStart-class lifecycle): mark the pane an agent pane, state idle.
     Register,
@@ -42,32 +47,33 @@ pub fn map_event(kind: &str, payload: &str, manifest: &Manifest) -> Mapped {
         return Mapped::Unmapped;
     };
 
-    let mut fallback: Option<&Claim> = None;
+    let mut fallback: Option<&HookMap> = None;
     for m in hooks.map.iter().filter(|m| m.event == kind) {
         match &m.matcher {
             None => {
                 if fallback.is_none() {
-                    fallback = Some(&m.claim);
+                    fallback = Some(m);
                 }
             }
             Some(rx) => {
                 if matcher_matches(rx, payload) {
-                    return mapped_from_claim(&m.claim);
+                    return mapped_from_entry(m);
                 }
             }
         }
     }
     match fallback {
-        Some(c) => mapped_from_claim(c),
+        Some(m) => mapped_from_entry(m),
         None => Mapped::Unmapped,
     }
 }
 
-fn mapped_from_claim(claim: &Claim) -> Mapped {
-    match claim {
+fn mapped_from_entry(entry: &HookMap) -> Mapped {
+    match &entry.claim {
         Claim::State(sc) => Mapped::State {
             state: sc.state,
             detail: sc.detail.clone(),
+            turn_end: entry.turn_end,
         },
         Claim::Lifecycle {
             lifecycle: Lifecycle::Start,
@@ -111,6 +117,10 @@ pub(crate) enum EventPlan {
         set_attention: bool,
         /// Record `@agent_session` (SessionStart, or a first hook on an observed-only pane).
         register_session: Option<String>,
+        /// Record `@agent_turn_at`: this event ended a turn AND raised the done marker. Set with
+        /// `set_attention`, never without it, so the two channels that report one codex turn end
+        /// (`Stop` and `notify`) record one turn between them.
+        record_turn: bool,
         /// Fire the blocked notification (write `@agent_notified_at` then display).
         notify: bool,
     },
@@ -187,15 +197,32 @@ pub(crate) fn decide(
             detail: None,
             set_attention: false,
             register_session: event_session.map(str::to_string),
+            record_turn: false,
             notify: false,
         },
-        Mapped::State { state, detail } => {
+        Mapped::State {
+            state,
+            detail,
+            turn_end,
+        } => {
             let prev = stored.map(|s| s.state);
+            // A marker still standing means the last completion is unacknowledged, so a turn end
+            // has nothing new to say: it neither re-raises nor records a turn. That is what keeps
+            // the two channels reporting ONE codex turn end (`Stop` then `notify`, milliseconds
+            // apart) down to one raise and one notification — the only thing separating them from
+            // two genuine turns is that the user cleared the marker in between.
+            let standing = stored.is_some_and(|s| s.attention);
             let set_attention = match state {
                 AgentState::Blocked => prev != Some(AgentState::Blocked),
-                AgentState::Idle => prev == Some(AgentState::Working),
+                // `turn_end` is the whole point: an idle→idle edge is invisible to the fold, which
+                // sees only states and cannot tell a second completion from a quiet idle pane.
+                AgentState::Idle => prev == Some(AgentState::Working) || (turn_end && !standing),
                 _ => false,
             };
+            // `@agent_since` is write-once per state run, so it does not move on idle→idle and
+            // cannot carry the second completion's instant. `@agent_turn_at` does, and only for a
+            // turn end that actually raised the marker.
+            let record_turn = turn_end && state == AgentState::Idle && set_attention;
             // Notify dedup: fire once on a configured noteworthy transition. `set_attention` is that
             // signal, mapped by `notify::trigger_for` to a token `notify.on` gates; a stored
             // `notified_at >= now` means this state-run is already notified (cold-start rule).
@@ -215,6 +242,7 @@ pub(crate) fn decide(
                 detail,
                 set_attention,
                 register_session,
+                record_turn,
                 notify,
             }
         }

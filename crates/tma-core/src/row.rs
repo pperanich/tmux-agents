@@ -31,8 +31,13 @@ pub struct AgentRow {
     pub agent: String,
     pub state: AgentState,
     pub detail: Option<String>,
-    /// Epoch of the current state's transition (`@agent_since`); 0 when unknown.
+    /// Epoch of the current state's transition (`@agent_since`); 0 when unknown. The uptime
+    /// column reads it, so it stays the state's own clock and never absorbs [`AgentRow::turn_at`].
     pub since: u64,
+    /// Epoch of the last recorded turn end (`@agent_turn_at`); 0 when none. Only a hook the
+    /// manifest marks `turn_end` writes it, and only when that turn end raised the done marker.
+    /// Not part of the JSON row contract; `wait --since` reads it via [`AgentRow::episode_at`].
+    pub turn_at: u64,
     pub session: String,
     pub window_index: u32,
     pub pane_index: u32,
@@ -71,6 +76,14 @@ pub struct AgentRow {
 }
 
 impl AgentRow {
+    /// The instant this row's episode last became noteworthy: its state transition, or the last
+    /// turn end when a second completion landed inside an unchanged idle run. `wait --since`
+    /// compares against this so a supervisor loop can see the NEXT completion on a pane that never
+    /// left `idle` (`@agent_since` is write-once per state run and would pin it to the first).
+    pub fn episode_at(&self) -> u64 {
+        self.since.max(self.turn_at)
+    }
+
     /// `session:window.pane` locator for surfaces and jump.
     pub fn locator(&self) -> String {
         format!("{}:{}.{}", self.session, self.window_index, self.pane_index)
@@ -233,6 +246,7 @@ mod tests {
             state,
             detail: None,
             since: 0,
+            turn_at: 0,
             session: session.to_string(),
             window_index: 0,
             pane_index: 0,

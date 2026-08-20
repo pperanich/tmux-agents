@@ -25,6 +25,7 @@ const AGENT_OPTIONS: &[&str] = &[
     opt::STAMPED_AT,
     opt::ATTENTION,
     opt::NOTIFIED_AT,
+    opt::TURN_AT,
     opt::HASH,
     opt::PID,
     opt::SESSION,

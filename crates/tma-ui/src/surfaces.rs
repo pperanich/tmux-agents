@@ -383,6 +383,7 @@ mod tests {
             state,
             detail: detail.map(str::to_string),
             since: 100,
+            turn_at: 0,
             session: "s".to_string(),
             window_index: 1,
             pane_index: 0,

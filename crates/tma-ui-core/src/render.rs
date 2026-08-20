@@ -107,6 +107,7 @@ mod tests {
             state,
             detail: None,
             since,
+            turn_at: 0,
             session: "a".to_string(),
             window_index: 0,
             pane_index: 0,

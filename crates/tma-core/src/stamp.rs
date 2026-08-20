@@ -23,6 +23,13 @@ pub mod opt {
     pub const STAMPED_AT: &str = "@agent_stamped_at";
     pub const ATTENTION: &str = "@agent_attention";
     pub const NOTIFIED_AT: &str = "@agent_notified_at";
+    /// Epoch **ms** of the last hook event that MEANT "a turn ended" and raised the done marker
+    /// (`[[hooks.map]] turn_end = true`). Distinct from [`SINCE`], which is write-once per state
+    /// run and so cannot move on the idle→idle edge a second completion draws; the uptime display
+    /// reads `SINCE`, and moving it would make the state duration lie. Absent (0) on a pane that
+    /// has never had a turn end recorded, which makes every comparison
+    /// ([`super::StampedState::episode_at`]) degrade to `SINCE` alone. Pane scope.
+    pub const TURN_AT: &str = "@agent_turn_at";
     pub const HASH: &str = "@agent_hash";
     pub const PID: &str = "@agent_pid";
     pub const SESSION: &str = "@agent_session";
@@ -131,6 +138,9 @@ pub struct StampedState {
     pub attention: bool,
     /// Episode notify marker; `None` when the episode has not been notified.
     pub notified_at: Option<u64>,
+    /// Epoch of the last recorded turn end (`@agent_turn_at`); 0 when none was ever recorded.
+    /// Only the hook intake writes it, and only for an event the manifest marks `turn_end`.
+    pub turn_at: u64,
     /// Hash of the last captured viewport tail, paired with `stamped_at`.
     pub hash: Option<u64>,
     /// Process-group leader pid found by the walk (`@agent_pid`).
@@ -222,6 +232,14 @@ fn parse_opt_int(
 }
 
 impl StampedState {
+    /// The instant this pane's current episode last became noteworthy: the state transition
+    /// (`@agent_since`), or the last recorded turn end (`@agent_turn_at`) when a second completion
+    /// landed inside an unchanged idle run. The one basis the notify dedup and `wait --since`
+    /// compare against, so a re-raised done marker is a new episode to both.
+    pub fn episode_at(&self) -> u64 {
+        self.since.max(self.turn_at)
+    }
+
     /// Decode the pane-option tuple from a `@agent_*` key ⇒ value map. `Ok(None)` when no
     /// `@agent_state`; `Err` on a malformed value; absent `@agent_source` decodes as overridable `capture`.
     pub fn from_options(
@@ -252,6 +270,7 @@ impl StampedState {
                 value: opts.get(opt::PID).cloned().unwrap_or_default(),
             })?;
         let notified_at = parse_opt_int(opts, opt::NOTIFIED_AT)?.map(to_millis);
+        let turn_at = to_millis(parse_int(opts, opt::TURN_AT)?);
         let hash = parse_opt_int(opts, opt::HASH)?;
 
         let attention = opts.get(opt::ATTENTION).map(String::as_str) == Some("1");
@@ -270,6 +289,7 @@ impl StampedState {
             stamped_at,
             attention,
             notified_at,
+            turn_at,
             hash,
             pid,
             session,
@@ -305,6 +325,7 @@ mod tests {
             (opt::STAMPED_AT, "1700000002000"),
             (opt::ATTENTION, "1"),
             (opt::NOTIFIED_AT, "1700000002000"),
+            (opt::TURN_AT, "1700000001500"),
             (opt::HASH, "3735928559"),
             (opt::PID, "4242"),
             (opt::SESSION, "sess-1"),
@@ -326,6 +347,7 @@ mod tests {
                 source: Provenance::Hook,
                 evidence_at: 1_700_000_001_000,
                 since: 1_700_000_001_000,
+                turn_at: 1_700_000_001_500,
                 stamped_at: 1_700_000_002_000,
                 attention: true,
                 notified_at: Some(1_700_000_002_000),
@@ -355,6 +377,7 @@ mod tests {
                 source: Provenance::Capture,
                 evidence_at: 1_700_000_000_000,
                 since: 1_700_000_000_000,
+                turn_at: 0,
                 stamped_at: 1_700_000_000_000,
                 attention: false,
                 notified_at: None,
@@ -364,6 +387,53 @@ mod tests {
                 subagents: vec![],
             })
         );
+    }
+
+    /// The episode instant a re-raised done marker is measured against. `@agent_since` is
+    /// write-once per state run, so a SECOND completion inside one idle run moves only
+    /// `@agent_turn_at` — and reading `since` alone would dedup that completion away as one
+    /// already notified. A pane that never had a turn end recorded reads `since` unchanged, so
+    /// every comparison degrades to what it was before the field existed.
+    #[test]
+    fn episode_at_is_the_later_of_the_transition_and_the_last_turn_end() {
+        let mut s = StampedState::from_options(&full_map())
+            .unwrap()
+            .unwrap()
+            .into_inner();
+        s.since = 1_700_000_001_000;
+
+        s.turn_at = 0;
+        assert_eq!(
+            s.episode_at(),
+            1_700_000_001_000,
+            "no turn end: since alone"
+        );
+
+        s.turn_at = 1_700_000_009_000;
+        assert_eq!(
+            s.episode_at(),
+            1_700_000_009_000,
+            "a second completion inside one idle run is the newer episode"
+        );
+
+        // A transition always outruns the turn end that preceded it (`since` is set to the
+        // event's own `now`), so the max never resurrects a stale completion.
+        s.since = 1_700_000_010_000;
+        assert_eq!(s.episode_at(), 1_700_000_010_000);
+    }
+
+    /// Legacy epoch-seconds normalization reaches the new field too: a pre-upgrade server holding
+    /// a 10-digit value must not read as an epoch 1000x in the past, which would make every
+    /// comparison against it meaningless.
+    #[test]
+    fn a_legacy_seconds_turn_at_scales_to_millis() {
+        let mut map = full_map();
+        map.insert(opt::TURN_AT.to_string(), "1700000001".to_string());
+        let decoded = StampedState::from_options(&map)
+            .unwrap()
+            .unwrap()
+            .into_inner();
+        assert_eq!(decoded.turn_at, 1_700_000_001_000);
     }
 
     #[test]
@@ -557,6 +627,7 @@ mod tests {
         opt::STAMPED_AT,
         opt::ATTENTION,
         opt::NOTIFIED_AT,
+        opt::TURN_AT,
         opt::HASH,
         opt::PID,
         opt::SESSION,

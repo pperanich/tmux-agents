@@ -325,7 +325,7 @@ Other options:
 | option | meaning |
 |---|---|
 | `--until <STATES>` | Required. The state(s) to wait for, comma-separated: `idle`, `working`, `blocked`, `unknown`, and `done` (idle plus attention, the finished-and-unreviewed surface). `wait` returns as soon as a cycle observes the target in any of them. `done` is by definition unreviewed: if you sit at the pane and type once the agent has finished, the mark clears and the wait carries on. Wait on `idle` when a human is at the keyboard. |
-| `--since <EPOCH_MS>` | Only a state that BEGAN after this epoch-ms timestamp satisfies (the row's `since_ms` must be strictly greater). Works with every target. |
+| `--since <EPOCH_MS>` | Only a state that BEGAN after this epoch-ms timestamp satisfies (the row's `since_ms` must be strictly greater). Works with every target. A `done` target also satisfies on a fresh completion of a pane that never left `idle`: a second turn end moves `@agent_turn_at` while `since_ms` stays pinned to the start of the idle run, and the floor is compared against the later of the two. |
 | [selector flags](#selector-flags) | Scope `--agent`/`--any`/`--all`/`--count`. `--agent` is both the scope and the by-name target, so the flag that names an agent is the flag that selects it. Rejected alongside `--pane`, whose id is already unique (exit 2). |
 | `--timeout <SECS>` | Give up after this many seconds and exit 124 (the `timeout(1)` convention). Absent waits forever; compose with `timeout(1)` for an external belt. |
 | `--json` | Emit the matched row as one schema-1 JSON object (same keys as an `ls --json` row) instead of the tab-separated line. `--all`/`--count` emit the schema-1 [`agents` document](pane-options-and-json.md#tma-wait---json) of the satisfied set instead. |
@@ -333,7 +333,8 @@ Other options:
 `--since` is the escape hatch from level-triggering. A supervisor loop that waits
 for `blocked`, acts, and loops would otherwise re-satisfy immediately on the same
 episode, because the state it waited for is still the current one; passing the
-`since_ms` of the row it just handled requires a NEW transition. The recipe is in
+`since_ms` of the row it just handled requires a NEW transition — or, for `done`,
+a new turn end on a pane that has stayed idle throughout. The recipe is in
 [Block a script on agent
 state](../how-to/block-a-script-on-agent-state.md#drive-a-supervisor-loop).
 

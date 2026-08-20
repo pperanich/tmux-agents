@@ -132,6 +132,7 @@ claim = { state = "working" }
 [[hooks.map]]
 event = "AfterAgent"
 claim = { state = "idle" }
+turn_end = true
 
 # Notification: gemini fires this when a tool call needs approval. The `ToolPermission`
 # matcher gates on the payload's `notification_type` so only a permission notification claims

@@ -36,6 +36,11 @@ claim = { state = "working" }
 event = "Wait"
 claim = { state = "blocked", detail = "permission" }
 
+[[hooks.map]]
+event = "Done"
+claim = { state = "idle" }
+turn_end = true
+
 [capture]
 ```
 
@@ -50,6 +55,11 @@ claim = { state = "blocked", detail = "permission" }
   (`{ lifecycle = "start" }` / `{ lifecycle = "end" }`). State routing is fixed:
   a manifest maps into `idle`/`working`/`blocked`/`unknown`, it cannot invent a
   state.
+- Mark your agent's turn-end event `turn_end = true`, and only that one. It is
+  what raises the done mark on a completion tma had no other way to see — a turn
+  that ends without the pane ever having been observed working draws no state edge
+  at all. An event that merely reports the agent is idle (a nag notification) must
+  leave it off, or the mark would come back every time it fired.
 - `[capture]` is required even when empty; with no `[[rules]]`, detection is
   hook-only.
 

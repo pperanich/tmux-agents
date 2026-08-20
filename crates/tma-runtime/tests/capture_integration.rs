@@ -677,6 +677,7 @@ fn claude_transcript_viewer_capture_is_not_blocked() {
             source: Provenance::Hook,
             evidence_at: 999_000,
             since: 999_000,
+            turn_at: 0,
             stamped_at: 999_000,
             attention: false,
             notified_at: None,

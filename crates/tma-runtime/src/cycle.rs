@@ -389,6 +389,12 @@ pub fn run_cycle_with(
                 prev.as_ref().is_some_and(|p| p.attention),
             ),
         };
+        // The cycle never writes `@agent_turn_at` (only a `turn_end` hook does), so the row carries
+        // the stored value through unchanged — and nothing at all once the tuple is removed.
+        let turn_at = match &plan {
+            StampPlan::Remove => 0,
+            _ => prev.as_ref().map_or(0, |p| p.turn_at),
+        };
         let companions = row_companions(rec, now);
         report.rows.push(AgentRow {
             pane_id: rec.pane_id.clone(),
@@ -396,6 +402,7 @@ pub fn run_cycle_with(
             state: row_state,
             detail: verdict.detail.as_ref().map(|d| d.as_str().to_string()),
             since,
+            turn_at,
             session: rec.session.clone(),
             window_index: rec.window_index,
             pane_index: rec.pane_index,
@@ -522,6 +529,7 @@ fn row_from_stamp(rec: &PaneRecord, stamp: &StampedState, now: u64) -> AgentRow 
         state: stamp.state,
         detail: stamp.detail.as_ref().map(|d| d.as_str().to_string()),
         since: stamp.since,
+        turn_at: stamp.turn_at,
         session: rec.session.clone(),
         window_index: rec.window_index,
         pane_index: rec.pane_index,
@@ -726,6 +734,7 @@ mod tests {
             source,
             evidence_at: at,
             since: at,
+            turn_at: 0,
             stamped_at: at,
             attention: false,
             notified_at: None,

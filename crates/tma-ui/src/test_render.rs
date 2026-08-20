@@ -68,6 +68,7 @@ pub(crate) fn row(
         state,
         detail: None,
         since,
+        turn_at: 0,
         session: session.to_string(),
         window_index: w,
         pane_index: p,

@@ -82,6 +82,18 @@ the raise (below). It is **not** the notification-episode marker; that is the se
 `@agent_notified_at` stamp (AD4, F22), because focus-then-leave-unanswered clears
 attention while the blocked episode continues.
 
+"Noteworthy transition" is an edge over states everywhere but one place. A turn end is
+not an edge: an agent that finishes twice with nothing visibly happening in between
+draws `idle`→`idle`, and the fold — which sees only states — cannot separate that from a
+pane sitting still, so any rule it could express would re-raise on every poll of a quiet
+idle pane and make the mark unclearable. The hook knows, and the hook is where it is
+decided: a `[[hooks.map]]` entry marked `turn_end` raises the mark whatever the previous
+state was, and stamps `@agent_turn_at` (the episode instant the notify dedup and
+`wait --since` read, since `@agent_since` is write-once per state run and cannot move).
+It records only when the mark was DOWN, which is what keeps one turn end reported on two
+channels at one raise. Screen rules never carry `turn_end`: idle chrome co-renders
+mid-turn for most agents, so it is evidence of idleness, never of a turn having ended.
+
 Clearing mechanics, corrected by round-2 empirical review:
 
 - Hooks used are `after-select-pane` / `session-window-changed`, **not**

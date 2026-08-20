@@ -59,6 +59,10 @@ impl UntilSet {
 /// that epoch-ms timestamp. The `--since` half is the level-trigger escape hatch — a supervisor loop
 /// (`wait --until blocked`, act, loop) would otherwise re-satisfy on the very episode it just acted
 /// on, because the state it waited for is still the current one.
+///
+/// The comparison is [`AgentRow::episode_at`], not `since` alone: a second completion on a pane
+/// that never left `idle` moves only `@agent_turn_at`, and a `since`-only floor would hide it from
+/// the very loop `--since` exists to serve.
 struct Goal {
     until: UntilSet,
     since: Option<u64>,
@@ -66,7 +70,7 @@ struct Goal {
 
 impl Goal {
     fn matches(&self, row: &AgentRow) -> bool {
-        self.until.matches(row) && self.since.is_none_or(|floor| row.since > floor)
+        self.until.matches(row) && self.since.is_none_or(|floor| row.episode_at() > floor)
     }
 
     fn describe(&self) -> String {
@@ -555,6 +559,7 @@ mod tests {
             state,
             detail: None,
             since: 0,
+            turn_at: 0,
             session: session.to_string(),
             window_index: 0,
             pane_index: 0,
@@ -731,6 +736,27 @@ mod tests {
         // The state token still has to match: a fresh transition into the wrong state does not.
         r.state = AgentState::Idle;
         assert!(!goal.matches(&r));
+    }
+
+    /// A supervisor loop's second lap: `wait --until done`, act, clear the marker, loop with
+    /// `--since <the completion just handled>`. The pane never leaves `idle` between the two
+    /// completions, so `@agent_since` is stuck at the first one and the floor would hide the
+    /// second forever. `@agent_turn_at` carries it. Compare `row.since` alone and this fails.
+    #[test]
+    fn since_sees_a_second_completion_on_a_pane_that_never_left_idle() {
+        let mut r = row("%1", "claude", AgentState::Idle, true, "work");
+        r.since = 500; // the idle run began here, and write-once pins it
+        r.turn_at = 500; // …as did the first completion
+        let goal = Goal {
+            until: parse_until("done").unwrap(),
+            since: Some(500),
+        };
+        assert!(
+            !goal.matches(&r),
+            "the handled completion does not re-satisfy"
+        );
+        r.turn_at = 900; // a second turn ended; `since` did not move and cannot
+        assert!(goal.matches(&r), "the next completion satisfies");
     }
 
     /// The `--since` floor rides the stderr description, so a timeout line says which episode window

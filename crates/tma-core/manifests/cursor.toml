@@ -107,6 +107,7 @@ claim = { state = "working" }
 [[hooks.map]]
 event = "stop"
 claim = { state = "idle" }
+turn_end = true
 
 # --- telemetry: context utilization via the statusLine push shim ---
 # Cursor's `~/.cursor/cli-config.json` carries a `statusLine` command

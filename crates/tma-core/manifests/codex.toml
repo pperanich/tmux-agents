@@ -98,10 +98,16 @@ event = "PermissionRequest"
 claim = { state = "blocked", detail = "permission" }
 
 # Stop — the turn finished, the composer is ready again ⇒ idle (the hooks.json twin of the
-# notify agent-turn-complete idle; whichever channel is wired lands the idle stamp).
+# notify agent-turn-complete idle; whichever channel is wired lands the idle stamp). Both carry
+# `turn_end`, and both fire when both channels are live: the intake raises the done marker on the
+# first and, finding it already standing, records nothing for the second, so one turn stays one
+# notification. The notify channel matters most here — it needs no in-TUI trust, so a codex pane
+# whose hooks.json is untrusted has NO working-claiming event at all and every completion of its
+# life is an idle→idle edge.
 [[hooks.map]]
 event = "Stop"
 claim = { state = "idle" }
+turn_end = true
 
 # agent-turn-complete — the turn finished ⇒ idle. The matcher fires only on that notification
 # type, so a future/other notify payload is simply unmapped (no spurious idle). `tma event`
@@ -110,6 +116,7 @@ claim = { state = "idle" }
 event = "notify"
 matcher = "agent-turn-complete"
 claim = { state = "idle" }
+turn_end = true
 
 # Capture fallback: the `working` (streaming) and `blocked` (approval prompt) screens
 # were driven live 2026-07-25 and captured at two widths each (redacted). Idle now has a screen

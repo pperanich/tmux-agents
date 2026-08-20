@@ -540,6 +540,7 @@ const REMOVABLE: &[&str] = &[
     opt::STAMPED_AT,
     opt::ATTENTION,
     opt::NOTIFIED_AT,
+    opt::TURN_AT,
     opt::HASH,
     opt::PID,
     opt::NAME,
@@ -1096,6 +1097,22 @@ mod tests {
         }
     }
 
+    /// The whole episode lane comes down on a deregister. `@agent_turn_at` is the one most easily
+    /// forgotten — it is written on a different path from the rest of the tuple (only a `turn_end`
+    /// hook writes it), so a miss here would leave it on the user's server after
+    /// `install-hooks --uninstall` and after the agent deregistered.
+    #[test]
+    fn remove_unsets_the_whole_episode_lane() {
+        let cmds = render_remove("%7");
+        for key in [opt::SINCE, opt::ATTENTION, opt::NOTIFIED_AT, opt::TURN_AT] {
+            assert!(
+                cmds.iter()
+                    .any(|c| c.argv.last().map(String::as_str) == Some(key)),
+                "render_remove must unset {key}"
+            );
+        }
+    }
+
     /// The uninstall sweep clears everything a deregister does, plus the lanes it spares and the
     /// two rollups: a key added to either list must show up here without another edit.
     #[test]
@@ -1121,6 +1138,7 @@ mod tests {
             source,
             evidence_at,
             since: 42,
+            turn_at: 0,
             stamped_at: evidence_at,
             attention: true,
             notified_at: None,

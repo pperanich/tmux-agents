@@ -95,10 +95,13 @@ event = "tool_execution_start"
 claim = { state = "working" }
 
 # agent_settled: the turn is fully settled — no retry, compaction, or queued continuation left
-# (fires last, once per turn, after agent_end) ⇒ idle. This is the clean working→idle landing.
+# (fires last, once per turn, after agent_end) ⇒ idle. This is the clean working→idle landing, and
+# the event tma marks `turn_end` (its own manifest key — not pi's `turn_end` event above, which
+# stays unmapped) so a second completion re-raises the done marker.
 [[hooks.map]]
 event = "agent_settled"
 claim = { state = "idle" }
+turn_end = true
 
 # Capture fallback: a `working` screen rule from real captures (redacted), driven live in
 # a scratch tmux server at two widths.

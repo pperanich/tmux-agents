@@ -515,6 +515,7 @@ mod tests {
             source,
             evidence_at,
             since: evidence_at,
+            turn_at: 0,
             stamped_at: evidence_at,
             attention: false,
             notified_at: None,

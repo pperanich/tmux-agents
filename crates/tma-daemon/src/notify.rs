@@ -44,14 +44,16 @@ pub(crate) struct Transition {
 }
 
 /// Fire predicate: the [`NotifyTrigger`] this state fires (its token in the `on` set AND the marker
-/// strictly predates `@agent_since`), or `None`. `blocked` fires regardless of attention (focus can
-/// clear it mid-episode); a "done" landing is idle still carrying `@agent_attention`. `@agent_since`
-/// is write-once per state, so a blocked-then-done episode fires once for each.
+/// strictly predates the episode instant), or `None`. `blocked` fires regardless of attention (focus
+/// can clear it mid-episode); a "done" landing is idle still carrying `@agent_attention`.
+/// `@agent_since` is write-once per state, so a blocked-then-done episode fires once for each — and
+/// a SECOND completion inside one idle run is a new episode only because `@agent_turn_at` moved,
+/// which is why the comparison is [`StampedState::episode_at`] rather than `since`.
 fn fire_trigger(s: &StampedState, on: &[NotifyTrigger]) -> Option<NotifyTrigger> {
     let noteworthy = s.state == AgentState::Blocked || s.attention;
     let trigger = trigger_for(s.state, noteworthy)?;
     (trigger_enabled(on, trigger)
-        && !tma_runtime::event::episode_already_notified(s.notified_at, s.since))
+        && !tma_runtime::event::episode_already_notified(s.notified_at, s.episode_at()))
     .then_some(trigger)
 }
 
@@ -197,9 +199,9 @@ impl NotifyState {
         now: u64,
         trigger: NotifyTrigger,
     ) {
-        // Clamp the marker forward past `since` (see [`clamp_marker`]): a backward wall-clock step
-        // must not let the marker predate the episode, or it re-fires.
-        let mark_at = clamp_marker(now, stored.since);
+        // Clamp the marker forward past the episode instant (see [`clamp_marker`]): a backward
+        // wall-clock step must not let the marker predate the episode, or it re-fires.
+        let mark_at = clamp_marker(now, stored.episode_at());
         let marker = render::set_pane_option(&rec.pane_id, opt::NOTIFIED_AT, &mark_at.to_string());
         if tmux.apply(&[marker]).is_err() {
             return; // marker not committed ⇒ do not fire (retried next reconcile)
@@ -368,11 +370,12 @@ fn bound_pending(pending: &mut Vec<PendingFire>, cap: usize) {
     }
 }
 
-/// The notify marker to commit for an episode: `now`, clamped forward past `since`. Under a backward
-/// wall-clock step `now` can land before `since`, and a marker predating the episode would read as
-/// not-yet-notified and re-fire; `max(since)` holds dedup. With a monotone clock it is exactly `now`.
-fn clamp_marker(now: u64, since: u64) -> u64 {
-    now.max(since)
+/// The notify marker to commit for an episode: `now`, clamped forward past the episode instant
+/// ([`StampedState::episode_at`]). Under a backward wall-clock step `now` can land before it, and a
+/// marker predating the episode would read as not-yet-notified and re-fire; the `max` holds dedup.
+/// With a monotone clock it is exactly `now`.
+fn clamp_marker(now: u64, episode_at: u64) -> u64 {
+    now.max(episode_at)
 }
 
 #[cfg(test)]
@@ -387,6 +390,7 @@ mod tests {
             source: Provenance::Capture,
             evidence_at: since,
             since,
+            turn_at: 0,
             stamped_at: since,
             attention: false,
             notified_at,
@@ -490,6 +494,37 @@ mod tests {
         s.state = AgentState::Idle;
         s.attention = true;
         assert_eq!(fire_trigger(&s, &blocked_and_done()), None);
+    }
+
+    /// A SECOND completion on a pane that never left `idle`: the user cleared the first marker,
+    /// the turn-end hook raised it again and moved `@agent_turn_at`, and `@agent_since` — being
+    /// write-once per state run — did not move at all. Comparing the marker against `since` alone
+    /// deduped this away as the episode the first completion already notified; comparing it
+    /// against the episode instant fires it. Revert `fire_trigger` to `s.since` and this fails.
+    #[test]
+    fn a_second_completion_inside_one_idle_run_fires_again() {
+        let mut s = blocked(Some(100), 100);
+        s.state = AgentState::Idle;
+        s.attention = true;
+        // The turn end that re-raised the marker, recorded past the first fire.
+        s.turn_at = 200;
+        assert_eq!(
+            fire_trigger(&s, &blocked_and_done()),
+            Some(NotifyTrigger::Done)
+        );
+        // And once THAT completion is notified, it dedups again.
+        s.notified_at = Some(200);
+        assert_eq!(fire_trigger(&s, &blocked_and_done()), None);
+    }
+
+    /// The marker commits past the episode instant, not just past `since`: under a backward
+    /// wall-clock step a marker predating the turn end it is deduping would re-fire forever.
+    #[test]
+    fn the_marker_clamps_past_a_turn_end_ahead_of_the_clock() {
+        assert_eq!(clamp_marker(150, 200), 200);
+        let mut s = blocked(None, 100);
+        s.turn_at = 300;
+        assert_eq!(clamp_marker(150, s.episode_at()), 300);
     }
 
     // ---- transition-history ring bound -----------------------------------------------------

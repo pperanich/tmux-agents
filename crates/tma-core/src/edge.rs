@@ -91,6 +91,7 @@ mod tests {
             state,
             detail: None,
             since: 0,
+            turn_at: 0,
             session: "work".to_string(),
             window_index: 1,
             pane_index: 0,

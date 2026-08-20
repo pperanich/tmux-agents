@@ -46,6 +46,7 @@ claim = { state = "working" }
 [[hooks.map]]
 event = "stop"
 claim = { state = "idle" }
+turn_end = true
 
 # permission.asked — OpenCode is waiting on a tool-permission approval. The plugin
 # only fires this token for `permission.asked`, so it maps unconditionally (no matcher):
