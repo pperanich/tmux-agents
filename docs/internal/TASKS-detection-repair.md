@@ -286,7 +286,7 @@ Goal: clear the flag on the pane you **depart**, not only the one you arrive at.
 residue (finish while you watch → move to another window → flag survives for hours). Walk-away is
 preserved structurally: walking away means not navigating, so no hook fires.
 
-**C1 — make the hook command kind-aware.** `WIP batch-c-agent`
+**C1 — make the hook command kind-aware.** `DONE`
 - `crates/tma/src/install.rs:494-514` `clear_attention_command`, and pass the hook name through from
   `install_tmux_hooks` (`:531-554`).
 - ⚠️ **Encode the kind as an environment variable, not an argv flag.** The command is deliberately
@@ -295,17 +295,17 @@ preserved structurally: walking away means not navigating, so no hook fires.
   is ignored silently. Add `2>/dev/null || true` to the `-x` branch while there.
 - The existing drift arm rewrites old installs in place, so no migration code is needed.
 
-**C2 — resolve and clear the departed pane.** `WIP batch-c-agent`
+**C2 — resolve and clear the departed pane.** `DONE`
 - `crates/tma/src/dispatch.rs:11-20`. Read the kind, resolve via the verified formats (§1), unset
   `opt::ATTENTION` there too. Keep the "a focus hook must never error" posture: any failure is a
   silent no-op.
 
-**C3 — a narrow reader, not a wider `list-panes`.** `WIP batch-c-agent`
+**C3 — a narrow reader, not a wider `list-panes`.** `DONE`
 - New method beside `list_clients` (`crates/tma-tmux/src/tmux/read.rs:144-155`).
 - ⚠️ **Do not touch `list_panes_format()` / `FIXED_FIELDS` / `parse_pane_line`.** Adding fields there
   shifts every positional offset for no benefit.
 
-**C4 — tests, including one deliberate inversion.** `WIP batch-c-agent`
+**C4 — tests, including one deliberate inversion.** `DONE`
 - ⚠️ `crates/tma/tests/attention_integration.rs:~225` currently asserts
   *"selecting a different pane must not clear this one"*. That is an over-clearing guard added with
   the `ef12d02` fix, and batch C **inverts it deliberately**. Replace with three tests, all of which
@@ -316,10 +316,50 @@ preserved structurally: walking away means not navigating, so no hook fires.
 - Re-verify the `pane_last` / `window_last_flag` hook-time ordering on the oldest supported tmux
   before relying on it, and write the test so it fails loudly rather than clearing nothing.
 
-**C5 — docs + changelog.** `WIP batch-c-agent`
+**C5 — docs + changelog.** `DONE`
 - `docs/reference/cli.md` (`clear-attention`), `docs/how-to/install-agent-hooks.md`,
   `docs/explanation/detection-model.md`, `docs/internal/ARCHITECTURE.md`, `docs/internal/DAEMON.md`.
 - Note that users must re-run `tma install-hooks` to pick it up.
+
+**Batch C outcome** (for R-C):
+- Hook-time formats RE-VERIFIED on tmux 3.6a before building on them, out-of-band and key-driven (a
+  pty-attached client fed `prefix o` / `prefix n` / `prefix p`): `#{P:#{?pane_last,#{pane_id},}}` at
+  `after-select-pane` and `#{W:#{?window_last_flag,#{P:#{?pane_active,#{pane_id},}},}}` at
+  `after-select-window` both name the departed pane. §1 stands.
+- **One fact §1 does not carry, and the design leans on it:** the formats must be resolved with
+  `display-message -t <arrival pane>`. An UNtargeted query answers for whichever session tmux calls
+  "best", and that is neither stable nor the hook's session — probed both ways on 3.6a (the
+  first-created session won one arrangement, the last-created won another). With no `-t` a
+  navigation in one session can clear a flag in another. Guarded by
+  `the_departure_lookup_stays_inside_the_arrival_panes_session`, which asserts both directions so
+  whichever way tmux would guess, one arm catches it; it is driven by direct invocation with
+  `TMUX_PANE` removed, because tmux's own environment otherwise pins the query and hides the bug.
+- Also probed, and load-bearing for walk-away: selecting the ALREADY-ACTIVE pane does not fire
+  `after-select-pane` at all, so re-selecting where you already are cannot clear a stale `pane_last`.
+- C1 as specified: `TMA_HOOK_KIND=<hook name>` as a shell env prefix, no argv change, `2>/dev/null
+  || true` now on both branches. Confirmed no migration code is needed —
+  `hook_drift_is_path_aware_not_substring` now asserts a kindless hook string reads as drift, which
+  is what makes the existing drift arm rewrite it in place.
+- C3: `Tmux::departed_pane` + a `DepartureKind` enum, added beside `list_clients`.
+  `list_panes_format()` / `FIXED_FIELDS` / `parse_pane_line` untouched.
+- C4: the `ef12d02` over-clearing assertion is inverted, and all three replacements exist —
+  `departing_a_pane_clears_its_attention_flag`,
+  `an_unrelated_windows_pane_switch_leaves_the_flag_standing`,
+  `a_flag_raised_after_the_departure_survives` — plus
+  `departing_a_window_clears_the_pane_it_was_showing` (the second format) and the cross-session one
+  above. Every "the flag survived" assertion is paired with a WITNESS pane that must have been
+  cleared by the same hook, so a hook that silently does nothing fails loudly instead of passing.
+  Mutation-checked, all four mutants caught: swap the two formats (4 fail), resolve both kinds on
+  every hook (only the unrelated-window guard fails, which is its job), make the departure clear a
+  no-op (4 fail), drop the `-t` (the cross-session test fails).
+- Judgement call for the reviewer: the plan put the departure resolution in tma (C2/C3) rather than
+  expanding the format inside the hook string. Kept, for two reasons — the gnarlier
+  `after-select-window` format never has to survive nested tmux/sh quoting, and the integration
+  tests exercise the real resolution instead of a hand-copied format string. The cost is one extra
+  `display-message` per navigation and a race with a second navigation; the race is one-directional
+  by construction (`pane_last` only ever names a pane that WAS active, so a late answer can name a
+  pane departed slightly later, never one never departed).
+- Suite: 1194 → 1201 passing, 0 failed.
 
 > **Review gate R-C.** Focus: can a departure clear a pane the user never saw? Does an old binary
 > survive the new hook string? Are all three replacement tests present?
