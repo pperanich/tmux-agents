@@ -1239,10 +1239,19 @@ reintroduces one of these bugs.
    redefining `since_ms` breaks the uptime column. **Code guard is strong** — `crates/tma/src/wait.rs`
    closes the emitted→compared loop through the real serializer AND the real `Goal`, and
    `crates/tma/tests/wait_integration.rs` pins the `since_ms` spin as an asserted contrast.
-   **Doc guard is MISSING**, and the R-E re-run's F1 is the proof it matters: nothing checks that the `sed`
-   recipes in `docs/how-to/block-a-script-on-agent-state.md` and `custom-actions.md` name a key a
-   real row actually carries, and nothing checks `--help` against `cli.md`. If one thing is added
-   after this project, make it that test.
+   **Doc guard: ADDED** — `crates/tma/src/cli.rs`,
+   `every_description_of_the_since_floor_names_the_same_row_key`. It pins the three descriptions of
+   the `--since` floor to each other: clap's rendered `--help`, the `cli.md` flag row, and every
+   `sed` recipe in the two how-tos. Mutation-checked against all three drift sites.
+
+   **Note what it took to make it real**, because two plausible forms of this test do not work.
+   A "does this key exist" check misses the bug entirely — `since_ms` is a perfectly real key and
+   the defect was naming the wrong real one. And asserting the help merely CONTAINS `episode_ms`
+   also misses it: the shipped-wrong help read "`since_ms` must be strictly greater — NOT
+   `episode_ms`", which mentions the right key while instructing the wrong one. That version of the
+   test was written, run against the exact drift it was for, and PASSED. The guard therefore pins
+   the INSTRUCTION ("feed the row's own `episode_ms`") and asserts the negative. Rewording that
+   sentence fails the test on purpose — update the pin only after confirming the meaning survived.
 2. **Deriving `turn_end` from `state == "idle"`.** Zero-schema, correct for all six bundled
    manifests today, and it will look obviously right. It also makes every idle-claiming hook a
    re-raiser — the unclearable-mark failure the fold is barred from causing. Guard:
