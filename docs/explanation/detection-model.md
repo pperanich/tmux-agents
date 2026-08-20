@@ -108,6 +108,13 @@ reports offset 0 the moment you enter copy-mode, and at offset 0 you are still
 looking at the live screen, so entering copy-mode to copy an error message does
 not quietly suspend detection on the pane; scrolling up by a line does.
 
+That is tmux's scroll, and it is the only one tma can see. Agents draw on the
+alternate screen and scroll their transcript inside their own TUI, which moves
+no tmux fact, so scrolling back through a conversation *in the agent* does not
+freeze anything. It does not need to: those TUIs pin the chrome the rules match
+(spinner, composer, permission dialog) to the bottom of the screen, and it stays
+put while the transcript above it moves.
+
 ### Why a hook can lose to the screen, and when it cannot
 
 Ranking hooks first raises an obvious hazard: a stale hook claim outliving
