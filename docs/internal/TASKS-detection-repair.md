@@ -910,6 +910,43 @@ existing test, so no test count moved); `cargo fmt --all --check` clean, clippy 
 
 ---
 
+## Batch F — the `switch-client` session-departure gap
+
+Goal: close the one departure scope batch C left open, or prove on evidence that it should stay
+open. `@agent_attention` clears when you leave a PANE (`after-select-pane`) and when you leave a
+WINDOW (`session-window-changed`). Leaving a whole SESSION with a bare `switch-client -t <sess>`
+fires neither, so a marker raised on the pane you were watching survives the switch. Not a
+regression (nothing cleared on departure before batch C) and batch D's ordered-input clear takes it
+down once you return and type, which is why it did not block v0.4.1.
+
+**F1 — solve the `client-session-changed` mystery before designing anything.** `WIP batch-f-agent`
+- Probed before this batch: a bare `switch-client -t s2` fires `client-session-changed` TWICE, once
+  per session context (`pane=%0 sess=s1`, then `pane=%1 sess=s2`), so the departed session's pane
+  IS nameable at hook time. But installing tma's existing clear command on that hook did NOT clear
+  the departed pane, while both invocations ran and both exited 0.
+- `run_clear_attention` swallows every failure by design, so rc=0 proves nothing. Instrument the
+  real tmux command (`render.rs` `unset_pane_option`, `read.rs`, `dispatch.rs`) rather than infer.
+- Until the mechanism is known, any fix is guesswork. Report it whatever it turns out to be.
+
+**F2 — decide the design on the probe, not the argument.** `WIP batch-f-agent`
+- Either wire the hook, or resolve the gap as WONTFIX and say why. **Keeping the gap is a legitimate
+  outcome**: the marker means "finished, unreviewed", and batch C's premise (leaving = seen) is
+  strongest for a pane you were staring at and weakest for a session you walked away from.
+- If wired, it is held to batch C's bar: enumerate every way `client-session-changed` can fire
+  (script, `choose-tree`, a second client, `attach`, nested tmux, detach) and prove each does not
+  clear a pane the user never saw. Batch C shipped a defect of exactly that shape (C6).
+- If not wired, remove the gap from ARCHITECTURE's outstanding list by RESOLVING it, not by leaving
+  it dangling.
+
+**F3 — tests + docs.** `WIP batch-f-agent`
+- Whatever ships, follow the witness-pane pattern (`crates/tma/tests/attention_integration.rs`) so a
+  hook that silently does nothing fails loudly instead of passing vacuously. Mutation-check every
+  new test.
+- Docs: ARCHITECTURE, `install-agent-hooks.md`, `detection-model.md`, CHANGELOG as applicable.
+- Gate as always; baseline 1242 passing, 0 failed at v0.4.1.
+
+---
+
 ## Guard map: where this comes back, and what stands watch
 
 Left by the R-E re-run. Three places a future maintainer most likely reintroduces one of these bugs.
