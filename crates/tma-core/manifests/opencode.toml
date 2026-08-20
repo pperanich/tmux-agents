@@ -58,14 +58,16 @@ claim = { state = "blocked", detail = "permission" }
 # pane most needs (a permission prompt stops output, so the daemon's quiet-edge capture lands
 # right on it); `working` was added 2026-08-19 (see the rule below).
 #
-# `idle` still carries NO rule, and that is the honest reading: idle is the ABSENCE of the
-# working status row, not any positive chrome of its own. The per-message `▣ … · <elapsed>`
-# footer the original audit looked at renders in both states, and the row that replaces the
-# working bar at idle is the pane's cwd — per-pane text, not a matchable token. As with pi
-# (same shape: a `working` rule, no idle rule), the working→idle landing is the `stop` hook's
-# job; a hookless pane that finishes a turn therefore HOLDS `working` until a hook or a
-# blocker moves it. Registration now happens at plugin load, so a hookless OpenCode pane is
-# the rare case rather than the startup default.
+# `idle` now HAS a rule (bottom of this file), anchored on the `ctrl+p commands` hint the
+# composer's status row always ends with. The earlier note here claimed idle carried no positive
+# chrome of its own, on the reading that the per-message `▣ … · <elapsed>` footer renders in both
+# states and the row replacing the working bar at idle is the pane's cwd (per-pane text, not a
+# matchable token). That was the bug, twice over: it looked at the wrong row, and co-rendering
+# chrome is not disqualifying anyway (it is claude's `⏵⏵` shape). Without the rule a hookless pane
+# that finished a turn HELD `working` until a hook or a blocker moved it. The rule stays OUT of
+# `visible` below, because chrome that renders mid-turn is not evidence a turn ENDED and must
+# never be allowed to decay an idle hook claim. Registration now happens at plugin load, so a
+# hookless OpenCode pane is the rare case rather than the startup default.
 #
 # The OSC title is NOT usable and this is evidence, not assumption. The original audit found
 # it static ("OpenCode"); on 1.18.18 it is state-bearing (`OC | Running <command>`) — but it

@@ -329,9 +329,11 @@ fn idle_screen_never_reads_as_blocked_at_wide_and_narrow() {
 #[test]
 fn blocked_screen_raises_no_idle_claim() {
     // Codex numbers the approval options with the SAME arrow the composer uses
-    // (`› 1. Yes, proceed (y)`). The idle rule's `tail_lines(6)` window is what keeps them
-    // apart: in both blocked captures the nearest `›` is seven rows from the end. If this
-    // fails, widen the guard rather than the window.
+    // (`› 1. Yes, proceed (y)`), and that option row sits SIX rows from the end in both blocked
+    // captures, i.e. INSIDE the idle rule's `tail_lines(6)` window. The `not { line_regex =
+    // '^› \d+\. ' }` leaf is the only thing excluding it; the window's job is the other arrow
+    // source, the transcript echo of each user message. If this fails, tighten the `not` leaf.
+    // Do not narrow the window and call it fixed: it never covered this case.
     for name in ["codex_blocked_w100.txt", "codex_blocked_w60.txt"] {
         let ev = evaluate(name);
         assert!(
