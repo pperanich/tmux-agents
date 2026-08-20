@@ -10,6 +10,16 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- The attention flag is cleared again when you select an agent's pane. The two always-on tmux hooks
+  ran `tma clear-attention '#{hook_pane}'`, but tmux populates `hook_pane` only on the
+  notify-pane-style hooks; on `after-select-pane` and `after-select-window` it expands empty, and an
+  empty pane argument is a no-op. So the default install cleared attention never, and the done check
+  mark stayed on a pane you had already visited. The hooks now pass `#{pane_id}`, which resolves in
+  all three. An existing install is repaired by re-running `tma install-hooks` — the old shape reads
+  as drift and is rewritten in place.
+
 ## [0.3.6] - 2026-08-20
 
 ### Fixed

@@ -2,8 +2,9 @@
 //! `@agent_attention` and `clear-attention` removes it; the notification dedup survives a simulated
 //! daemon restart (a cold `tma event` whose only record is the persisted `@agent_notified_at`) and
 //! does NOT re-fire; a pid-change episode boundary clears both through `debug stamp --episode-reset`.
-//! Runs on a scratch `tmux -L` server, killed on drop. `clear-attention` is invoked directly (the
-//! simulated select-pane hook), since `#{hook_pane}` is empty without an attached client.
+//! Runs on a scratch `tmux -L` server, killed on drop. Most cases invoke `clear-attention` directly
+//! (a simulated hook), but one drives the REAL installed `after-select-pane` hook end to end, which
+//! is what the pane-argument regression below needs.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -180,5 +181,62 @@ fn episode_reset_clears_attention_and_notified() {
         s.get(&pane, "#{@agent_notified_at}"),
         "",
         "episode reset clears the notify marker"
+    );
+}
+
+/// The installed `after-select-pane` hook must actually clear the pane it selects.
+///
+/// It did not, from the first release until this test: the hook passed `#{hook_pane}`, which tmux
+/// populates only on the notify_pane-style hooks. On the `after-select-*` command hooks it expands
+/// EMPTY, and `clear-attention ''` is a no-op — so the always-on pair cleared nothing for anyone,
+/// while still looking installed and still firing its watch nudge. The old assertion only checked
+/// that the hook TEXT contained `clear-attention`, which the broken shape satisfied.
+///
+/// Deliberately end-to-end through `set-hook` + `select-pane` rather than calling the subcommand:
+/// the defect lived entirely in the format string, so any test that supplies the pane itself is
+/// blind to it. No attached client is needed — verified on tmux 3.6a that `after-select-pane` fires
+/// and `#{pane_id}` resolves on a detached server.
+#[test]
+fn select_pane_hook_clears_attention_on_the_selected_pane() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new("hookclear");
+    assert!(s
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
+        .status
+        .success());
+    assert!(s
+        .tmux(&["split-window", "-t", "s1", "exec sleep 100000"])
+        .status
+        .success());
+    let first = s.get("s1.0", "#{pane_id}");
+    let second = s.get("s1.1", "#{pane_id}");
+    assert_ne!(first, second, "need two distinct panes");
+
+    // Install the real hook, exactly as `install-hooks` writes it.
+    let hook = format!("run-shell \"'{0}' clear-attention '#{{pane_id}}'\"", bin());
+    assert!(s
+        .tmux(&["set-hook", "-g", "after-select-pane", &hook])
+        .status
+        .success());
+
+    s.set_opt(&first, "@agent_attention", "1");
+    // Select away and back: the arrival clear is what a user navigating between agents relies on.
+    assert!(s.tmux(&["select-pane", "-t", &second]).status.success());
+    assert_eq!(
+        s.pane_option(&first, "@agent_attention"),
+        "1",
+        "selecting a different pane must not clear this one"
+    );
+    assert!(s.tmux(&["select-pane", "-t", &first]).status.success());
+
+    assert!(
+        tma_test_support::wait_until(tma_test_support::POLL_CEILING, || s
+            .pane_option(&first, "@agent_attention")
+            .is_empty()),
+        "selecting the pane must clear its attention flag, but it is still {:?}",
+        s.pane_option(&first, "@agent_attention")
     );
 }

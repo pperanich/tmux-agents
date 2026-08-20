@@ -2,7 +2,7 @@
 //! attention-clear server hooks. Two symmetric, idempotent, diff-before-write, byte-identical
 //! write sites: the agent config (an "honest split", one [`adapters::AgentAdapter`] arm per agent, since each
 //! config format differs) and the tmux server hooks (`after-select-*` running `tma clear-attention
-//! #{hook_pane}`, their assigned indexes recorded in a PER-SERVER `hooks-state-<server>.toml`,
+//! #{pane_id}`, their assigned indexes recorded in a PER-SERVER `hooks-state-<server>.toml`,
 //! keyed because tmux `set-hook -g` indexes are per-server: a shared file would let one server's
 //! uninstall strip another's). `--check` verifies both and detects a config-reload hook wipe. The
 //! wired event set is [`crate::manifests::hook_events`], the docs-drift source of truth.
@@ -486,20 +486,29 @@ fn sweep_pane_stamps(tmux: &Tmux) {
 
 // --- tmux server hooks -----------------------------------------------------------
 
-/// The tmux-hook command clearing attention on focus change. `#{hook_pane}` (never `$TMUX_PANE`)
-/// binds the pane at hook time. The binary is LATE-BOUND like the `tma-hook` wrapper: the install-time
+/// The tmux-hook command clearing attention on focus change. `#{pane_id}` (never `$TMUX_PANE`, and
+/// never `#{hook_pane}` — see below) binds the pane at hook time. The binary is LATE-BOUND like the `tma-hook` wrapper: the install-time
 /// absolute path when it is still executable, else plain `tma` off `$PATH`, so a rebuilt, moved, or
 /// re-installed binary keeps the hook working instead of leaving a dead command behind. The
 /// middle-tier nudge lives inside the same `clear-attention` subcommand.
 fn clear_attention_command(bin: &Path) -> String {
+    // `#{pane_id}`, NOT `#{hook_pane}`. `hook_pane` is populated only on the notify_pane-style hooks
+    // (`pane-focus-in` and friends); on the `after-select-pane` / `after-select-window` command hooks
+    // it expands EMPTY, which `clear-attention` treats as a no-op — so the always-on pair cleared
+    // nothing at all, for anyone, and the flag only ever came off via the picker, jump, or the
+    // opt-in focus hook. Verified on tmux 3.6a, attached and detached, key-driven and out-of-band:
+    // `after-select-pane` gives `hook_pane=[]` / `pane_id=[%0]`, `pane-focus-in` gives both. The man
+    // page hedges it under FORMATS ("ID of pane where hook was run, if any"). `#{pane_id}` resolves
+    // in all three hooks, so one shape serves them all; it stays quoted so an empty expansion still
+    // passes an argument rather than shifting the argv.
+    //
     // Single quotes only: the whole string is a tmux double-quoted argument, where tmux expands
-    // `#{...}` (wanted) and `$name` (not wanted), so the shell side stays `$`-free. `#{hook_pane}` is
-    // quoted so an empty expansion still passes an argument (`clear-attention ''` no-ops). The PATH
+    // `#{...}` (wanted) and `$name` (not wanted), so the shell side stays `$`-free. The PATH
     // fallback swallows its own failure: with no `tma` anywhere, sh exits 127 and tmux would flash
     // "returned 127" on every pane switch, so that branch stays silent like the tma-hook wrapper.
     format!(
-        "run-shell \"if [ -x '{0}' ]; then '{0}' clear-attention '#{{hook_pane}}'; \
-         else tma clear-attention '#{{hook_pane}}' 2>/dev/null || true; fi\"",
+        "run-shell \"if [ -x '{0}' ]; then '{0}' clear-attention '#{{pane_id}}'; \
+         else tma clear-attention '#{{pane_id}}' 2>/dev/null || true; fi\"",
         bin.display()
     )
 }
@@ -1309,8 +1318,13 @@ mod tests {
             "a moved binary falls back to $PATH: {cmd}"
         );
         assert!(
-            cmd.contains("'#{hook_pane}'"),
+            cmd.contains("'#{pane_id}'"),
             "the pane stays bound at hook time: {cmd}"
+        );
+        assert!(
+            !cmd.contains("hook_pane"),
+            "`#{{hook_pane}}` expands empty on the after-select-* hooks, which silently \
+             no-ops the clear: {cmd}"
         );
         assert!(
             !cmd.contains('$'),
@@ -1321,8 +1335,8 @@ mod tests {
     #[test]
     fn hook_drift_is_path_aware_not_substring() {
         let expected = "run-shell \"if [ -x '/opt/tma/tma' ]; then '/opt/tma/tma' \
-                        clear-attention '#{hook_pane}'; else tma clear-attention \
-                        '#{hook_pane}' 2>/dev/null; fi\"";
+                        clear-attention '#{pane_id}'; else tma clear-attention \
+                        '#{pane_id}' 2>/dev/null; fi\"";
         assert!(hook_command_current(expected, expected), "same command");
         // tmux re-serializes the stored command when printing it back, so quoting and spacing are
         // its choice: normalization must absorb that without hiding a real change.
@@ -1340,6 +1354,14 @@ mod tests {
         let old_shape = "run-shell \"/opt/tma/tma clear-attention '#{hook_pane}'\"";
         assert!(is_ours(old_shape));
         assert!(!hook_command_current(old_shape, expected));
+        // And so is the `#{hook_pane}` shape every release up to 0.3.6 installed, which is what
+        // carries the fix to an existing install: `install-hooks` rewrites it in place.
+        let empty_pane_shape = expected.replace("pane_id", "hook_pane");
+        assert!(is_ours(&empty_pane_shape));
+        assert!(
+            !hook_command_current(&empty_pane_shape, expected),
+            "the old empty-pane shape must read as drift so re-install repairs it"
+        );
     }
 
     #[test]

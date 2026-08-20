@@ -513,7 +513,7 @@ fn check_detects_a_moved_binary_and_install_repoints_the_hook() {
             "set-hook",
             "-g",
             "after-select-pane[0]",
-            "run-shell \"/nonexistent/tma clear-attention '#{hook_pane}'\"",
+            "run-shell \"/nonexistent/tma clear-attention '#{pane_id}'\"",
         ])
         .status
         .success());
