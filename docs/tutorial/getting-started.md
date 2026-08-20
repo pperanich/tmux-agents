@@ -108,11 +108,11 @@ empty for a pane that is not in one. For a machine-readable feed, add `--json`:
 
 ```
 $ tma ls --json
-{"schema":1,"agents":[{"pane":"%1","agent":"claude","state":"blocked","detail":"permission","since":1786900866503,"since_ms":1786900866503,"locator":"s2:0.0","title":"web-ui","attention":true,"done":false,"session":"b47e5d18-2a90-4c3f-8de6-71f0c9a2b845","context":18,
+{"schema":1,"agents":[{"pane":"%1","agent":"claude","state":"blocked","detail":"permission","since":1786900866503,"since_ms":1786900866503,"episode_ms":1786900866503,"locator":"s2:0.0","title":"web-ui","attention":true,"done":false,"session":"b47e5d18-2a90-4c3f-8de6-71f0c9a2b845","context":18,
 …
 ```
 
-That is one row, cut short: each carries twenty keys, the ones above plus
+That is one row, cut short: each carries twenty-one keys, the ones above plus
 `context_at_ms`, `muted`, `tokens`, `repo`, `branch`, `worktree`, `server`, and
 `host`. The full column and JSON contract, with the type and meaning of every key,
 is in [Pane options and JSON contracts](../reference/pane-options-and-json.md).

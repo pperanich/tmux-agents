@@ -709,6 +709,100 @@ fn since_floor_excludes_the_current_episode() {
     );
 }
 
+/// (l) The supervisor loop's real lap, end to end: wait, read the floor out of the JSON row it
+/// printed, feed it back. `wait` compares the EPISODE instant (the later of `@agent_since` and
+/// `@agent_turn_at`), so once a second turn end has landed on a pane that never left `idle`, a loop
+/// feeding `since_ms` back sets a floor the row already clears and every lap returns instantly.
+/// `episode_ms` is the key that closes the loop, and the contrast is asserted both ways.
+#[test]
+fn a_fed_back_episode_floor_blocks_the_next_lap() {
+    if !have_tmux() {
+        return;
+    }
+    fn key(json: &str, name: &str) -> u64 {
+        let at = json
+            .find(&format!("\"{name}\":"))
+            .unwrap_or_else(|| panic!("{name} is missing from the row: {json}"))
+            + name.len()
+            + 3;
+        json[at..]
+            .chars()
+            .take_while(char::is_ascii_digit)
+            .collect::<String>()
+            .parse()
+            .expect("a numeric floor")
+    }
+
+    let s = Scratch::new("wait-episode");
+    let pane = static_agent(&s, "work", "READY\\n", "READY");
+    write_manifest(&s, &pane_process_names(&s, "work"));
+    assert!(s.tma(&["ls"]).status.success());
+    assert_eq!(s.display("work", "#{@agent_state}"), "idle");
+    let since: u64 = s
+        .display("work", "#{@agent_since}")
+        .parse()
+        .expect("a stamped @agent_since");
+
+    // A turn end landing inside the idle run: `@agent_since` is write-once and cannot move, so the
+    // second completion's instant lives only here. (The poll cycle never writes this key.)
+    let turn_at = since + 5_000;
+    s.set_opt(&pane, "@agent_turn_at", &turn_at.to_string());
+
+    // Lap 1: floored at the idle run's start, the new turn end satisfies.
+    let out = s.tma(&[
+        "wait",
+        "--pane",
+        &pane,
+        "--until",
+        "idle",
+        "--since",
+        &since.to_string(),
+        "--json",
+        "--timeout",
+        "5",
+    ]);
+    assert_eq!(out.status.code(), Some(0), "the fresh turn end satisfies");
+    let row = String::from_utf8_lossy(&out.stdout).to_string();
+    assert_eq!(key(&row, "since_ms"), since);
+    assert_eq!(key(&row, "episode_ms"), turn_at);
+
+    // Lap 2, floored at what lap 1 handed back: nothing newer has happened, so it must block.
+    let out = s.tma(&[
+        "wait",
+        "--pane",
+        &pane,
+        "--until",
+        "idle",
+        "--since",
+        &key(&row, "episode_ms").to_string(),
+        "--timeout",
+        "2",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(124),
+        "the completion lap 1 handled must not re-satisfy lap 2"
+    );
+
+    // And the spin the key exists to prevent: `since_ms` is a floor this row already clears.
+    let out = s.tma(&[
+        "wait",
+        "--pane",
+        &pane,
+        "--until",
+        "idle",
+        "--since",
+        &key(&row, "since_ms").to_string(),
+        "--timeout",
+        "2",
+    ]);
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "feeding since_ms back re-satisfies immediately, which is why the recipe reads episode_ms"
+    );
+}
+
 // ---------------------------------------------------------------------------------------------
 // Daemon-assisted push. These three spawn (or fake) a daemon; the six above stay on the poll path
 // (no daemon ⇒ `try_subscribe` returns None), so their semantics are unchanged.

@@ -10,6 +10,15 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- `episode_ms` on every JSON agent row (`ls --json`, `wait --json`), alongside `since_ms`. It is
+  the instant `wait --since` actually compares against: the later of the state transition and the
+  last turn end. The two agree until a pane completes a second turn without leaving `idle`, and
+  from there `since_ms` is a floor the row already clears — a supervisor loop feeding it back would
+  re-satisfy on every lap instead of blocking for the next completion. The loop recipes now read
+  `episode_ms`; `since_ms` is unchanged and still `@agent_since`.
+
 ### Fixed
 
 - A second completion now raises the done mark again. Once you had seen the first one and it came

@@ -53,6 +53,8 @@ pub fn render_ls_text(report: &CycleReport) -> String {
 
 /// `tma ls --json`: a versioned, additive-only document (`"schema": 1`). `attention` is additive so
 /// the schema stays `1`. `since`/`since_ms` carry the same epoch-ms transition value; prefer `since_ms`.
+/// `episode_ms` is the distinct quantity `wait --since` compares against, and the one a supervisor
+/// loop feeds back.
 pub fn render_ls_json(report: &CycleReport, origin: &Origin) -> String {
     render_rows_document(&report.rows, origin)
 }
@@ -100,6 +102,13 @@ fn write_row_fields(j: &mut JsonWriter, r: &AgentRow, origin: &Origin) {
     }
     j.number("since", r.since as i64);
     j.number("since_ms", r.since as i64);
+    // Additive (schema stays 1): the instant `wait --since` actually compares against
+    // ([`AgentRow::episode_at`] — the later of the transition and the last turn end). It is a
+    // SEPARATE key because `since_ms` is pinned to `@agent_since` by the uptime column, and a
+    // supervisor loop that feeds `since_ms` back as its next floor can never reach the compared
+    // quantity once a second completion has moved `@agent_turn_at` past it — the loop then
+    // re-satisfies on every lap. This is the key to feed back.
+    j.number("episode_ms", r.episode_at() as i64);
     j.string("locator", &r.locator());
     j.string("title", &r.title);
     j.bool("attention", r.attention);
@@ -553,6 +562,35 @@ mod tests {
         );
     }
 
+    /// `episode_ms` is the quantity `wait --since` compares against, and it is NOT `since_ms`: on a
+    /// pane whose second completion moved `@agent_turn_at` past its write-once `@agent_since`, the
+    /// two differ, and a supervisor loop feeding `since_ms` back would set a floor it can never
+    /// clear. Both surfaces emit it, because both are things a loop reads a row from.
+    #[test]
+    fn episode_ms_is_the_wait_floor_and_diverges_from_since_ms() {
+        let mut r = row("%1", "claude", AgentState::Idle, None);
+        r.attention = true;
+        r.since = 500; // the idle run began here and write-once pins it
+        r.turn_at = 900; // a second completion landed without the pane leaving idle
+        for json in [
+            render_wait_json_t(&r),
+            render_ls_json_t(&report(vec![r.clone()])),
+        ] {
+            assert!(
+                json.contains("\"since_ms\":500"),
+                "since_ms stays @agent_since: {json}"
+            );
+            assert!(
+                json.contains("\"episode_ms\":900"),
+                "episode_ms is the later of the transition and the turn end: {json}"
+            );
+        }
+        // With no turn end recorded the two agree, so a pane that never had one reads identically.
+        r.turn_at = 0;
+        let json = render_wait_json_t(&r);
+        assert!(json.contains("\"since_ms\":500") && json.contains("\"episode_ms\":500"));
+    }
+
     /// The complete `ls --json` key inventory (additive-only): a dropped, renamed, or new key fails
     /// here. `since`/`since_ms` share a value; `since` is the compat key, `since_ms` names the unit.
     #[test]
@@ -574,6 +612,7 @@ mod tests {
                 "context_at_ms",
                 "detail",
                 "done",
+                "episode_ms",
                 "host",
                 "locator",
                 "muted",
@@ -613,6 +652,7 @@ mod tests {
                 "context_at_ms",
                 "detail",
                 "done",
+                "episode_ms",
                 "host",
                 "locator",
                 "muted",
@@ -653,6 +693,7 @@ mod tests {
                 "context_at_ms",
                 "detail",
                 "done",
+                "episode_ms",
                 "host",
                 "locator",
                 "muted",

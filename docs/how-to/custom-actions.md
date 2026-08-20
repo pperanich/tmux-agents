@@ -151,7 +151,7 @@ pane=%5
 since=0
 while read -r task; do
   row=$(tma wait --pane "$pane" --until idle --since "$since" --json --timeout 900) || exit $?
-  since=$(printf '%s' "$row" | sed 's/.*"since_ms":\([0-9]*\).*/\1/')
+  since=$(printf '%s' "$row" | sed 's/.*"episode_ms":\([0-9]*\).*/\1/')
   tma act queue-next --pane "$pane" --arg "$task" --yes
 done < tasks.txt
 ```

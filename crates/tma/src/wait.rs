@@ -759,6 +759,66 @@ mod tests {
         assert!(goal.matches(&r), "the next completion satisfies");
     }
 
+    /// The closed loop the supervisor recipe actually runs: wait, read a floor out of the emitted
+    /// JSON row, feed it back as the next `--since`. `Goal` compares [`AgentRow::episode_at`], so a
+    /// row that does not carry that quantity hands the loop a floor it can never reach — after a
+    /// second completion every lap re-satisfies instantly and the queue drains in a spin. Driven
+    /// through the real serializer rather than a hand-built number, so the emitted key and the
+    /// compared key cannot drift apart again.
+    #[test]
+    fn the_fed_back_floor_blocks_the_wait_the_row_came_from() {
+        // The recipe's `sed 's/.*"<key>":\([0-9]*\).*/\1/'`, in Rust.
+        fn floor_from(json: &str, key: &str) -> u64 {
+            let at = json
+                .find(&format!("\"{key}\":"))
+                .unwrap_or_else(|| panic!("{key} is missing from the emitted row: {json}"))
+                + key.len()
+                + 3;
+            json[at..]
+                .chars()
+                .take_while(char::is_ascii_digit)
+                .collect::<String>()
+                .parse()
+                .expect("a numeric floor")
+        }
+        let render = |r: &AgentRow| {
+            tma_ui::surfaces::render_wait_json(r, &tma_runtime::origin::Origin::default())
+        };
+        let lap = |floor: u64| Goal {
+            until: parse_until("done").unwrap(),
+            since: Some(floor),
+        };
+
+        let mut r = row("%1", "claude", AgentState::Idle, true, "work");
+        r.since = 500; // the idle run began at the first completion and write-once pins it
+        r.turn_at = 500;
+
+        // Lap 1 satisfies from a cold floor and hands the loop the row it just serviced.
+        assert!(lap(0).matches(&r));
+        let fed_back = floor_from(&render(&r), "episode_ms");
+        assert!(
+            !lap(fed_back).matches(&r),
+            "lap 2 must block on the completion lap 1 already handled"
+        );
+
+        // A second turn end on a pane that never left `idle`: only `@agent_turn_at` moves.
+        r.turn_at = 900;
+        assert!(lap(fed_back).matches(&r), "the new completion satisfies");
+        let fed_back = floor_from(&render(&r), "episode_ms");
+        assert_eq!(fed_back, 900);
+        assert!(
+            !lap(fed_back).matches(&r),
+            "lap 3 must block on the second completion too"
+        );
+
+        // Why the key exists: `since_ms` is pinned to `@agent_since` and stays at the start of the
+        // idle run, so feeding IT back leaves a floor the row already clears.
+        assert!(
+            lap(floor_from(&render(&r), "since_ms")).matches(&r),
+            "since_ms is the wrong floor to feed back, and this is the spin it causes"
+        );
+    }
+
     /// The `--since` floor rides the stderr description, so a timeout line says which episode window
     /// the wait was actually asking about.
     #[test]

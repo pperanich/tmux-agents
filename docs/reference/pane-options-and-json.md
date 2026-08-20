@@ -93,6 +93,7 @@ A versioned, additive-only document. The top level is `{ "schema": 1, "agents":
 | `detail` | string or null | detail token, `null` when none |
 | `since` | number | epoch **ms** of the last state transition (original unsuffixed key, kept for compatibility) |
 | `since_ms` | number | the same value as `since`; names the unit, preferred in new consumers |
+| `episode_ms` | number | epoch **ms** of the instant `wait --since` compares against: the later of `since_ms` and `@agent_turn_at`. Equal to `since_ms` until a second completion lands on a pane that never left `idle`, and the value a supervisor loop feeds back as its next `--since` (see [Drive a supervisor loop](../how-to/block-a-script-on-agent-state.md#drive-a-supervisor-loop)) |
 | `locator` | string | `session:window.pane` |
 | `title` | string | pane title |
 | `attention` | boolean | `true` when the pane still carries `@agent_attention` |
@@ -146,7 +147,7 @@ down to one element must not lose the provenance with it. A long-lived
 
 The single matched agent row as one schema-1 object: the top-level `schema` key
 plus the same row fields as an `ls --json` element (`pane`, `agent`, `state`,
-`detail`, `since`, `since_ms`, `locator`, `title`, `attention`, `done`,
+`detail`, `since`, `since_ms`, `episode_ms`, `locator`, `title`, `attention`, `done`,
 `session`, `context`, `context_at_ms`, `muted`, `tokens`, `repo`, `branch`,
 `worktree`, `server`, `host`). It shares the serialization with `ls --json`, so the two can
 never disagree on keys, order, or null handling.

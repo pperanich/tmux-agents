@@ -38,7 +38,7 @@ Use `--json` for a structured result (one schema-1 object, same keys as an
 
 ```
 $ tma wait --pane %0 --until working --json
-{"schema":1,"pane":"%0","agent":"claude","state":"working","detail":null,"since":1786900866412,"since_ms":1786900866412,"locator":"s1:0.0","title":"api-server","attention":false,"done":false,"session":"3f1c8a20-5b6d-4e77-9c11-8a2e4d0b6f93","context":31,"context_at_ms":1786900866438,"muted":false,"tokens":62400,"repo":"tmux-agents","branch":"main","worktree":false,"server":"/private/tmp/tmux-501/default","host":"devbox"}
+{"schema":1,"pane":"%0","agent":"claude","state":"working","detail":null,"since":1786900866412,"since_ms":1786900866412,"episode_ms":1786900866412,"locator":"s1:0.0","title":"api-server","attention":false,"done":false,"session":"3f1c8a20-5b6d-4e77-9c11-8a2e4d0b6f93","context":31,"context_at_ms":1786900866438,"muted":false,"tokens":62400,"repo":"tmux-agents","branch":"main","worktree":false,"server":"/private/tmp/tmux-501/default","host":"devbox"}
 ```
 
 ## Target an agent by name
@@ -109,17 +109,21 @@ pane=%5
 since=0
 while read -r task; do
   row=$(tma wait --pane "$pane" --until idle --since "$since" --json --timeout 900) || exit $?
-  since=$(printf '%s' "$row" | sed 's/.*"since_ms":\([0-9]*\).*/\1/')
+  since=$(printf '%s' "$row" | sed 's/.*"episode_ms":\([0-9]*\).*/\1/')
   tma act queue-next --pane "$pane" --arg "$task" --yes
 done < tasks.txt
 ```
 
 Each pass blocks until the pane enters an idle episode strictly newer than the
 one it just serviced, so the loop advances exactly once per episode. The floor is
-exclusive (`since_ms > --since`), which is why feeding back the row's own
-`since_ms` is correct. `--since` composes with every target, including `--all`
-and `--count`. The `queue-next` action it fires is written in
-[Author a custom action](custom-actions.md#pass-a-value-in---arg).
+exclusive (`episode_ms > --since`), which is why feeding back the row's own
+`episode_ms` is correct. Read that key and not `since_ms`: `since_ms` is
+`@agent_since`, which is write-once per state run, so once the pane has completed
+a second turn without leaving `idle` it stays pinned behind the value `wait`
+compares, and every lap satisfies instantly. `episode_ms` is the later of the two,
+so it always names the episode the loop just handled. `--since` composes with
+every target, including `--all` and `--count`. The `queue-next` action it fires
+is written in [Author a custom action](custom-actions.md#pass-a-value-in---arg).
 
 ## Gate CI on agent state
 
