@@ -777,7 +777,7 @@ displays the pane **and** its last input is strictly later than the raise.
   nothing else, and that what keeps that survivable is manifests anchoring on bottom-pinned chrome.
   Also recorded at REQUIREMENTS appendix A, next to the alt-screen observation that causes it.
 
-**E4 — delete `Source::ProcessFact`.** `WIP e4-agent`
+**E4 — delete `Source::ProcessFact`.** `DONE`
 - Decided in E3, blocked there only by file contention with E1. Six sites in three files, mechanical:
   `crates/tma-core/src/evidence.rs:19` (the variant and its doc comment), `:29` (the `provenance()`
   arm), `:166` (the assertion in `source_folds_to_provenance`), `crates/tma-core/src/fold.rs:454`
@@ -786,6 +786,15 @@ displays the pane **and** its last input is strictly later than the raise.
 - Not a coverage loss: the proptest generator drops a variant that no producer can construct, and
   `Provenance::Process` (which IS produced, `fold.rs:154`) and its `FromStr`/token arms stay.
 - Accept: `Source` has three variants, the workspace builds, and the suite count drops by nothing.
+
+**E4 outcome.** E3's reasoning re-verified, not assumed: no `Source::ProcessFact` construction
+exists anywhere in the workspace, `Source` derives no `Deserialize`/`FromStr` so nothing can build
+one from a string either, and `crates/tma-core/Cargo.toml:9` is `publish = false`. All six sites
+deleted. A **seventh** site the task did not list: ARCHITECTURE.md's evidence-record sketch
+(`:230`) named the variant, and batch A's `4fd9237` set the precedent by editing that same line
+when `ActivityDelta` went — so it follows here. `Provenance::Process` and `Provenance::Activity`
+untouched. Suite **1235 passing, 0 failed** (unchanged: the deleted assertion lived inside an
+existing test, so no test count moved); `cargo fmt --all --check` clean, clippy silent.
 
 ---
 
