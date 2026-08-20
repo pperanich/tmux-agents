@@ -64,8 +64,11 @@ pub struct Notification {
     pub repo: String,
     /// Branch (the literal `HEAD` when detached), empty when unresolved.
     pub branch: String,
-    /// Age of the episode this fire belongs to, in ms: `now - @agent_since`. A hook's direct fire
-    /// lands on its own transition, so it reads 0; the daemon's reads its dispatch latency.
+    /// Age of the episode this fire belongs to, in ms: `now - max(@agent_since, @agent_turn_at)`.
+    /// The turn instant, not the state transition — a second completion inside one idle run does
+    /// not move `@agent_since`, so reading it alone would report the whole idle run's age. A hook's
+    /// direct fire lands on its own transition, so it reads 0; the daemon's reads its dispatch
+    /// latency.
     pub since_ms: u64,
     /// The pane's stored context-utilization percent, `None` when the agent reports none.
     pub context_pct: Option<u8>,

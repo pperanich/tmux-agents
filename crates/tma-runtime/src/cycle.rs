@@ -389,12 +389,7 @@ pub fn run_cycle_with(
                 prev.as_ref().is_some_and(|p| p.attention),
             ),
         };
-        // The cycle never writes `@agent_turn_at` (only a `turn_end` hook does), so the row carries
-        // the stored value through unchanged — and nothing at all once the tuple is removed.
-        let turn_at = match &plan {
-            StampPlan::Remove => 0,
-            _ => prev.as_ref().map_or(0, |p| p.turn_at),
-        };
+        let turn_at = row_turn_at(&plan, prev.as_ref());
         let companions = row_companions(rec, now);
         report.rows.push(AgentRow {
             pane_id: rec.pane_id.clone(),
@@ -582,6 +577,22 @@ fn row_companions(rec: &PaneRecord, now: u64) -> RowCompanions {
 /// `window_activity` is `#{window_activity}`, tmux's epoch-**seconds** timestamp of the last output
 /// in the pane's window. Window-scoped, so it is conservative in the right direction: a quiet window
 /// proves a quiet pane, never the reverse.
+/// The `@agent_turn_at` the row carries, mirroring what the write beside it leaves stored.
+///
+/// The cycle never WRITES this key — only a `turn_end` hook does — so the row normally passes the
+/// stored value through. The two zero arms are the cases where the write takes it away: `Remove`
+/// drops the whole tuple, and an episode reset unsets it (`render::render_publish`). Without the
+/// reset arm the row would carry the REPLACED agent's turn instant for one cycle, breaking the
+/// invariant stated above `row_companions` that the row shows what the write leaves stored — and
+/// under a backward clock step that stale value is what `episode_ms` and `wait --since` would read.
+fn row_turn_at(plan: &StampPlan, prev: Option<&StampedState>) -> u64 {
+    match plan {
+        StampPlan::Remove => 0,
+        StampPlan::Publish(publish) if publish.episode_reset => 0,
+        _ => prev.map_or(0, |p| p.turn_at),
+    }
+}
+
 fn can_reuse_stamp(p: &StampedState, window_activity: u64, cfg: &FoldConfig, now: u64) -> bool {
     // `freshness_secs = 0` asks for the screen to be re-read every cycle; honour that over the
     // shortcut, which would otherwise reuse a stamp no freshness window ever trusts.
@@ -743,6 +754,60 @@ mod tests {
             session: None,
             subagents: vec![],
         }
+    }
+
+    /// A prior carrying a recorded turn end, for the row-projection cases below.
+    fn prior_with_turn(turn_at: u64) -> StampedState {
+        StampedState {
+            turn_at,
+            ..quiet_prev(AgentState::Idle, Provenance::Hook, NOW)
+        }
+    }
+
+    /// A publish plan built through the REAL `plan_from_verdict`, so these cases cannot drift from
+    /// how the cycle actually constructs one (`Publish` is private to tma-tmux by design).
+    fn publish_plan(episode_reset: bool) -> StampPlan {
+        let verdict = tma_core::Verdict {
+            state: AgentState::Idle,
+            detail: None,
+            winning_evidence: tma_core::WinningEvidence {
+                source: Provenance::Hook,
+                at: NOW,
+                label: "test".to_string(),
+            },
+            writes: tma_core::WritePlan {
+                action: tma_core::WriteAction::Publish,
+                may_override: false,
+                set_attention: false,
+                episode_reset,
+            },
+        };
+        stamp::plan_from_verdict("%0", &verdict, 4242, "claude", 0xabc, NOW)
+    }
+
+    /// The ordinary case: the cycle does not write `@agent_turn_at`, so the row passes the stored
+    /// value straight through and `episode_ms` keeps reporting the recorded turn.
+    #[test]
+    fn the_row_carries_a_recorded_turn_end_through_an_ordinary_publish() {
+        let prev = prior_with_turn(NOW - 5_000);
+        assert_eq!(row_turn_at(&publish_plan(false), Some(&prev)), NOW - 5_000);
+    }
+
+    /// An episode reset (pid change) unsets `@agent_turn_at` in the write, so the row must drop it
+    /// in the same cycle. Carrying the REPLACED agent's turn instant through would break the
+    /// row-mirrors-the-write invariant, and under a backward clock step that stale value is what
+    /// `episode_ms` and `wait --since` would compare against.
+    #[test]
+    fn an_episode_reset_drops_the_replaced_agents_turn_end_from_the_row() {
+        let prev = prior_with_turn(NOW - 5_000);
+        assert_eq!(row_turn_at(&publish_plan(true), Some(&prev)), 0);
+    }
+
+    /// Removing the tuple takes the whole episode lane with it.
+    #[test]
+    fn removing_the_tuple_drops_the_turn_end_from_the_row() {
+        let prev = prior_with_turn(NOW - 5_000);
+        assert_eq!(row_turn_at(&StampPlan::Remove, Some(&prev)), 0);
     }
 
     /// `#{window_activity}` (epoch seconds) for a window last written to `secs` before the stamp.

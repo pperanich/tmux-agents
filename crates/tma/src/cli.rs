@@ -521,8 +521,10 @@ pub(crate) struct WaitArgs {
     /// `wait` returns as soon as a cycle observes the target in ANY of them.
     #[arg(long, value_name = "STATES", value_parser = cli_support::StateListParser(wait::parse_until))]
     pub(crate) until: wait::UntilSet,
-    /// Only a state that BEGAN after this epoch-ms timestamp satisfies (the row's `since_ms` must
-    /// be strictly greater). The escape hatch from level-triggering for supervisor loops.
+    /// Only an episode that BEGAN after this epoch-ms timestamp satisfies (the row's
+    /// `episode_ms` must be strictly greater — NOT `since_ms`, which does not move when a second
+    /// completion lands inside one idle run). The escape hatch from level-triggering for
+    /// supervisor loops: feed the row's own `episode_ms` back as the next floor.
     #[arg(long, value_name = "EPOCH_MS")]
     pub(crate) since: Option<u64>,
     /// Give up after this many seconds and exit 124 (the `timeout(1)` convention). Absent waits

@@ -887,6 +887,55 @@ existing test, so no test count moved); `cargo fmt --all --check` clean, clippy 
 
 ---
 
+**E6 — clear the R-E re-run findings.** `DONE`
+- R-E re-run returned PASS WITH FINDINGS (4, none blocking). All cleared.
+- **F1 was the sharpest and is the project's own bug class repeating**: E5 corrected the falsified
+  `--since` sentence in `cli.md` but not the SHIPPED `--help` text at `crates/tma/src/cli.rs:524`,
+  which still told users to feed back `since_ms` — the spin. There is no help↔`cli.md` drift test,
+  which is why nothing caught it. Fixed; the missing guard is recorded below.
+- F2: both definitions of the notify payload's `since_ms` still described the pre-fix arithmetic
+  (`now - @agent_since`) after the code moved to `episode_at()`.
+- F3 (code): `row_turn_at` extracted from `run_cycle` so it could be tested at all, with the
+  episode-reset arm the review proved necessary — without it the row carries the REPLACED agent's
+  turn instant for one cycle, and under a backward clock step that is what `episode_ms` and
+  `wait --since` read. Three regression tests, the reset one mutation-checked (removing the arm
+  fails it). The plan built through the real `plan_from_verdict`, since `Publish` is private to
+  tma-tmux by design and a hand-rolled literal could drift from how the cycle builds one.
+- F4 was informational and left as recorded: nothing pins the daemon payload's `since_ms` to a
+  nonzero dispatch latency. Pre-existing, not opened by batch E.
+
+> **Review gate R-E.** `PASSED` on re-run (first run FAILED; see E5). The re-run traced the emitted
+> quantity to the compared quantity through the real serializer, mutation-checked both episode-reset
+> arms separately, and confirmed no assertion was weakened anywhere in the batch.
+
+---
+
+## Guard map: where this comes back, and what stands watch
+
+Left by the R-E re-run. Three places a future maintainer most likely reintroduces one of these bugs.
+
+1. **Collapsing `since_ms` and `episode_ms` into one key.** Two adjacent JSON numbers, equal on
+   almost every row, read like a mistake. Deleting `episode_ms` restores the supervisor-loop spin;
+   redefining `since_ms` breaks the uptime column. **Code guard is strong** — `crates/tma/src/wait.rs`
+   closes the emitted→compared loop through the real serializer AND the real `Goal`, and
+   `crates/tma/tests/wait_integration.rs` pins the `since_ms` spin as an asserted contrast.
+   **Doc guard is MISSING**, and F1 above is the proof it matters: nothing checks that the `sed`
+   recipes in `docs/how-to/block-a-script-on-agent-state.md` and `custom-actions.md` name a key a
+   real row actually carries, and nothing checks `--help` against `cli.md`. If one thing is added
+   after this project, make it that test.
+2. **Deriving `turn_end` from `state == "idle"`.** Zero-schema, correct for all six bundled
+   manifests today, and it will look obviously right. It also makes every idle-claiming hook a
+   re-raiser — the unclearable-mark failure the fold is barred from causing. Guard:
+   `crates/tma-runtime/src/manifests.rs`'s drift test, whose failure message names claude's
+   deliberately-unmapped idle reminder as the counterexample. **Know its limit**: it pins today's
+   equivalence, so it catches a manifest author flipping one entry, but it goes vacuous along with
+   the field if someone deletes `turn_end` and derives it. The guard against THAT is prose.
+3. **Removing the `!standing` gate** in `crates/tma-runtime/src/event/mapping.rs`. Someone will hit
+   the held gap ("my second completion didn't raise while the first mark was up"), see the gate, and
+   drop it — ringing the desktop twice per codex turn, since codex reports one turn end on both
+   channels and opencode maps two SDK events onto one `stop` token. Guard is good: a unit test and
+   an integration test, both mutation-checked.
+
 ## Explicitly rejected (do not resurrect)
 
 - **Suppress-at-set** (never raise on a pane the viewer is on, herdr's design). `wait --until done`

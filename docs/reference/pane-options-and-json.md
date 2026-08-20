@@ -176,7 +176,7 @@ set:
 | `title` | string | pane title |
 | `repo` | string | repo name resolved from the pane's working directory, `""` when it is not a checkout |
 | `branch` | string | branch name (the literal `HEAD` when detached), `""` when unresolved |
-| `since_ms` | number | age of the episode when the notification fired (`now - @agent_since`); a hook's own direct fire reads `0`, the daemon's reads its dispatch latency |
+| `since_ms` | number | age of the episode when the notification fired (`now - max(@agent_since, @agent_turn_at)` — the turn instant, since a second completion inside one idle run does not move `@agent_since`); a hook's own direct fire reads `0`, the daemon's reads its dispatch latency |
 | `context_pct` | number or null | the pane's stored context-window utilization percent, `null` when the agent reports none |
 
 The same values are also exported as environment variables (`TMA_AGENT`,
