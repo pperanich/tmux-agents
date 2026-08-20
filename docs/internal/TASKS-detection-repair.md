@@ -321,6 +321,32 @@ preserved structurally: walking away means not navigating, so no hook fires.
   `docs/explanation/detection-model.md`, `docs/internal/ARCHITECTURE.md`, `docs/internal/DAEMON.md`.
 - Note that users must re-run `tma install-hooks` to pick it up.
 
+**C6 — repair the R-C failure: a no-op `select-window` over-clears.** `WIP c6-agent`
+- R-C returned **FAIL**. `select-window -t <the already-current window>` DOES fire
+  `after-select-window` on 3.6a, and at that moment `window_last_flag` still names whatever window
+  the user left however long ago — so batch C's departure format clears `@agent_attention` on a pane
+  the user has not visited since. That breaks the invariant batch C exists to protect, and it is new
+  in batch C. The `after-select-pane` arm is clean (re-selecting the active pane fires no hook).
+- Reachable from tma itself: `Tmux::focus` (`crates/tma-tmux/src/tmux/display.rs:82`) runs
+  `select-window` unconditionally, so every `tma jump` / picker Enter-jump landing in the window you
+  are already in clears the far window's flag. Also reachable as stock `prefix <N>` onto the current
+  window, `choose-tree` onto it, or any script running `select-window -t :0`.
+- **No format-only fix exists** (R-C checked): on a genuine switch `session_set_current` updates
+  `lastw`, on a no-op it returns early, and the arrival window's `window_last_flag` is `0` either
+  way. Nothing in the hook-time vocabulary says "the current window actually changed".
+- Ship the proven short-circuit in `Tmux::focus` (skip `select-window` when the destination window
+  is already its session's current window; discriminator `display-message -p -t <target>
+  '#{window_active}'`). Then decide the general case on live probes, not on argument — the
+  `@tma_focus_window` memo R-C sketched is UNPROVEN and must not be applied on its say-so. If it
+  does not hold up, ship the short-circuit alone and record the residual over-clear path honestly.
+- Regression test required, in the existing witness-pane style: a no-op `select-window` of the
+  already-current window must NOT clear a flag on the previously-visited window's pane.
+- Also fix three inaccurate comments R-C found (findings 2-4): `read.rs:200-202` (the
+  one-directional race claim is false for the `SelectWindow` arm, and a programmatic `select-pane`
+  can move a background window's active pane), `read.rs:196` (the untargeted-`display-message`
+  direction is arbitrary, not determinate — R-C observed the opposite), and `install.rs:1399` (two
+  hooks rendering the same string read as CURRENT, not drift; the test is right, its reason is not).
+
 **Batch C outcome** (for R-C):
 - Hook-time formats RE-VERIFIED on tmux 3.6a before building on them, out-of-band and key-driven (a
   pty-attached client fed `prefix o` / `prefix n` / `prefix p`): `#{P:#{?pane_last,#{pane_id},}}` at
