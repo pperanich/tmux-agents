@@ -571,6 +571,35 @@ displays the pane **and** its last input is strictly later than the raise.
 
 > **Review gate R-D.** Focus: can the predicate clear on a pane the human never touched? Is the
 > walk-away case still safe? Did any cycle-cost bound get raised silently?
+> **Result: PASS WITH FINDINGS** (2 medium, 1 low-medium, 1 low, 4 nits). Cleared in D6.
+
+---
+
+**D6 — clear the R-D findings.** `WIP d6-agent`
+- F1: the D4 ordering (clear strictly after `dispatch_notify`) is held by source order and a comment
+  only — R-D moved the clear above the dispatch and the whole `tma-daemon` suite still passed.
+  Add a `notify_integration.rs` case with a real client on the pane and a guaranteed sweep inside
+  the raise→dispatch window; it must FAIL under the reorder before it counts.
+- F2: `seen.rs`'s control-mode filter is documented as an iTerm2 `-CC` concession. Its real job is
+  ignoring **tma's own daemon**, which parks one `tmux -C attach-session` client per session pinned
+  to that session's current-window active pane. Name that reason in the doc comment, in
+  `ClientView::activity_secs` (whose "tma's own polling does not appear in `list-clients`" is true
+  of the COMMAND clients only), and in the ARCHITECTURE bullet; add a unit case whose fixture is
+  the daemon's own control client.
+- F3: with `focus-events on`, `\e[I`/`\e[O` move `client_activity`, so alt-tabbing away counts as
+  input. The behaviour is right (batch C's doctrine: leaving counts as seen); the wording in
+  `seen.rs`, `docs/explanation/detection-model.md` and ARCHITECTURE is wrong. Widen it.
+- F4: `clear_seen` decides against a `@agent_since` read at the top of the cycle. No `-F` guard
+  (`unset_pane_option` has no guarded form and the flag self-corrects next cycle); say so in the doc.
+- Nits: unread `usize` from `clear_seen_rows` + double `raised_panes`; `capture.rs`'s deferred-seen
+  doc omits the `since != 0` exclusion; `seen_integration.rs`'s walk-away `type_past(&s, 0)` can
+  return before the queued key lands; a 128-column line in `pane-options-and-json.md`.
+- Also record in ARCHITECTURE, near AD2: batch A deleted a hash-delta GUESS at "is the human here"
+  that was feeding STATE; batch D reintroduces the true version of that question (tmux's own input
+  clock) confined to PRESENTATION. Feeding `client_activity` back into the fold is the refactor to
+  warn against.
+- For E2: F2 is direct evidence that tma's control clients are real attached clients on the current
+  window of every monitored session — exactly the alert-suppression question E2 defers.
 
 ---
 
