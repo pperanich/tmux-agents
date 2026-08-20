@@ -167,23 +167,23 @@ the working spinner and is disambiguated by slot order (`claude.toml:100-102`).
 working chrome decay an idle hook claim. Update the design comments at `gemini_manifest.rs:180` and
 `opencode_manifest.rs:229` to say idle now has a rule but stays outside `visible`.
 
-**B1 — codex + gemini.** `OPEN`
+**B1 — codex + gemini.** `WIP batch-b-agent`
 - Existing idle fixtures at both widths; confirm they carry the intended anchor with ANSI stripped
   (escapes can sit *between* words — that is how the opencode `esc interrupt` anchor was missed).
 - Suggested anchors to verify, not to trust: gemini `Type your message or @path/to/file`,
   codex the `›` composer arrow.
 
-**B2 — opencode + pi.** `OPEN`
+**B2 — opencode + pi.** `WIP batch-b-agent`
 - Same shape. opencode's idle row is the pane cwd (per-pane, not matchable) — find invariant chrome
   elsewhere on the idle screen or set `BLOCKED` with what you found.
 
-**B3 — cursor.** `OPEN`
+**B3 — cursor.** `WIP batch-b-agent`
 - ⚠️ Its only idle fixture is a **fresh session** (`→ Plan, search, build anything`). A post-turn idle
   screen almost certainly reads `→ Add a follow-up …` without the stop hint. **Capture a real
   post-turn idle screen at both widths before authoring**, redact via `tma debug redact`, and anchor
   on the `→` composer arrow rather than hint text.
 
-**B4 — invert only the idle half of the negative tests.** `OPEN`
+**B4 — invert only the idle half of the negative tests.** `WIP batch-b-agent`
 - `codex_manifest.rs:261`, `cursor_manifest.rs:275`, `gemini_manifest.rs:246`, `pi_manifest.rs:186`,
   `opencode_manifest.rs:191`.
 - These currently assert the idle screen raises **no** state evidence. Only that half inverts, to
@@ -193,7 +193,7 @@ working chrome decay an idle hook claim. Update the design comments at `gemini_m
   lose it. Add, per agent, a coexistence test that the **working** fixture also matches the new idle
   rule yet still folds to `working`.
 
-**B5 — docs + changelog for batch B.** `OPEN`
+**B5 — docs + changelog for batch B.** `WIP batch-b-agent`
 - `docs/reference/agent-coverage.md` per-agent notes; CHANGELOG under `## [Unreleased]`.
 
 > **Review gate R-B.** Focus: is every new rule backed by a real capture at two widths? Did any
