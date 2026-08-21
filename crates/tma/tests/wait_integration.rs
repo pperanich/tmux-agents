@@ -6,9 +6,10 @@
 
 use std::io::{Read, Write};
 use std::os::unix::net::UnixListener;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
 use tma_test_support::{
@@ -104,6 +105,17 @@ fn static_agent(s: &Scratch, sess: &str, chrome: &str, marker: &str) -> String {
 /// Spawn `tma wait <args>` against the scratch server + manifest dir, stdout/stderr piped so the
 /// row (and the error line) can be read after exit.
 fn spawn_wait(s: &Scratch, args: &[&str]) -> Child {
+    spawn_wait_with_config(s, empty_config_path(), args)
+}
+
+/// [`spawn_wait`] for the tests that stage a change mid-wait and must know the waiter got there
+/// first. The zero freshness window puts every cycle on the producer path, which is what makes the
+/// waiter's progress visible to [`await_waiter_cycles`]; nothing else about the wait changes.
+fn spawn_staged_wait(s: &Scratch, args: &[&str]) -> Child {
+    spawn_wait_with_config(s, eager_config_path(), args)
+}
+
+fn spawn_wait_with_config(s: &Scratch, config: &Path, args: &[&str]) -> Child {
     Command::new(s.bin())
         .arg("wait")
         .args(args)
@@ -111,11 +123,68 @@ fn spawn_wait(s: &Scratch, args: &[&str]) -> Child {
         .arg(&s.socket)
         .arg("--manifest-dir")
         .arg(&s.workdir)
-        .env("TMA_CONFIG", empty_config_path())
+        .env("TMA_CONFIG", config)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .expect("spawn tma wait")
+}
+
+/// A process-shared config that turns the per-pane stamp freshness window off, so a waiter started
+/// with it re-reads its panes every cycle instead of trusting a stamp for three seconds. A settled
+/// pane otherwise leaves most cycles with nothing to do and nothing to show for them, which is what
+/// [`await_waiter_cycles`] needs. FIXED name, like the harness's empty config: racing writes from
+/// parallel tests write identical bytes.
+fn eager_config_path() -> &'static Path {
+    static PATH: OnceLock<PathBuf> = OnceLock::new();
+    PATH.get_or_init(|| {
+        let p = std::env::temp_dir().join("tma-test-eager-config.toml");
+        let _ = std::fs::write(&p, b"[fold]\nfreshness_secs = 0\n");
+        p
+    })
+    .as_path()
+}
+
+/// Block until the waiter has completed `n` whole poll cycles, so what its earlier cycles latched —
+/// `observed_pane`, `observed_agent`, the `--agent` pin — is in place before the test stages the
+/// next step.
+///
+/// This replaces a fixed staging sleep, which is a bet on how fast the box is: under a loaded one
+/// the waiter had not reached its entry cycle when the staged change landed, and a `--pane` killed
+/// before it was ever observed reads as never-launched (exit 124) rather than vanished (exit 3).
+///
+/// The marker is `@tma_last_poll`, the stampede guard's server option: a cycle writes it as its last
+/// act, and only once it has produced (hence [`spawn_staged_wait`]). The waiter is single-threaded,
+/// so a cycle can only begin after the previous one returned and its rows were evaluated — counting
+/// two of them proves the first cycle's evaluation ran, not merely that a cycle started.
+///
+/// False when the waiter exits first or the ceiling lapses; the caller decides which of those its
+/// own assertion should name.
+fn await_waiter_cycles(s: &Scratch, child: &mut Child, n: usize, timeout: Duration) -> bool {
+    let end = Instant::now() + timeout;
+    let mark = |s: &Scratch| {
+        String::from_utf8_lossy(&s.tmux(&["show-options", "-sqv", "@tma_last_poll"]).stdout)
+            .trim()
+            .to_string()
+    };
+    let mut last = mark(s);
+    let mut cycles = 0;
+    while cycles < n {
+        if matches!(child.try_wait(), Ok(Some(_))) {
+            return false;
+        }
+        let now = mark(s);
+        if now != last {
+            last = now;
+            cycles += 1;
+            continue;
+        }
+        if Instant::now() >= end {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+    true
 }
 
 /// Poll `child` until it exits or `deadline` elapses, returning its exit code (`None` on timeout —
@@ -138,6 +207,17 @@ fn read_stdout(child: &mut Child) -> String {
         let _ = out.read_to_string(&mut buf);
     }
     buf
+}
+
+/// The waiter's stderr, for the exit-code assertions to quote. `wait` names every non-zero end on
+/// stderr, and an unexpected code is unreadable without it: a scratch server that died under load
+/// exits 1 and says so, which otherwise looks exactly like a logic regression.
+fn read_stderr(child: &mut Child) -> String {
+    let mut buf = String::new();
+    if let Some(mut err) = child.stderr.take() {
+        let _ = err.read_to_string(&mut buf);
+    }
+    buf.trim().to_string()
 }
 
 /// Re-run `tma ls` until the pane's `@agent_state` equals `want` (or `timeout` elapses). Under heavy
@@ -172,20 +252,32 @@ fn poll_agent_identified(s: &Scratch, sess: &str, timeout: Duration) -> bool {
     }
 }
 
-/// SETUP-only settle: poll the pane to `idle`, re-discovering the process names and rewriting the
-/// manifest inside the loop. Under full parallelism the one-shot name discovery can race the shell
-/// coming up, leaving a manifest that never matches; re-discovery converges it (the recurring
-/// "must settle to idle" flake). The tests' real assertions are untouched.
-fn settle_idle_agent(s: &Scratch, sess: &str, timeout: Duration) -> bool {
+/// SETUP-only settle: poll the pane to `want`, re-discovering the process names and rewriting the
+/// manifest inside the loop. Under full parallelism the one-shot name discovery can race the pane's
+/// process coming up — a shell still sourcing its rc, a `printf; exec sleep` not yet past the
+/// `exec` — and leave a manifest that names something the pane no longer runs. The pane then either
+/// resolves to no agent at all or matches only in the subtree, whose foreground cap stamps
+/// `unknown`; re-discovery converges both. The tests' real assertions are untouched.
+fn settle_agent_state(s: &Scratch, sess: &str, want: &str, timeout: Duration) -> bool {
     let end = Instant::now() + timeout;
     let mut names = pane_process_names(s, sess);
     write_manifest(s, &names);
     loop {
         let _ = s.tma(&["ls"]);
-        if s.display(sess, "#{@agent_state}") == "idle" {
+        if s.display(sess, "#{@agent_state}") == want {
             return true;
         }
         if Instant::now() >= end {
+            // A bare "never settled" says nothing about why, and this settle has cost the suite
+            // whole sessions of guesswork. Print what the detector saw beside the manifest it was
+            // matched against, which names the cause outright.
+            let pane = s.display(sess, "#{pane_id}");
+            let explain = s.tma(&["debug", "explain", &pane]);
+            eprintln!(
+                "settle_agent_state({sess}, {want}) lapsed; manifest process_names = {names:?}\n{}{}",
+                String::from_utf8_lossy(&explain.stdout),
+                String::from_utf8_lossy(&explain.stderr),
+            );
             return false;
         }
         let fresh = pane_process_names(s, sess);
@@ -208,7 +300,10 @@ fn already_blocked_returns_immediately() {
     let pane = static_agent(&s, "work", BLOCKED_CHROME, "Do you want to proceed?");
     write_manifest(&s, &pane_process_names(&s, "work"));
     assert!(s.tma(&["ls"]).status.success());
-    assert_eq!(s.display("work", "#{@agent_state}"), "blocked");
+    assert!(
+        settle_agent_state(&s, "work", "blocked", POLL_CEILING),
+        "the pane must settle to blocked before the wait"
+    );
 
     let out = s.tma(&["wait", "--pane", &pane, "--until", "blocked"]);
     assert_eq!(out.status.code(), Some(0), "observed → exit 0");
@@ -230,6 +325,10 @@ fn already_blocked_json_object() {
     let pane = static_agent(&s, "work", BLOCKED_CHROME, "Do you want to proceed?");
     write_manifest(&s, &pane_process_names(&s, "work"));
     assert!(s.tma(&["ls"]).status.success());
+    assert!(
+        settle_agent_state(&s, "work", "blocked", POLL_CEILING),
+        "the pane must settle to blocked before the wait"
+    );
 
     let out = s.tma(&["wait", "--pane", &pane, "--until", "blocked", "--json"]);
     assert_eq!(out.status.code(), Some(0));
@@ -252,7 +351,10 @@ fn timeout_on_never_blocked_exits_124() {
     let pane = static_agent(&s, "work", "READY\\n", "READY");
     write_manifest(&s, &pane_process_names(&s, "work"));
     assert!(s.tma(&["ls"]).status.success());
-    assert_eq!(s.display("work", "#{@agent_state}"), "idle");
+    assert!(
+        settle_agent_state(&s, "work", "idle", POLL_CEILING),
+        "the pane must settle to idle before the wait"
+    );
 
     let start = Instant::now();
     let out = s.tma(&[
@@ -292,22 +394,26 @@ fn transition_idle_to_blocked_unblocks() {
         "idle chrome did not render"
     );
     let pane = s.display("work", "#{pane_id}");
-    // SETUP-only: settle via `settle_idle_agent`, which re-discovers process names inside the loop
+    // SETUP-only: settle via `settle_agent_state`, which re-discovers process names inside the loop
     // (a bare state poll flakes when a raced one-shot discovery leaves a never-matching manifest).
     assert!(
-        settle_idle_agent(&s, "work", POLL_CEILING),
+        settle_agent_state(&s, "work", "idle", POLL_CEILING),
         "pane must settle to idle before the flip"
     );
 
-    // Belt timeout well past the transition so a real regression still terminates the test.
-    let mut child = spawn_wait(
+    // Belt timeout well past both the transition and the staging gate below. The gate waits on the
+    // waiter's own progress rather than a duration, so the belt has to outlast a loaded box's idea
+    // of two poll cycles; `timeout_on_never_blocked_exits_124` is what pins the belt itself.
+    let mut child = spawn_staged_wait(
         &s,
-        &["--pane", &pane, "--until", "blocked", "--timeout", "20"],
+        &["--pane", &pane, "--until", "blocked", "--timeout", "60"],
     );
-    // LOAD-BEARING staging sleep: the entry cycle must observe the pane idle BEFORE the flip, so the
-    // test exercises a real idle→blocked transition, not an already-blocked entry return. 1500 ms
-    // clears the entry cycle + a poll tick; the observed-idle state is internal, with no signal to poll.
-    std::thread::sleep(Duration::from_millis(1500));
+    // Flip only once the waiter has observed the pane idle, so this exercises a real idle→blocked
+    // transition rather than an already-blocked entry return.
+    assert!(
+        await_waiter_cycles(&s, &mut child, 2, POLL_CEILING),
+        "the waiter never got through its entry cycle"
+    );
 
     let flip = format!("printf '{BLOCKED_CHROME}'");
     s.tmux(&["send-keys", "-t", "work", &flip, "Enter"]);
@@ -355,19 +461,30 @@ fn pane_vanish_exits_3() {
     let pane = static_agent(&s, "work", "READY\\n", "READY");
     write_manifest(&s, &pane_process_names(&s, "work"));
     assert!(s.tma(&["ls"]).status.success());
-
-    let mut child = spawn_wait(
-        &s,
-        &["--pane", &pane, "--until", "blocked", "--timeout", "20"],
+    assert!(
+        settle_agent_state(&s, "work", "idle", POLL_CEILING),
+        "the pane must settle to idle before the wait"
     );
-    // LOAD-BEARING staging sleep: the entry cycle must latch `observed_pane` (seen alive) BEFORE the
-    // kill, else the disappearance reads as a never-appeared pane (timeout), not a vanish (exit 3).
-    // 1500 ms clears the entry cycle; `observed_pane` is internal, with no signal to gate on.
-    std::thread::sleep(Duration::from_millis(1500));
+
+    let mut child = spawn_staged_wait(
+        &s,
+        &["--pane", &pane, "--until", "blocked", "--timeout", "60"],
+    );
+    // The kill must land after the waiter has seen the pane alive, else the disappearance reads as a
+    // never-appeared pane (timeout) rather than a vanish (exit 3).
+    assert!(
+        await_waiter_cycles(&s, &mut child, 2, POLL_CEILING),
+        "the waiter never got through its entry cycle"
+    );
     assert!(s.tmux(&["kill-pane", "-t", &pane]).status.success());
 
     let code = await_exit(&mut child, POLL_CEILING);
-    assert_eq!(code, Some(3), "a vanished --pane is exit 3, not 124");
+    assert_eq!(
+        code,
+        Some(3),
+        "a vanished --pane is exit 3, not 124; wait said: {:?}",
+        read_stderr(&mut child)
+    );
 }
 
 /// (e) `--agent` matching more than one pane is an error (exit 1) naming both candidates — scripts
@@ -383,6 +500,16 @@ fn ambiguous_agent_is_an_error() {
     // One manifest matches both panes' sleep process, so both are the agent named `agent`.
     write_manifest(&s, &pane_process_names(&s, "a"));
     assert!(s.tma(&["ls"]).status.success());
+    // Only A re-discovers: the panes run the same command, so the manifest A converges on is the
+    // one B needs, and rewriting it again from B's names could only narrow it.
+    assert!(
+        settle_agent_state(&s, "a", "idle", POLL_CEILING),
+        "pane A must settle to idle before the wait"
+    );
+    assert!(
+        poll_agent_state(&s, "b", "idle", POLL_CEILING),
+        "pane B must settle to idle before the wait"
+    );
 
     let out = s.tma(&[
         "wait",
@@ -424,17 +551,20 @@ fn agent_pins_to_first_observed_ignoring_a_later_second_pane() {
     let pane_a = s.display("a", "#{pane_id}");
     // Settle with in-loop name re-discovery (same flake class as the transition test's setup).
     assert!(
-        settle_idle_agent(&s, "a", POLL_CEILING),
+        settle_agent_state(&s, "a", "idle", POLL_CEILING),
         "A did not reach idle"
     );
 
-    let mut child = spawn_wait(
+    let mut child = spawn_staged_wait(
         &s,
-        &["--agent", "agent", "--until", "blocked", "--timeout", "20"],
+        &["--agent", "agent", "--until", "blocked", "--timeout", "60"],
     );
-    // LOAD-BEARING staging sleep: the entry cycle must observe A as the SOLE candidate and pin to it
-    // BEFORE a second pane exists — the whole point of the test. 1500 ms clears the entry cycle + a tick.
-    std::thread::sleep(Duration::from_millis(1500));
+    // Pane B may only appear once the waiter has observed A as the SOLE candidate and pinned to it —
+    // the whole point of the test.
+    assert!(
+        await_waiter_cycles(&s, &mut child, 2, POLL_CEILING),
+        "the waiter never got through its entry cycle, so it never pinned to A"
+    );
 
     // Pane B: a second interactive shell (same shell ⇒ same agent name), also idle. Now `--agent
     // agent` matches TWO panes; a non-pinned waiter would exit 1 on its next cycle.
@@ -453,12 +583,17 @@ fn agent_pins_to_first_observed_ignoring_a_later_second_pane() {
         "B did not reach idle"
     );
     assert_ne!(pane_a, pane_b, "A and B are distinct panes");
-    // Give the pinned waiter a couple of cycles with BOTH panes present + idle; it must keep waiting
-    // (pinned to A), never error on the ambiguity.
-    std::thread::sleep(Duration::from_millis(1500));
+    // Whole cycles with BOTH panes present + idle: the pinned waiter must keep waiting, never error
+    // on the ambiguity. A waiter that did error exits, which ends the gate early and lands on the
+    // assertion that names it.
+    let cycled = await_waiter_cycles(&s, &mut child, 2, POLL_CEILING);
     assert!(
         child.try_wait().unwrap().is_none(),
         "the pinned waiter must NOT exit (no ambiguity error) while a second same-named pane exists"
+    );
+    assert!(
+        cycled,
+        "the pinned waiter stopped cycling with both panes up"
     );
 
     // Flip the PINNED pane A to blocked; the waiter returns on it, naming A, not B.
@@ -504,6 +639,16 @@ fn all_barrier_needs_every_pane_and_rejects_an_empty_scope() {
     // One manifest matches both panes' `sleep`, so both are the agent `agent`.
     write_manifest(&s, &pane_process_names(&s, "a"));
     assert!(s.tma(&["ls"]).status.success());
+    // Only A re-discovers: the panes run the same command, so the manifest A converges on is the
+    // one B needs, and rewriting it again from B's names could only narrow it.
+    assert!(
+        settle_agent_state(&s, "a", "idle", POLL_CEILING),
+        "pane A must settle to idle before the wait"
+    );
+    assert!(
+        poll_agent_state(&s, "b", "idle", POLL_CEILING),
+        "pane B must settle to idle before the wait"
+    );
 
     let out = s.tma(&["wait", "--all", "--until", "idle"]);
     assert_eq!(out.status.code(), Some(0), "both panes are idle");
@@ -565,6 +710,16 @@ fn count_quorum_returns_the_satisfied_set() {
     let pane_b = static_agent(&s, "b", "READY\\n", "READY");
     write_manifest(&s, &pane_process_names(&s, "a"));
     assert!(s.tma(&["ls"]).status.success());
+    // Only A re-discovers: the panes run the same command, so the manifest A converges on is the
+    // one B needs, and rewriting it again from B's names could only narrow it.
+    assert!(
+        settle_agent_state(&s, "a", "idle", POLL_CEILING),
+        "pane A must settle to idle before the wait"
+    );
+    assert!(
+        poll_agent_state(&s, "b", "idle", POLL_CEILING),
+        "pane B must settle to idle before the wait"
+    );
 
     let out = s.tma(&["wait", "--count", "1", "--until", "idle"]);
     assert_eq!(out.status.code(), Some(0));
@@ -623,20 +778,24 @@ fn agent_death_under_a_live_pane_exits_4() {
         "the sleep-backed pane never registered an agent"
     );
 
-    let mut child = spawn_wait(
+    let mut child = spawn_staged_wait(
         &s,
-        &["--pane", &pane, "--until", "blocked", "--timeout", "20"],
+        &["--pane", &pane, "--until", "blocked", "--timeout", "60"],
     );
-    // LOAD-BEARING staging sleep: the entry cycle must observe the pane CARRYING an agent row before
-    // the kill, else the missing row reads as a not-yet-launched agent and the wait blocks on.
-    std::thread::sleep(Duration::from_millis(1500));
+    // The agent may only die once the waiter has seen the pane CARRYING an agent row, else the
+    // missing row reads as a not-yet-launched agent and the wait blocks on.
+    assert!(
+        await_waiter_cycles(&s, &mut child, 2, POLL_CEILING),
+        "the waiter never got through its entry cycle"
+    );
     s.tmux(&["send-keys", "-t", "work", "C-c"]);
 
     let code = await_exit(&mut child, POLL_CEILING);
     assert_eq!(
         code,
         Some(4),
-        "a departed agent under a live pane is exit 4, not 124"
+        "a departed agent under a live pane is exit 4, not 124; wait said: {:?}",
+        read_stderr(&mut child)
     );
     let mut err = String::new();
     if let Some(mut e) = child.stderr.take() {
@@ -663,7 +822,10 @@ fn since_floor_excludes_the_current_episode() {
     let pane = static_agent(&s, "work", "READY\\n", "READY");
     write_manifest(&s, &pane_process_names(&s, "work"));
     assert!(s.tma(&["ls"]).status.success());
-    assert_eq!(s.display("work", "#{@agent_state}"), "idle");
+    assert!(
+        settle_agent_state(&s, "work", "idle", POLL_CEILING),
+        "the pane must settle to idle before the wait"
+    );
 
     // The current episode's transition epoch, straight off the stamp the row reports.
     let since: u64 = s
@@ -737,7 +899,10 @@ fn a_fed_back_episode_floor_blocks_the_next_lap() {
     let pane = static_agent(&s, "work", "READY\\n", "READY");
     write_manifest(&s, &pane_process_names(&s, "work"));
     assert!(s.tma(&["ls"]).status.success());
-    assert_eq!(s.display("work", "#{@agent_state}"), "idle");
+    assert!(
+        settle_agent_state(&s, "work", "idle", POLL_CEILING),
+        "the pane must settle to idle before the wait"
+    );
     let since: u64 = s
         .display("work", "#{@agent_since}")
         .parse()

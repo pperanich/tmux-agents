@@ -276,7 +276,7 @@ pub fn run_cycle_with(
         // `now` and captures the moment a time-driven transition comes due.
         if let Some(p) = prev
             .as_ref()
-            .filter(|p| can_reuse_stamp(p, rec.window_activity, cfg, now))
+            .filter(|p| can_reuse_stamp(p, rec.window_activity, id.foreground_is_agent, cfg, now))
         {
             report.skipped_quiet += 1;
             report.consumed += 1;
@@ -593,7 +593,13 @@ fn row_turn_at(plan: &StampPlan, prev: Option<&StampedState>) -> u64 {
     }
 }
 
-fn can_reuse_stamp(p: &StampedState, window_activity: u64, cfg: &FoldConfig, now: u64) -> bool {
+fn can_reuse_stamp(
+    p: &StampedState,
+    window_activity: u64,
+    foreground_is_agent: bool,
+    cfg: &FoldConfig,
+    now: u64,
+) -> bool {
     // `freshness_secs = 0` asks for the screen to be re-read every cycle; honour that over the
     // shortcut, which would otherwise reuse a stamp no freshness window ever trusts.
     if cfg.freshness_ms() == 0 {
@@ -612,6 +618,20 @@ fn can_reuse_stamp(p: &StampedState, window_activity: u64, cfg: &FoldConfig, now
     // drives it is already on the unchanged screen — invisible without a capture. Always re-read.
     if p.state == AgentState::Working {
         return false;
+    }
+    // The foreground cap is the one verdict that turns on a process fact instead of the screen, and
+    // that fact flips with no output at all — invisible to the activity gate below, which then pins
+    // the stale verdict for as long as the pane stays quiet. `Provenance::Process` is the cap's own
+    // `unknown` and nothing else writes it: with the agent back in the foreground that verdict is
+    // void, and on a still screen nothing would ever free it (the pane holds `unknown` until
+    // something happens to write to its window). The mirror case is a screen-read verdict that the
+    // cap now owes an `unknown`. A hook claim is exempt from both — the cap holds it rather than
+    // replacing it, so a re-read would reach the same stamp, and its decay rule below is what
+    // expires it.
+    match p.source {
+        Provenance::Process if foreground_is_agent => return false,
+        Provenance::Capture | Provenance::Activity if !foreground_is_agent => return false,
+        _ => {}
     }
     // A hook claim past its decay window can be expired by contrary chrome that has been sitting on
     // the screen since before the stamp; only the capture can see it. Inside the window the claim
@@ -822,6 +842,7 @@ mod tests {
         assert!(can_reuse_stamp(
             &prev,
             activity_before(NOW, 5),
+            true,
             &cfg,
             NOW + 10_000
         ));
@@ -832,11 +853,23 @@ mod tests {
         let cfg = FoldConfig::default();
         let prev = quiet_prev(AgentState::Idle, Provenance::Capture, NOW);
         // Output one second AFTER the stamp: the screen may have changed.
-        assert!(!can_reuse_stamp(&prev, NOW / 1000 + 1, &cfg, NOW + 10_000));
+        assert!(!can_reuse_stamp(
+            &prev,
+            NOW / 1000 + 1,
+            true,
+            &cfg,
+            NOW + 10_000
+        ));
         // Output in the SAME second as the stamp is ambiguous at second resolution, so it captures.
-        assert!(!can_reuse_stamp(&prev, NOW / 1000, &cfg, NOW + 10_000));
+        assert!(!can_reuse_stamp(
+            &prev,
+            NOW / 1000,
+            true,
+            &cfg,
+            NOW + 10_000
+        ));
         // An unreported (zero) activity timestamp is not evidence of quiet.
-        assert!(!can_reuse_stamp(&prev, 0, &cfg, NOW + 10_000));
+        assert!(!can_reuse_stamp(&prev, 0, true, &cfg, NOW + 10_000));
     }
 
     #[test]
@@ -848,6 +881,7 @@ mod tests {
         assert!(can_reuse_stamp(
             &blocked,
             quiet,
+            true,
             &cfg,
             NOW + cfg.blocked_decay_ms()
         ));
@@ -856,6 +890,7 @@ mod tests {
         assert!(!can_reuse_stamp(
             &blocked,
             quiet,
+            true,
             &cfg,
             NOW + cfg.blocked_decay_ms() + 1
         ));
@@ -864,12 +899,14 @@ mod tests {
         assert!(can_reuse_stamp(
             &idle,
             quiet,
+            true,
             &cfg,
             NOW + cfg.hook_decay_ms()
         ));
         assert!(!can_reuse_stamp(
             &idle,
             quiet,
+            true,
             &cfg,
             NOW + cfg.hook_decay_ms() + 1
         ));
@@ -878,6 +915,7 @@ mod tests {
         assert!(can_reuse_stamp(
             &capture,
             quiet,
+            true,
             &cfg,
             NOW + 10 * cfg.blocked_decay_ms()
         ));
@@ -892,9 +930,39 @@ mod tests {
         assert!(!can_reuse_stamp(
             &prev,
             activity_before(NOW, 60),
+            true,
             &cfg,
             NOW + 60_000
         ));
+    }
+
+    #[test]
+    fn a_lifted_foreground_cap_forces_a_capture() {
+        // The cap stamped `unknown` while the agent was not the foreground; the pane then went
+        // quiet. Nothing will ever write to its window again, so only re-reading the process fact
+        // can free it — without this the pane holds `unknown` for as long as it stays settled.
+        let cfg = FoldConfig::default();
+        let quiet = activity_before(NOW, 5);
+        let capped = quiet_prev(AgentState::Unknown, Provenance::Process, NOW);
+        assert!(!can_reuse_stamp(&capped, quiet, true, &cfg, NOW + 10_000));
+        // Still capped: the fold would reach the same verdict, so the skip still pays off.
+        assert!(can_reuse_stamp(&capped, quiet, false, &cfg, NOW + 10_000));
+    }
+
+    #[test]
+    fn a_foreground_that_left_the_agent_forces_a_capture() {
+        // The mirror image: a screen-sourced verdict stands from a fold that ran with the agent in
+        // the foreground. The foreground has since moved on, so the cap is now owed and the stored
+        // state is stale even though the screen never changed.
+        let cfg = FoldConfig::default();
+        let quiet = activity_before(NOW, 5);
+        let prev = quiet_prev(AgentState::Idle, Provenance::Capture, NOW);
+        assert!(!can_reuse_stamp(&prev, quiet, false, &cfg, NOW + 10_000));
+        // A hook claim is exempt: the cap holds it rather than replacing it, so the re-read would
+        // land on the same stamp. Wrapper panes (an agent under a launcher) sit here permanently,
+        // and capturing them every cycle is the cost the skip exists to avoid.
+        let hook = quiet_prev(AgentState::Blocked, Provenance::Hook, NOW);
+        assert!(can_reuse_stamp(&hook, quiet, false, &cfg, NOW + 10_000));
     }
 
     #[test]
@@ -904,10 +972,10 @@ mod tests {
         // Hook-stamped but never captured: no baseline hash, so "unchanged" proves nothing.
         let mut no_hash = quiet_prev(AgentState::Idle, Provenance::Hook, NOW);
         no_hash.hash = None;
-        assert!(!can_reuse_stamp(&no_hash, quiet, &cfg, NOW + 1_000));
+        assert!(!can_reuse_stamp(&no_hash, quiet, true, &cfg, NOW + 1_000));
         // A stamp in the future (backward wall-clock step) is not a baseline to trust.
         let prev = quiet_prev(AgentState::Idle, Provenance::Capture, NOW);
-        assert!(!can_reuse_stamp(&prev, quiet, &cfg, NOW - 1_000));
+        assert!(!can_reuse_stamp(&prev, quiet, true, &cfg, NOW - 1_000));
     }
 
     #[test]

@@ -10,6 +10,21 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- A pane no longer gets stuck reading `unknown` after the agent briefly hands over the terminal.
+  When something other than the agent owns the pane's screen — an editor, a pager, a shell command,
+  or just the shell still sourcing its rc at startup — tma caps the pane at `unknown`, because the
+  screen on display is not the agent's to read. That cap turns on a *process* fact, and a process
+  fact flips back with no output at all. The freshness shortcut that skips a re-read asked only
+  whether the window had been written to since the last stamp, so on a pane that then sat still
+  there was nothing to notice: the agent had the terminal back, the verdict saying otherwise was
+  void, and nothing would ever free it. `tma ls` and `tma wait` held `unknown` until something
+  happened to write to that window. The shortcut now also refuses to reuse a stamp whose
+  foreground fact no longer matches the one behind it, in both directions. Hook claims are
+  unaffected — the cap holds those rather than replacing them.
+
+
 ## [0.4.2] - 2026-08-20
 
 ### Changed
