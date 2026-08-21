@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-08-21
+
 ### Fixed
 
 - A pane no longer gets stuck reading `unknown` after the agent briefly hands over the terminal.
@@ -418,7 +420,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.4.2...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.4.3...HEAD
+[0.4.3]: https://github.com/pperanich/tmux-agents/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/pperanich/tmux-agents/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/pperanich/tmux-agents/compare/v0.4.0...v0.4.1
 [0.4.0]: https://github.com/pperanich/tmux-agents/compare/v0.3.6...v0.4.0
