@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-08-22
+
 ### Fixed
 
 - A second completion's done mark is no longer taken down the instant it appears. When an agent
@@ -434,7 +436,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.4.3...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.4.4...HEAD
+[0.4.4]: https://github.com/pperanich/tmux-agents/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/pperanich/tmux-agents/compare/v0.4.2...v0.4.3
 [0.4.2]: https://github.com/pperanich/tmux-agents/compare/v0.4.1...v0.4.2
 [0.4.1]: https://github.com/pperanich/tmux-agents/compare/v0.4.0...v0.4.1
