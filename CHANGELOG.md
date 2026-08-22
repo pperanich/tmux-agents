@@ -10,6 +10,20 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- A second completion's done mark is no longer taken down the instant it appears. When an agent
+  finishes twice without tma seeing it go back to work — a codex pane whose `hooks.json` channel is
+  not trusted yet is the common way in — the second completion re-raises the mark and records its
+  own instant, because the state has not changed and the state's timestamp cannot move. The
+  clear-on-input check was still reading that state timestamp, so it measured your keystrokes
+  against the start of the whole idle run rather than against the completion. A prompt you typed
+  before the agent finished counted as having seen the mark it raised afterwards, and the mark came
+  down on the next cycle, before any surface had shown it. The notification still fired, which is
+  how you could be pinged for something `tma status` never showed. It now reads the same instant
+  every other consumer does.
+
+
 ## [0.4.3] - 2026-08-21
 
 ### Fixed
