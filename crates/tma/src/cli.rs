@@ -842,13 +842,22 @@ mod tests {
             .lines()
             .find(|l| l.contains("`--since <EPOCH_MS>`"))
             .expect("cli.md documents --since");
+        // Same shape as arm 1, for the same reason. "names `episode_ms` somewhere in the row" is the
+        // weak form: the row names BOTH keys by design (it contrasts them), so a rewording of the
+        // instruction alone — "feed the row's own `since_ms` back as the next floor" — leaves
+        // `episode_ms` standing elsewhere in the row and reads as correct. Pin the INSTRUCTION and
+        // assert the negative, exactly as the help arm does.
         assert!(
-            since_row.contains(SINCE_FEEDBACK_KEY),
-            "cli.md's --since row must name `{SINCE_FEEDBACK_KEY}`:\n{since_row}"
+            since_row.contains(&format!("own `{SINCE_FEEDBACK_KEY}`")),
+            "cli.md's --since row must tell the user to feed back the row's own \
+             `{SINCE_FEEDBACK_KEY}` — naming the key somewhere in the row is not enough, since the \
+             row names both keys to contrast them. If you reworded it, update this pin only after \
+             confirming the meaning survived:\n{since_row}"
         );
         assert!(
-            !since_row.contains("Feed back `since_ms`"),
-            "cli.md's --since row instructs feeding back `since_ms`:\n{since_row}"
+            !since_row.contains("own `since_ms`"),
+            "cli.md's --since row instructs feeding back `since_ms`, which the row already \
+             clears — every lap re-satisfies instead of blocking:\n{since_row}"
         );
 
         // 3. every `sed` recipe in the how-tos that extracts a floor to feed back. These are the
