@@ -32,6 +32,19 @@ fn stamp_blocked_claude(s: &Scratch, pane: &str) {
     s.set_opt(pane, "@agent_pid", "4242");
 }
 
+/// A pid that is provably not running: a child spawned, waited for, and reaped. Asserted dead, so
+/// the lock's reclaim liveness pre-check cannot silently turn a planted stale lock into a refusal.
+fn reaped_pid() -> u32 {
+    let mut child = Command::new("true").spawn().expect("spawn /usr/bin/true");
+    let pid = child.id();
+    child.wait().expect("reap it");
+    assert!(
+        !lock::pid_alive(pid),
+        "pid {pid} should be dead after reaping"
+    );
+    pid
+}
+
 /// The bundled `approve` action (claude ⇒ ["1"]).
 fn approve() -> ActionManifest {
     let src = include_str!("../../tma-core/actions/approve.toml");
@@ -47,6 +60,19 @@ fn keys_action_delivers_and_clears_the_lock() {
     let s = Scratch::new("broker_keys");
     let pane = s.new_shell_pane();
     stamp_blocked_claude(&s, &pane);
+
+    // Plant a reclaimable lock: expired, and held by a pid that is provably dead. The broker must
+    // take it (the reclaim pre-check only refuses an expired lock whose holder is still alive) and
+    // then release its OWN nonce. Without something planted here the release assertion below is
+    // unfalsifiable — an empty `@agent_action` reads the same whether the lock was taken and
+    // released or never acquired at all.
+    let stale = LockValue {
+        expiry_ms: 1,
+        nonce: "0".repeat(32),
+        pid: reaped_pid(),
+        name: "approve".to_string(),
+    };
+    s.set_opt(&pane, "@agent_action", &stale.encode());
 
     let tmux = adapter(&s);
     let manifests = tma_runtime::manifests::load(None, &[])
@@ -67,12 +93,19 @@ fn keys_action_delivers_and_clears_the_lock() {
     assert_eq!(r.outcome, Outcome::Sent, "approve fires on a blocked pane");
     assert_eq!(r.exit_code(), 0);
 
-    // The `1` keystroke reached the pane's shell prompt.
+    // The `1` keystroke reached the pane's shell prompt. Anchored on the prompt: a bare `1` is
+    // ambient text (it sits in most themed prompts), so the unanchored needle stayed green with
+    // `Tmux::send_keys` stubbed to a no-op.
+    let echoed = format!("{}1", common::SHELL_PROMPT);
     assert!(
-        common::wait_capture_contains(&s.socket, &pane, "1", common::POLL_CEILING),
-        "the approve keystroke `1` should appear in the pane"
+        common::wait_capture_contains(&s.socket, &pane, &echoed, common::POLL_CEILING),
+        "the approve keystroke `1` should be echoed at the pane's prompt as {echoed:?}"
     );
     // The single-flight lock is released nonce-conditionally on the send path (empty == absent).
+    // The planted stale lock is what makes this a real assertion: an empty option now means the
+    // broker overwrote it (acquired) and then cleared its own nonce (released). A broker that
+    // never acquired would have left the planted value standing — its nonce-conditional clear
+    // matches nothing.
     let held = s.pane_option(&pane, "@agent_action");
     assert!(held.is_empty(), "lock should be cleared, got {held:?}");
 }

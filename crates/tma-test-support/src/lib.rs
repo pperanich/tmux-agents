@@ -394,6 +394,11 @@ const ATTACH_LIFETIME: Duration = Duration::from_secs(120);
 /// magnitude inside it), so a lapse means the condition never happened, not that the box was busy.
 pub const POLL_CEILING: Duration = Duration::from_secs(45);
 
+/// The prompt [`Scratch::new_shell_pane`] pins on its isolated shell. Exported so a test can anchor
+/// a capture needle on it: `SHELL_PROMPT` + the keystroke is text only a delivered key can produce,
+/// where the bare keystroke could be anything the developer's own rc had already painted.
+pub const SHELL_PROMPT: &str = "tma> ";
+
 /// Poll `cond` every 100 ms until it holds, panicking with `what` once [`POLL_CEILING`] lapses.
 /// The suites' replacement for a blind sleep in front of an assertion: it returns the moment the
 /// state is observable, and names the condition it was waiting on when it never arrives.
@@ -696,16 +701,37 @@ impl Scratch {
         pane
     }
 
-    /// A fresh detached 80x24 session running the default shell (so `send-keys` produces visible
-    /// output), returning its active pane's `%`-prefixed id. Distinct from [`Scratch::new_pane`],
-    /// which execs `sleep` in a named `s1`: the broker/act/detach suites need a live shell.
+    /// A fresh detached 80x24 session running a MINIMAL interactive shell (so `send-keys` produces
+    /// visible output), returning its active pane's `%`-prefixed id. Distinct from
+    /// [`Scratch::new_pane`], which execs `sleep` in a named `s1`: the broker/act/detach suites need
+    /// a live shell.
+    ///
+    /// `env -i` isolates the shell the way the `-L` socket isolates the server. Without it the
+    /// developer's own rc files load into the pane, and a test that looks for a typed keystroke in
+    /// the capture can find it in a themed prompt instead — which is how the broker's only
+    /// "the keys were delivered" assertion came to pass with `send-keys` stubbed out entirely. The
+    /// prompt is the fixed [`SHELL_PROMPT`], so a needle anchored on it cannot be ambient noise.
+    /// The pane is returned only once that prompt is on screen: the shell is then reading input, so
+    /// a caller's keys land in it rather than in the pty buffer of a process still starting up.
     pub fn new_shell_pane(&self) -> String {
+        let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+        let shell = format!(
+            "exec env -i PATH={path} HOME={home} TERM=xterm-256color PS1='{SHELL_PROMPT}' sh -i",
+            home = self.workdir.display()
+        );
         assert!(self
-            .tmux(&["new-session", "-d", "-x", "80", "-y", "24"])
+            .tmux(&["new-session", "-d", "-x", "80", "-y", "24", &shell])
             .status
             .success());
         let pane = self.get("", "#{pane_id}");
         assert!(pane.starts_with('%'), "unexpected pane id {pane:?}");
+        // `capture-pane` right-trims every line, so an empty prompt reads without its trailing
+        // space; match the trimmed form. (With a keystroke echoed after it the space is preserved,
+        // which is what lets a caller anchor on the full `SHELL_PROMPT`.)
+        assert!(
+            wait_capture_contains(&self.socket, &pane, SHELL_PROMPT.trim_end(), POLL_CEILING),
+            "the scratch shell must reach its prompt before the pane is handed out"
+        );
         pane
     }
 
