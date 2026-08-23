@@ -591,6 +591,48 @@ mod tests {
         assert_eq!(map_event("PreCompact", "{}", &claude()), Mapped::Unmapped);
     }
 
+    /// `turn_end` is READ off the matched entry, never re-derived from the state it claims. No
+    /// bundled manifest can show the difference — all six make the two extensionally equal, and
+    /// `manifests.rs` certifies that equality — so the counterexample has to be authored: an idle
+    /// claim that is deliberately NOT a turn end, next to one that is.
+    ///
+    /// This is the guard against the zero-schema refactor (`turn_end: state == Idle`), which is
+    /// correct for everything shipped today and still wrong: it makes every idle-CLAIMING hook a
+    /// re-raiser, and an event that merely observes idleness then puts the done marker back every
+    /// time it fires, which the user can never clear.
+    #[test]
+    fn turn_end_is_read_from_the_entry_not_derived_from_the_claimed_state() {
+        let m = Manifest::parse(
+            "min_engine_version = \"0.1\"\n\
+             [identity]\nprocess_names = [\"tma-turn-end-probe\"]\n\
+             [hooks]\ncovers = [\"idle\"]\n\
+             [[hooks.map]]\nevent = \"Observed\"\nclaim = { state = \"idle\" }\n\
+             [[hooks.map]]\nevent = \"Finished\"\nclaim = { state = \"idle\" }\nturn_end = true\n\
+             [capture]\nvisible = []\n",
+            "turn_end_probe.toml",
+        )
+        .expect("the probe manifest parses");
+        assert_eq!(
+            map_event("Observed", "{}", &m),
+            Mapped::State {
+                state: AgentState::Idle,
+                detail: None,
+                turn_end: false,
+            },
+            "an idle claim with no `turn_end` must map to turn_end=false; deriving the flag from \
+             `state == idle` makes this event re-raise a marker the user just cleared"
+        );
+        assert_eq!(
+            map_event("Finished", "{}", &m),
+            Mapped::State {
+                state: AgentState::Idle,
+                detail: None,
+                turn_end: true,
+            },
+            "the entry that DOES declare `turn_end` must carry it through"
+        );
+    }
+
     // ---- decision: transitions & attention -------------------------------------
 
     #[test]
