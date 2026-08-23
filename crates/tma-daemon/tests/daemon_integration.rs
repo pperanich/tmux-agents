@@ -134,6 +134,38 @@ fn spawn_daemon(s: &Scratch) -> DaemonGuard {
     spawn_daemon_args(s, &[])
 }
 
+/// Spawn the foreground daemon with its stderr captured to `log`, so a test can read the daemon's
+/// own diagnostics (`eprintln!` on `Stderr` is unbuffered, so a line is on disk once written).
+fn spawn_daemon_logging(s: &Scratch, log: &Path) -> DaemonGuard {
+    let file = std::fs::File::create(log).expect("create the daemon log");
+    let child = s
+        .command()
+        .args(["daemon", "--socket-name", &s.socket])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::from(file))
+        .spawn()
+        .expect("spawn daemon");
+    DaemonGuard::new(child)
+}
+
+/// Poll `log` until it contains `needle`. Returns false on timeout.
+fn wait_for_log(log: &Path, needle: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if std::fs::read_to_string(log)
+            .map(|body| body.contains(needle))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
 /// Spawn the foreground daemon with extra CLI args appended (e.g. `--manifest-dir`).
 fn spawn_daemon_args(s: &Scratch, extra: &[&str]) -> DaemonGuard {
     let child = s
@@ -158,14 +190,14 @@ fn run_ensure(s: &Scratch) -> bool {
         .success()
 }
 
-/// Run `tma reload` and return its exit success.
-fn run_reload(s: &Scratch) -> bool {
+/// Run `tma reload` and return its whole output. The exit status alone cannot separate the two
+/// success outcomes — `Signaled` and `NotRunning` both exit 0 — so the caller reads the reported
+/// line as well: `Signaled` on stdout, `NotRunning` on stderr.
+fn run_reload(s: &Scratch) -> std::process::Output {
     s.command()
         .args(["reload", "--socket-name", &s.socket])
         .output()
         .expect("run reload")
-        .status
-        .success()
 }
 
 /// Fire `tma event` as a hook would: `$TMUX_PANE` set, scratch server pinned, payload on stdin.
@@ -528,17 +560,37 @@ fn malformed_frame_does_not_crash_daemon() {
         drop(stream2);
     }
 
-    // The daemon still serves a subsequent valid event.
-    fire(
-        &s,
+    // The socket is still bound, as the two lifecycle tests below assert for their own daemons.
+    assert!(
+        socket_file(&s).is_some(),
+        "the daemon must still be bound after a malformed frame"
+    );
+
+    // The daemon still serves a subsequent valid event. Sent on a raw connection and confirmed by
+    // the delivery ACK, NOT through `tma event`: with the daemon dead the client's sink connect
+    // fails and the event direct-stamps the identical `idle` (see `daemonless_event_direct_stamps`),
+    // so a pane read alone cannot tell "kept serving" from "crashed". The ACK can only come from a
+    // live daemon, and it is written after the stamp, so the state read below is ordered.
+    let mut real = UnixStream::connect(&sock).expect("the daemon still accepts connections");
+    real.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    real.write_all(&encode_frame(
+        &pane,
         "claude",
         "SessionStart",
-        &pane,
         &payload("SessionStart", SESSION),
+    ))
+    .expect("write the event frame");
+    let mut ack = [0u8; 1];
+    real.read_exact(&mut ack)
+        .expect("the daemon answers a valid frame after a malformed one");
+    assert_eq!(
+        ack[0], ACK,
+        "a SessionStart is a verdict, so the daemon acks"
     );
-    assert!(
-        wait_for(&s, &pane, "#{@agent_state}", "idle", common::POLL_CEILING),
-        "daemon must keep serving after a malformed frame"
+    assert_eq!(
+        s.get(&pane, "#{@agent_state}"),
+        "idle",
+        "the daemon applied the event itself after the malformed frames"
     );
 }
 
@@ -860,20 +912,56 @@ fn tma_reload_signals_running_daemon_which_keeps_serving() {
     let s = Scratch::new_daemon("daemon");
     let pane = new_pane(&s, "s1");
 
-    // No daemon yet: `tma reload` is a clean no-op success.
+    // No daemon yet: `tma reload` is a clean no-op success, and SAYS which outcome it took. Reading
+    // the reported line matters more than the status here — `NotRunning` and `Signaled` both exit 0,
+    // so a `reload_daemon` that answered `NotRunning` unconditionally (a broken lock format, a
+    // socket path that no longer resolves) satisfies BOTH legs of this test on the status alone.
+    let out = run_reload(&s);
     assert!(
-        run_reload(&s),
+        out.status.success(),
         "`tma reload` with no daemon exits 0 (nothing to reload)"
     );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("no daemon running"),
+        "with no daemon `tma reload` must report NotRunning, got stderr {:?} / stdout {:?}",
+        String::from_utf8_lossy(&out.stderr),
+        String::from_utf8_lossy(&out.stdout)
+    );
 
-    let _daemon = spawn_daemon(&s);
+    // Capture the daemon's stderr: the SIGHUP reload announces itself there, which is the only
+    // evidence available on this side that the signal actually reached the running daemon.
+    let log = s.workdir.join("daemon.err");
+    let _daemon = spawn_daemon_logging(&s, &log);
     assert!(
         wait_for_socket(&s, common::POLL_CEILING).is_some(),
         "daemon must bind"
     );
 
     // `tma reload` finds the live daemon (via the pid it wrote to the lock file) and SIGHUPs it.
-    assert!(run_reload(&s), "`tma reload` signals the running daemon");
+    let out = run_reload(&s);
+    assert!(
+        out.status.success(),
+        "`tma reload` signals the running daemon"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains("reloaded the daemon's config + manifests"),
+        "with a daemon up `tma reload` must report Signaled, not the no-op line; got stdout {:?} \
+         / stderr {:?}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // And the signal landed: the daemon logs its reload. This is the far end of the whole chain
+    // (`tma reload` → `reload_daemon` → pid-in-lock → SIGHUP → the daemon's own reload branch),
+    // so a pid read from a drifted lock format cannot pass by merely exiting 0.
+    assert!(
+        wait_for_log(
+            &log,
+            "reloaded config + manifests (SIGHUP)",
+            common::POLL_CEILING
+        ),
+        "the daemon must log the reload SIGHUP `tma reload` sent it; log: {:?}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
 
     // The daemon reloaded (not shut down): it still serves a subsequent event.
     fire(
