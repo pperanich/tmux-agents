@@ -1252,13 +1252,21 @@ reintroduces one of these bugs.
    test was written, run against the exact drift it was for, and PASSED. The guard therefore pins
    the INSTRUCTION ("feed the row's own `episode_ms`") and asserts the negative. Rewording that
    sentence fails the test on purpose — update the pin only after confirming the meaning survived.
+   The cli.md arm shipped as the weak form anyway ("`episode_ms` appears somewhere in the row"),
+   which a reworded instruction walks straight past, since the row names both keys to contrast
+   them; both arms now pin the same instruction with the same negative, mutation-checked.
 2. **Deriving `turn_end` from `state == "idle"`.** Zero-schema, correct for all six bundled
    manifests today, and it will look obviously right. It also makes every idle-claiming hook a
    re-raiser — the unclearable-mark failure the fold is barred from causing. Guard:
    `crates/tma-runtime/src/manifests.rs`'s drift test, whose failure message names claude's
    deliberately-unmapped idle reminder as the counterexample. **Know its limit**: it pins today's
-   equivalence, so it catches a manifest author flipping one entry, but it goes vacuous along with
-   the field if someone deletes `turn_end` and derives it. The guard against THAT is prose.
+   equivalence, so it catches a manifest author flipping one entry, but it says nothing about how
+   the flag reaches `Mapped` — the derivation compiles and passes it. That second half is
+   `crates/tma-runtime/src/event.rs`'s
+   `turn_end_is_read_from_the_entry_not_derived_from_the_claimed_state`, which runs `map_event`
+   over a probe manifest holding an idle claim that is deliberately NOT a turn end. It has to be a
+   probe manifest: no bundled one can separate the two, which is why the derivation passed 1249
+   tests when it was measured.
 3. **Wiring a session departure clear** (batches F and F2). Two hooks tempt, for opposite reasons.
    `client-session-changed` looks like the last obvious hole in seen-on-leave and the departed pane
    IS resolvable in one format, so a first cut passes every hand test — the no-op that breaks it is
