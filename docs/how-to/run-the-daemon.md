@@ -129,19 +129,70 @@ An invalid config or manifest on reload is kept-old and logged: a reload never
 kills or corrupts a running daemon. A user manifest that fails to parse is skipped
 and logged individually; the daemon keeps serving on the rest of the set.
 
-`tma reload` re-reads config and manifests, not the binary. After upgrading `tma`,
-the daemon already running is still the old build, so stop it and start it again:
+`tma reload` re-reads config and manifests, not the binary.
+
+## Pick up an upgraded tma
+
+After upgrading `tma`, the daemon already running is still the old build. It stays
+that way indefinitely — nothing replaces it on its own, and `install-hooks`
+repointing your hooks at the new binary does not change which build answers them.
+`tma doctor` says so, and gates on it under `--exit-code`:
 
 ```
 $ tma doctor
 daemon:  running (<tmpdir>/tma/<server>.sock)
-         version 0.1.0 differs from this CLI (0.2.0) — `tma reload` only re-reads config and manifests; stop the daemon and run `tma daemon --ensure` to pick up the new build
+         version 0.1.0 differs from this CLI (0.2.0) — `tma reload` only re-reads config and manifests; run `tma daemon --restart` to put this build in its place
 ```
 
+The fix is one verb:
+
+```
+$ tma daemon --restart
+tma: stopped the running daemon
+tma: daemon restarted (0.2.0)
+```
+
+`--restart` is unconditional and works in both directions: run it from the older
+binary to go deliberately back. It stops the daemon with SIGTERM and never
+escalates to SIGKILL (the daemon reaps its `tmux -C` control clients only on a
+clean exit), and it starts a daemon even when none was running.
+
+`tma init` and `tma install-hooks` make the same offer for you when they find a
+resident daemon of another build, on the same confirm-before-changing terms as
+their config writes.
+
+To have it happen without being asked, opt in:
+
+```toml
+[daemon]
+restart_on_upgrade = true
+```
+
+Then the `--ensure` that your keybindings launcher (and `autostart`) already runs
+replaces an older resident daemon with the newer build. **Strictly newer replaces
+older**: equal never restarts, and an older `tma` never touches a newer daemon, so
+two installs sharing a server cannot take turns evicting each other's daemon. See
+[Configuration](../reference/configuration.md#restart_on_upgrade) for the full
+rule and its fail-safes.
+
+### What a restart costs, and what a skewed daemon costs
+
 The daemon records its version next to its pid in the lock file, which is where
-doctor reads it from. Until you restart it, events it cannot map with its older
-manifests are refused rather than acknowledged, so the firing hook stamps them
-itself — a skewed daemon costs latency, never a dropped transition.
+doctor reads it from.
+
+A restart is cheap. The socket is gone for roughly 35 ms, then bound again but not
+yet draining for up to two seconds while the daemon runs its control-mode
+behaviour probe. Nothing is lost across either window: a hook that cannot reach a
+daemon stamps the pane itself, `tma wait` sees the connection close and degrades
+to polling, and notification de-duplication lives in a pane option that outlives
+the process.
+
+Leaving the skew in place is the more expensive choice, and not only in latency.
+An event the old daemon's manifests map to *nothing* is refused rather than
+acknowledged, so the firing hook stamps it itself and only the latency is lost.
+But an event the old daemon maps to the **old verdict** is acknowledged happily —
+and the client then skips its own stamp. That is a wrong transition, not a late
+one, and no reload fixes it.
 
 ## See the effective tier
 

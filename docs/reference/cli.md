@@ -658,6 +658,19 @@ Usage: tma daemon [OPTIONS]
 | option | meaning |
 |---|---|
 | `--ensure` | Spawn a detached daemon if none is running for this server, then exit 0 (idempotent). |
+| `--restart` | Stop the daemon running for this server and start one from THIS binary, waiting until it answers. Starts one if none was running. Cannot be combined with `--ensure`. |
+
+A resident daemon keeps the detection code it started with, so `--restart` is how
+an upgraded `tma` takes effect ([`reload`](#tma-reload) re-reads config and
+manifests, not the binary). It is unconditional in both directions: run it from
+the older binary to go deliberately back. The opt-in
+[`[daemon] restart_on_upgrade`](configuration.md#restart_on_upgrade) does the
+same automatically, but only ever from a strictly newer build.
+
+The daemon is stopped with SIGTERM and never escalated to SIGKILL: it reaps its
+`tmux -C` control clients only on a clean exit, so a killed daemon would leave one
+behind per monitored session. A daemon that will not take SIGTERM is reported
+rather than killed, and `--restart` exits nonzero without starting a replacement.
 
 ## `tma reload`
 
@@ -695,8 +708,12 @@ nothing:
    and the reload command.
 4. **Install the keybindings**, as [`install-keys`](#tma-install-keys) does. An
    install that is already current is skipped with a note.
-5. **Start the daemon** with `--daemon` (what `tma daemon --ensure` does).
-6. **Report** with [`doctor`](#tma-doctor), so you see the posture the steps
+5. **Offer to restart a resident daemon of another build.** A daemon already
+   running keeps the detection code it started with, so the wiring just written
+   would reach that build and not this one. Shown only when the versions actually
+   differ, and applied only on a `y` (or `--yes`); declining is not a failure.
+6. **Start the daemon** with `--daemon` (what `tma daemon --ensure` does).
+7. **Report** with [`doctor`](#tma-doctor), so you see the posture the steps
    above produced.
 
 ```
@@ -749,6 +766,14 @@ with `--check`.
 | `--cursor-hooks <PATH>` | Override Cursor's `hooks.json` path (env `TMA_CURSOR_HOOKS`). Defaults to `~/.cursor/hooks.json`. |
 | `--cursor-cli-config <PATH>` | Override Cursor's `cli-config.json` path, which holds the `statusLine` context shim (env `TMA_CURSOR_CLI_CONFIG`). Defaults to `~/.cursor/cli-config.json`. |
 | `--pi-extension <PATH>` | Override pi's extension file path (env `TMA_PI_EXTENSION`). Defaults to `$PI_CODING_AGENT_DIR/extensions/tma.js`, else `~/.pi/agent/extensions/tma.js`. |
+
+A completed install ends by checking the daemon: the hooks now point at this
+binary, but a daemon already running for this server still carries the build it
+started with, which is the build those hooks would reach. When the versions
+differ, install offers to restart it, on the same confirm-before-changing terms as
+every config write above (`--yes` accepts). Declining changes nothing and is not a
+failure — `tma daemon --restart` is there when you are ready. `--check` and
+`--uninstall` never make the offer.
 
 Per-agent trust and wiring caveats (codex `/hooks` trust, gemini folder trust)
 are in [Agent coverage](agent-coverage.md).

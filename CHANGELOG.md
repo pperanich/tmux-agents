@@ -10,6 +10,43 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- `tma daemon --restart` stops the daemon running for a server and starts one from the binary you
+  ran it with, waiting until it answers. This is how an upgraded `tma` takes effect: a daemon keeps
+  the detection code it started with, and `tma reload` re-reads config and manifests, not the
+  binary. Until now there was no way to stop a daemon at all — the docs said "stop it and start it
+  again" and left you to find the pid. It works in both directions, so running it from the older
+  binary is how you deliberately go back. The stop is SIGTERM and is never escalated to SIGKILL: the
+  daemon reaps its `tmux -C` control clients only on a clean exit, so a killed one would leave a
+  control client behind per monitored session.
+- `tma init` and `tma install-hooks` offer that restart when they find a resident daemon of another
+  build, on the same show-it-then-confirm terms as their config writes (`--yes` accepts). Both
+  rewire hooks to point at the new binary, which until now silently left the old build answering
+  them.
+- `[daemon] restart_on_upgrade` (default `false`) does it without being asked, on the `--ensure`
+  that the keybindings launcher and `autostart` already run. **Strictly newer replaces older**:
+  equal never restarts and an older `tma` never touches a newer daemon, so two installs sharing one
+  tmux server cannot take turns evicting each other's daemon. An unparseable version on either side,
+  a lock file whose pid is no longer alive, and a restart inside the last 60 seconds each veto it.
+
+### Changed
+
+- **`tma doctor --exit-code` now counts a daemon whose build differs from the CLI's.** It was
+  reported but not gated, so a CI check could pass with a daemon running detection
+  code from another release. The skew is not merely a latency cost: an event the old daemon maps to
+  the *old* verdict is acknowledged, so the firing hook skips its own stamp and the transition is
+  wrong rather than late. A lock file predating version recording still has nothing to compare and
+  stays green. Pin the daemon build, or run `tma daemon --restart` in the job that upgrades `tma`.
+
+### Fixed
+
+- A daemon that had just taken the single-instance lock could be described by its predecessor's
+  pid and build for the instant before it stamped its own. The lock file keeps its body when a
+  daemon exits — only the flock is released — so a reader arriving in that window read a version
+  belonging to a dead, possibly recycled, pid. The lock is now emptied the moment the flock is
+  acquired, so that window reads as "unknown", which every reader already leaves alone.
+
 ## [0.4.4] - 2026-08-22
 
 ### Fixed

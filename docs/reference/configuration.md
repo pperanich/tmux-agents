@@ -74,6 +74,7 @@ quiet_ms = 1000              # per-pane active->quiet capture trigger
 zero_member_recheck_secs = 1 # clientless liveness recheck
 demote_edges = 5             # hook-liveness demotion threshold
 autostart = false            # auto-start the daemon on first use of a surface
+restart_on_upgrade = false   # let a newer tma replace an older resident daemon
 
 [[agent]]                    # per-agent overrides (repeatable)
 name = "claude"
@@ -253,6 +254,37 @@ The daemon is strictly additive; these knobs apply only when it runs.
 | `zero_member_recheck_secs` | `1` | Clientless-session liveness recheck cadence. |
 | `demote_edges` | `5` | Hook-liveness demotion threshold. |
 | `autostart` | `false` | Auto-start the daemon on first use of a surface (`ls`/`status`/`jump`/picker/`watch`/`wait`/`subscribe`). |
+| `restart_on_upgrade` | `false` | Let `tma daemon --ensure` replace a resident daemon whose build is **strictly older** than the binary running the check. |
+
+### `restart_on_upgrade`
+
+A daemon keeps the detection code it started with, so after upgrading `tma` the
+one already running is still the old build until something replaces it.
+`tma daemon --restart` does that on demand; this key does it for you, on the
+`--ensure` that the keybindings launcher and `autostart` already run.
+
+The rule is deliberately one-directional. **Strictly newer replaces older.**
+Equal never restarts, and an older `tma` never touches a newer daemon — that is
+the direction of skew the wire protocol tolerates anyway (a capability the old
+peer does not know is a discriminant it rejects cleanly). Because the relation is
+strict, no two builds can ever replace each other, so two `tma` installs sharing
+one tmux server cannot take turns evicting each other's daemon.
+
+Three further conditions have to hold, all of them fail-safe:
+
+- Both versions must parse as `MAJOR.MINOR.PATCH`. Anything else never restarts.
+- The pid in the lock file must still be alive. A lock file keeps its body after
+  the daemon exits, and a dead pid is nothing to replace.
+- No automatic restart may have fired for this server in the last 60 seconds. The
+  version rule cannot loop, but a new build whose daemon will not stay up can
+  flap; this bounds that to once a minute. `tma daemon --restart` is never
+  subject to it.
+
+A restart costs about 35 ms with nothing listening and a couple of seconds where
+the socket is bound but the daemon is still running its control-mode probe.
+Nothing is lost across either: a hook that cannot reach a daemon stamps the pane
+itself, `tma wait` degrades to polling, and notification de-duplication lives in
+a pane option that outlives the process.
 
 ## `[telemetry.windows]`: recognized model names
 
