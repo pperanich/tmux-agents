@@ -293,7 +293,7 @@ pub(crate) struct InstallKeysArgs {
     pub(crate) config_dir: Option<PathBuf>,
 }
 
-/// Args for `tma daemon [--ensure|--restart]`. The target server comes from the global
+/// Args for `tma daemon [--ensure|--restart|--stop]`. The target server comes from the global
 /// `--socket-name`; `--manifest-dir` is forwarded to a spawned daemon for test isolation.
 #[derive(clap::Args)]
 pub(crate) struct DaemonCmdArgs {
@@ -306,6 +306,11 @@ pub(crate) struct DaemonCmdArgs {
     /// to go back. Starts one if none was running.
     #[arg(long, conflicts_with = "ensure")]
     pub(crate) restart: bool,
+    /// Stop the daemon running for this server and leave it stopped. Detection drops to the poll
+    /// tier, which is strictly additive — nothing breaks, captures just wait for a surface to run.
+    /// Exit 0 when nothing was running.
+    #[arg(long, conflicts_with_all = ["ensure", "restart"])]
+    pub(crate) stop: bool,
     /// INTERNAL/TEST: write the control-pool introspection status (membership, `-F` probe
     /// verdict, sweep interval, edge + recovery counts) to this file. No effect on behavior.
     #[arg(long, hide = true, value_name = "PATH")]

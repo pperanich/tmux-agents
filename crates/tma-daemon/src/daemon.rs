@@ -29,7 +29,7 @@ mod serve;
 mod subscribers;
 mod sys;
 
-use lifecycle::{ensure_running, restart_running, run_foreground, run_intermediate};
+use lifecycle::{ensure_running, restart_running, run_foreground, run_intermediate, stop_running};
 use sys::ensure_dir;
 
 /// Report the user manifests the load skipped. The daemon's log is its stderr (the detached stages
@@ -59,6 +59,8 @@ pub struct DaemonOpts {
     /// THIS binary. Unconditional in both directions — a deliberate downgrade is a restart from the
     /// older binary. Mutually exclusive with [`Self::ensure`] (clap rejects the pair).
     pub restart: bool,
+    /// `true` for `--stop`: stop the daemon for this server and leave it stopped.
+    pub stop: bool,
     pub server: tma_tmux::tmux::Server,
     pub manifest_dir: Option<PathBuf>,
     /// The loaded config, used by the foreground loop for the fold + daemon knobs + notify command
@@ -107,7 +109,9 @@ pub fn run_cli(opts: DaemonOpts) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    if opts.restart {
+    if opts.stop {
+        stop_running(&paths)
+    } else if opts.restart {
         restart_running(&paths, &opts)
     } else if opts.ensure {
         ensure_running(&paths, &opts)

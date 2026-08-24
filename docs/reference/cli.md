@@ -659,6 +659,7 @@ Usage: tma daemon [OPTIONS]
 |---|---|
 | `--ensure` | Spawn a detached daemon if none is running for this server, then exit 0 (idempotent). |
 | `--restart` | Stop the daemon running for this server and start one from THIS binary, waiting until it answers. Starts one if none was running. Cannot be combined with `--ensure`. |
+| `--stop` | Stop the daemon for this server and leave it stopped. Detection falls back to the poll tier, which is strictly additive. Exit 0 when nothing was running. Mutually exclusive with `--ensure` and `--restart`. |
 
 A resident daemon keeps the detection code it started with, so `--restart` is how
 an upgraded `tma` takes effect ([`reload`](#tma-reload) re-reads config and

@@ -201,6 +201,15 @@ fn run_ensure_with(s: &Scratch, config: &Path) -> bool {
         .success()
 }
 
+/// Run `tma daemon --stop` and return its whole output (same reason as `run_restart`: the exit
+/// status cannot separate "stopped one" from "there was none").
+fn run_stop(s: &Scratch) -> std::process::Output {
+    s.command()
+        .args(["daemon", "--stop", "--socket-name", &s.socket])
+        .output()
+        .expect("run --stop")
+}
+
 /// Run `tma daemon --restart` and return its whole output (the reported lines separate "stopped one"
 /// from "there was none", which the exit status cannot).
 fn run_restart(s: &Scratch) -> std::process::Output {
@@ -1414,5 +1423,70 @@ fn install_hooks_leaves_a_matching_daemon_alone_and_silent() {
         daemon_pid(&s, Duration::from_secs(1)),
         Some(pid),
         "the running daemon is untouched"
+    );
+}
+
+/// `--stop` leaves the daemon stopped: the counterpart to `--restart` for when you want it gone
+/// rather than replaced. The liveness half matters as much as the negative — asserting only "no
+/// socket" would pass against a `--stop` that never ran, so the daemon is proven up first and
+/// proven gone after, and a further wait proves nothing respawns it behind our back.
+#[test]
+fn stop_leaves_the_daemon_stopped() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+
+    let mut running = spawn_daemon(&s);
+    assert!(
+        wait_for_socket(&s, common::POLL_CEILING).is_some(),
+        "the daemon must be up before --stop can mean anything"
+    );
+
+    let out = run_stop(&s);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "--stop failed: {stdout}");
+    assert!(
+        stdout.contains("stopped the running daemon"),
+        "--stop reports what it did: {stdout}"
+    );
+    assert!(
+        running.wait_exit(common::POLL_CEILING),
+        "the daemon must be gone, not merely unreachable"
+    );
+    assert!(
+        socket_file(&s).is_none(),
+        "--stop unlinks the socket it stopped answering on"
+    );
+
+    // Nothing brings it back on its own: --stop is not a disguised restart.
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(
+        socket_file(&s).is_none(),
+        "a stopped daemon must stay stopped until something explicitly starts one"
+    );
+}
+
+/// `--stop` with nothing running is a clean no-op, matching `reload`'s discipline. Exit 0, and it
+/// says so rather than pretending it stopped something.
+#[test]
+fn stop_with_nothing_running_is_a_clean_no_op() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+
+    let out = run_stop(&s);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "--stop must exit 0 with nothing up");
+    assert!(
+        stdout.contains("no daemon was running"),
+        "it distinguishes 'there was none' from 'stopped one': {stdout}"
     );
 }

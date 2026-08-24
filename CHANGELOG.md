@@ -12,6 +12,11 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Added
 
+- `tma daemon --stop` stops the daemon for this server and leaves it stopped, the counterpart to
+  `--restart` for when you want it gone rather than replaced. Detection falls back to the poll tier,
+  which is strictly additive, so nothing breaks — captures just wait for a surface to run. Nothing
+  running is a clean exit 0 that says so.
+
 - `tma daemon --restart` stops the daemon running for a server and starts one from the binary you
   ran it with, waiting until it answers. This is how an upgraded `tma` takes effect: a daemon keeps
   the detection code it started with, and `tma reload` re-reads config and manifests, not the

@@ -189,6 +189,7 @@ fn main() -> ExitCode {
         Some(Command::Daemon(args)) => tma_daemon::run_cli(tma_daemon::DaemonOpts {
             ensure: args.ensure,
             restart: args.restart,
+            stop: args.stop,
             server: server.clone(),
             manifest_dir,
             config_path: cli.config,
@@ -359,6 +360,8 @@ fn run_daemon_verb(
     tma_daemon::run_cli(tma_daemon::DaemonOpts {
         ensure: mode == DaemonMode::Ensure,
         restart: mode == DaemonMode::Restart,
+        // The injected launcher exists for the skew-restart offers; stopping is never delegated.
+        stop: false,
         server,
         manifest_dir,
         config_path,

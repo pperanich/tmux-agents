@@ -90,6 +90,28 @@ fn evict_older(paths: &Paths, opts: &DaemonOpts) {
 /// restart obviously wants the older daemon, which is how a deliberate downgrade is served. Not
 /// starting one at all would be a second verb for a job `--ensure` already does, so a restart with
 /// nothing running just starts one.
+/// `tma daemon --stop`: stop the daemon for this server and leave it stopped. The counterpart to
+/// `--restart` for the case where you want the daemon gone rather than replaced — detection falls
+/// back to the poll tier, which is strictly additive, so nothing breaks. Nothing running is a clean
+/// exit 0, matching `reload`'s no-op discipline.
+pub(super) fn stop_running(paths: &Paths) -> ExitCode {
+    match ipc::stop_daemon_at(paths) {
+        StopOutcome::Failed(err) => {
+            eprintln!("tma: cannot stop the running daemon: {err}");
+            ExitCode::FAILURE
+        }
+        StopOutcome::NotRunning => {
+            println!("tma: no daemon was running for this server");
+            ExitCode::SUCCESS
+        }
+        // Stopped. (`stop_daemon_at` cannot report NoServer — the paths ARE the server.)
+        _ => {
+            println!("tma: stopped the running daemon; detection is on the poll tier until one starts again");
+            ExitCode::SUCCESS
+        }
+    }
+}
+
 pub(super) fn restart_running(paths: &Paths, opts: &DaemonOpts) -> ExitCode {
     match ipc::stop_daemon_at(paths) {
         StopOutcome::Failed(err) => {
