@@ -228,6 +228,12 @@ pub struct DaemonSection {
     /// dispatch, and a failed spawn never fails or delays the caller.
     #[serde(default)]
     pub autostart: bool,
+    /// Opt-in automatic upgrade restart: when `true`, `tma daemon --ensure` replaces a resident
+    /// daemon whose recorded build is STRICTLY OLDER than the binary running the check. Default
+    /// `false`. Equal never restarts and older never evicts newer, so two installs sharing a server
+    /// cannot take turns; see [`crate::ipc::restart_decision`].
+    #[serde(default)]
+    pub restart_on_upgrade: bool,
 }
 
 fn default_sweep_secs() -> u64 {
@@ -251,6 +257,7 @@ impl Default for DaemonSection {
             zero_member_recheck_secs: default_zero_member_recheck_secs(),
             demote_edges: default_demote_edges(),
             autostart: false,
+            restart_on_upgrade: false,
         }
     }
 }
@@ -777,6 +784,8 @@ mod tests {
         );
         // Daemon autostart is opt-in: off by default (the daemon stays strictly additive).
         assert!(!c.daemon.autostart);
+        // So is the automatic upgrade restart: a daemon is never replaced under you by default.
+        assert!(!c.daemon.restart_on_upgrade);
         // Notify + focus defaults: off / none. `on` defaults to blocked-only.
         assert!(!c.notify.from_event);
         assert!(c.notify.command.is_none());
@@ -1139,6 +1148,10 @@ mod tests {
             (
                 "daemon.autostart".to_string(),
                 toml::Value::Boolean(d.autostart),
+            ),
+            (
+                "daemon.restart_on_upgrade".to_string(),
+                toml::Value::Boolean(d.restart_on_upgrade),
             ),
             (
                 "focus.events".to_string(),

@@ -31,3 +31,6 @@ signal-hook = { workspace = true }
 [dev-dependencies]
 # Shared scratch-socket harness + daemon flock gate for the integration tests.
 tma-test-support = { path = "../tma-test-support" }
+# The anti-symmetry proof behind the upgrade-restart rule (`ipc::restart_decision`): no two builds
+# may evict each other, over every version pair rather than the handful a table test would list.
+proptest.workspace = true

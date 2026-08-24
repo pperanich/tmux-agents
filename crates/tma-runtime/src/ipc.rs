@@ -95,10 +95,14 @@ pub struct Frame {
 
 /// The per-server runtime paths.
 pub struct Paths {
-    /// The `0700` parent directory holding both files.
+    /// The `0700` parent directory holding the files below.
     pub dir: PathBuf,
     pub socket: PathBuf,
     pub lock: PathBuf,
+    /// When an automatic upgrade restart last fired for this server ([`note_restart`]). Beside the
+    /// lock rather than inside it: the lock belongs to whichever daemon holds the flock, and a
+    /// restart has to be remembered ACROSS the daemon it replaced.
+    pub restart_stamp: PathBuf,
 }
 
 /// The stable filename stem for a server: a hex FNV-1a of its `#{socket_path}`. Pure, so client and
@@ -140,6 +144,7 @@ pub fn paths_for(socket_path: &str) -> Paths {
     Paths {
         socket: dir.join(format!("{key}.sock")),
         lock: dir.join(format!("{key}.lock")),
+        restart_stamp: dir.join(format!("{key}.restart")),
         dir,
     }
 }
@@ -221,7 +226,7 @@ pub fn daemon_status(tmux: &Tmux) -> Option<DaemonStatus> {
     let paths = paths_for(&socket_path);
     // A successful connect is the liveness signal; the connection is dropped immediately without
     // sending a frame, so the daemon reads EOF and discards it — no stamp, no side effect.
-    let alive = UnixStream::connect(&paths.socket).is_ok();
+    let alive = daemon_answers(&paths);
     // Only a live daemon's version means anything: a leftover lock file describes a dead one.
     let version = alive
         .then(|| read_lock(&paths.lock).and_then(|l| l.version))
@@ -259,7 +264,7 @@ pub fn reload_daemon(tmux: &Tmux) -> ReloadOutcome {
     let paths = paths_for(&socket_path);
     // Liveness gate: a successful connect proves a daemon is accepting on the socket right now.
     // The connection is dropped without a frame, so the daemon reads EOF and discards it.
-    if UnixStream::connect(&paths.socket).is_err() {
+    if !daemon_answers(&paths) {
         return ReloadOutcome::NotRunning;
     }
     let Some(pid) = read_lock(&paths.lock).map(|l| l.pid) else {
@@ -271,7 +276,7 @@ pub fn reload_daemon(tmux: &Tmux) -> ReloadOutcome {
     // daemon could exit and its pid be recycled (SIGHUP default-terminates). A second connect
     // narrows the recycle window to the gap between this probe and the `kill` below; it cannot fully
     // close it (the daemon may still exit in that gap). Residual is local-user-only, low-stakes.
-    if UnixStream::connect(&paths.socket).is_err() {
+    if !daemon_answers(&paths) {
         return ReloadOutcome::NotRunning;
     }
     // SIGHUP wakes the daemon's self-pipe; it reloads and swaps derived state without dropping
@@ -283,6 +288,209 @@ pub fn reload_daemon(tmux: &Tmux) -> ReloadOutcome {
         },
         None => ReloadOutcome::Failed("daemon pid is invalid".to_string()),
     }
+}
+
+/// Outcome of a stop request. Same shape as [`ReloadOutcome`] so the two management verbs report
+/// the same four situations in the same words.
+pub enum StopOutcome {
+    /// No tmux server for this handle ⇒ no daemon to stop.
+    NoServer,
+    /// A live daemon was signalled and is gone: its socket no longer answers AND its
+    /// single-instance lock is free, so a replacement can be spawned straight away.
+    Stopped,
+    /// No daemon is currently running for this server — a no-op, not an error.
+    NotRunning,
+    /// A daemon is running but could not be stopped (unreadable pid, a failed signal, or it was
+    /// still holding the lock when the budget ran out).
+    Failed(String),
+}
+
+/// How long [`stop_daemon_at`] waits out a signalled daemon. A measured shutdown unlinks the socket
+/// and exits in under 10 ms, so this is two orders of magnitude of headroom: reaching it means the
+/// daemon is wedged, not that the box was busy.
+const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// The poll step while waiting out a signalled daemon.
+const STOP_POLL: Duration = Duration::from_millis(10);
+
+/// Stop the per-server daemon (`tma daemon --restart`'s first half). Tier-2 like [`reload_daemon`],
+/// so the bin reaches the daemon without importing tier 3.
+pub fn stop_daemon(tmux: &Tmux) -> StopOutcome {
+    let Some(socket_path) = resolve_socket_path(tmux) else {
+        return StopOutcome::NoServer;
+    };
+    stop_daemon_at(&paths_for(&socket_path))
+}
+
+/// [`stop_daemon`] against already-resolved paths, for a caller that holds them (the daemon's own
+/// `--restart` / upgrade-eviction paths). Never returns [`StopOutcome::NoServer`]: the paths ARE the
+/// server. SIGTERM only — see the inline note on why SIGKILL is never an escalation here.
+pub fn stop_daemon_at(paths: &Paths) -> StopOutcome {
+    // Liveness gate, exactly as `reload_daemon` does it: a successful connect proves a daemon is
+    // accepting right now, and the connection is dropped without a frame, so it reads EOF.
+    if !daemon_answers(paths) {
+        return StopOutcome::NotRunning;
+    }
+    let Some(pid) = read_lock(&paths.lock).map(|l| l.pid) else {
+        return StopOutcome::Failed(
+            "daemon is running but its pid is unavailable (lock file empty or stale)".to_string(),
+        );
+    };
+    // Re-probe immediately before the kill, and for the reason `reload_daemon` documents: the pid
+    // read is a filesystem round-trip during which the daemon could exit and its pid be recycled.
+    // This narrows the recycle window to the gap below; it cannot close it. Local-user-only.
+    if !daemon_answers(paths) {
+        return StopOutcome::NotRunning;
+    }
+    let Some(p) = Pid::from_raw(pid) else {
+        return StopOutcome::Failed("daemon pid is invalid".to_string());
+    };
+    // SIGTERM, and never an escalation to SIGKILL: the daemon reaps its `tmux -C` control clients
+    // only on a clean exit (`ControlClient::drop`), so a killed daemon orphans one control client
+    // per monitored session. A daemon that will not take SIGTERM is reported, not killed.
+    if let Err(err) = kill_process(p, Signal::TERM) {
+        return StopOutcome::Failed(err.to_string());
+    }
+    // Gone means the LOCK is free, not merely that the socket stopped answering: the daemon unlinks
+    // its socket before its lock fd closes, so a respawn in that gap exits as a duplicate instance
+    // and leaves nothing running at all. Polled rather than probed once for a second reason too —
+    // measured on macOS, an flock released by closing its fd is not always visible as free to an
+    // immediate re-lock; a retry a moment later succeeds.
+    let deadline = Instant::now() + STOP_TIMEOUT;
+    loop {
+        if !daemon_answers(paths) && lock_is_free(&paths.lock) {
+            return StopOutcome::Stopped;
+        }
+        if Instant::now() >= deadline {
+            return StopOutcome::Failed(format!(
+                "daemon (pid {pid}) still holds the socket or the lock {STOP_TIMEOUT:?} after SIGTERM"
+            ));
+        }
+        std::thread::sleep(STOP_POLL);
+    }
+}
+
+/// Whether a daemon is accepting on this server's socket right now. The one liveness probe every
+/// management verb shares: connect and drop, so the daemon reads EOF and nothing is stamped.
+pub fn daemon_answers(paths: &Paths) -> bool {
+    UnixStream::connect(&paths.socket).is_ok()
+}
+
+/// Whether the single-instance flock is currently unheld — the "no daemon owns this server" test a
+/// respawn needs. Takes the lock only to drop it again, and never creates the file: an absent lock
+/// is trivially free.
+fn lock_is_free(lock: &Path) -> bool {
+    let Ok(file) = std::fs::OpenOptions::new().write(true).open(lock) else {
+        return true;
+    };
+    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok()
+}
+
+// ---- the upgrade-restart decision -------------------------------------------------------
+
+/// What [`restart_decision`] resolved to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartDecision {
+    /// Leave the running daemon where it is.
+    Hold,
+    /// The running daemon is strictly older than this build: stop this pid and respawn.
+    Evict { pid: i32 },
+}
+
+/// The floor between two automatic restarts of the same server. Anti-symmetry makes a *version*
+/// loop impossible, but it cannot stop a flap: if the newer build's daemon fails to come up and
+/// something keeps restarting the older one, the eviction is correct every time and fires as often
+/// as the check runs (a status-line driver runs it about once a second). This bounds that to once a
+/// minute. The explicit `tma daemon --restart` is never subject to it.
+pub const RESTART_COOLDOWN: Duration = Duration::from_secs(60);
+
+/// Whether this build should evict the daemon a lock file describes. **Strictly newer evicts
+/// older**; equal never restarts, and older NEVER evicts newer.
+///
+/// That asymmetry is the loop guard, and it is not arbitrary: it is the direction of skew the
+/// protocol already tolerates. A new capability is a discriminant an old peer rejects cleanly, so a
+/// newer daemon serving an older client degrades safely, while an older daemon serving a newer
+/// client is the harmful direction (it can map an event to a verdict this build no longer agrees
+/// with, ACK it, and leave the client thinking the stamp was written). Because the relation is
+/// strict, at most one of any two builds can ever evict the other, so two installs cannot take
+/// turns — the property test pins exactly that.
+///
+/// Every other input is a veto: an absent or unparseable version on either side, a recorded pid
+/// that is not alive, or a restart already fired inside [`RESTART_COOLDOWN`]. Pure, so the whole
+/// rule is unit-testable without a process in sight.
+pub fn restart_decision(
+    my_version: &str,
+    lock: Option<&LockInfo>,
+    pid_alive: bool,
+    last_restart_ms: Option<u64>,
+    now_ms: u64,
+) -> RestartDecision {
+    let Some(lock) = lock else {
+        return RestartDecision::Hold;
+    };
+    // The recorded pid must be alive. A lock file keeps its body after the daemon exits (only the
+    // flock is released), and a daemon that has taken the flock but not yet stamped its own body
+    // leaves it EMPTY — both read as "nothing to act on" rather than as a version to compare.
+    if !pid_alive {
+        return RestartDecision::Hold;
+    }
+    let (Some(theirs), Some(mine)) = (
+        lock.version.as_deref().and_then(parse_version),
+        parse_version(my_version),
+    ) else {
+        return RestartDecision::Hold;
+    };
+    if mine <= theirs {
+        return RestartDecision::Hold;
+    }
+    // A clock that jumped backwards leaves the stamp in the future, which `saturating_sub` reads as
+    // zero elapsed — inside the cooldown, so it holds. The fail-safe direction.
+    if last_restart_ms
+        .is_some_and(|at| now_ms.saturating_sub(at) < RESTART_COOLDOWN.as_millis() as u64)
+    {
+        return RestartDecision::Hold;
+    }
+    RestartDecision::Evict { pid: lock.pid }
+}
+
+/// Parse a `MAJOR.MINOR.PATCH` build version into a comparable tuple. A pre-release or build suffix
+/// (`-rc.1`, `+meta`) is dropped, so an rc and its release compare EQUAL and therefore never evict
+/// each other — the conservative reading, since nothing here needs to rank them. `None` for
+/// anything that is not three numbers, and `None` never evicts.
+fn parse_version(v: &str) -> Option<(u64, u64, u64)> {
+    let core = v.trim().split(['-', '+']).next()?;
+    let mut parts = core.split('.').map(|p| p.parse::<u64>().ok());
+    let (major, minor, patch) = (parts.next()??, parts.next()??, parts.next()??);
+    parts.next().is_none().then_some((major, minor, patch))
+}
+
+/// The upgrade-restart verdict for whichever daemon currently holds this server's lock: read the
+/// lock body, probe the recorded pid, read the cooldown stamp, and apply [`restart_decision`]. The
+/// impure half, kept to one function so the rule itself stays testable without processes.
+pub fn upgrade_restart_decision(paths: &Paths, my_version: &str, now_ms: u64) -> RestartDecision {
+    let lock = read_lock(&paths.lock);
+    let alive = lock.as_ref().is_some_and(|l| pid_is_live(l.pid));
+    let last = std::fs::read_to_string(&paths.restart_stamp)
+        .ok()
+        .and_then(|s| s.trim().parse::<u64>().ok());
+    restart_decision(my_version, lock.as_ref(), alive, last, now_ms)
+}
+
+/// Record that an automatic restart is being attempted for this server. Written BEFORE the signal,
+/// so an attempt that then fails still counts against [`RESTART_COOLDOWN`] — the point of the
+/// cooldown is precisely the case where the restart does not stick. Best-effort: an unwritable
+/// runtime dir costs the cooldown, not the restart.
+pub fn note_restart(paths: &Paths, now_ms: u64) {
+    let _ = std::fs::write(&paths.restart_stamp, now_ms.to_string());
+}
+
+/// Whether `pid` still exists (a signal-0 probe). Anything but ESRCH counts as alive — EPERM means
+/// the process is there and simply is not ours — so only a certain absence reads as dead.
+fn pid_is_live(pid: i32) -> bool {
+    let Some(p) = Pid::from_raw(pid) else {
+        return false;
+    };
+    !matches!(rustix::process::test_kill_process(p), Err(Errno::SRCH))
 }
 
 // ---- wire protocol -----------------------------------------------------------------------
@@ -800,6 +1008,165 @@ mod tests {
         assert!(parse_lock("").is_none());
         assert!(parse_lock("not-a-pid\nversion=1.0\n").is_none());
         assert!(parse_lock("0\n").is_none());
+    }
+
+    /// A lock body as the daemon on `version` would have written it, with `pid`.
+    fn lock_of(pid: i32, version: &str) -> LockInfo {
+        parse_lock(&render_lock(pid as u32, version)).expect("a rendered lock body parses")
+    }
+
+    /// The whole rule with the vetoes cleared: pid alive, no cooldown stamp.
+    fn decide(my_version: &str, lock: &LockInfo) -> RestartDecision {
+        restart_decision(my_version, Some(lock), true, None, 0)
+    }
+
+    #[test]
+    fn only_a_strictly_newer_build_evicts_the_running_daemon() {
+        // Strictly newer, at each position of the tuple.
+        for (mine, theirs) in [
+            ("0.4.4", "0.3.5"),
+            ("1.0.0", "0.9.9"),
+            ("0.4.4", "0.4.3"),
+            ("0.10.0", "0.9.0"),
+        ] {
+            assert_eq!(
+                decide(mine, &lock_of(4242, theirs)),
+                RestartDecision::Evict { pid: 4242 },
+                "{mine} must evict {theirs}"
+            );
+        }
+        // Equal never restarts, and older never evicts newer (the downgrade is served by the
+        // explicit `tma daemon --restart`, not by this rule).
+        for (mine, theirs) in [("0.4.4", "0.4.4"), ("0.3.5", "0.4.4"), ("0.9.0", "0.10.0")] {
+            assert_eq!(
+                decide(mine, &lock_of(4242, theirs)),
+                RestartDecision::Hold,
+                "{mine} must leave {theirs} alone"
+            );
+        }
+        // `10` sorts after `9` as a number and before it as a string: the compare is numeric.
+        assert_eq!(
+            parse_version("0.10.0").cmp(&parse_version("0.9.0")),
+            std::cmp::Ordering::Greater
+        );
+    }
+
+    #[test]
+    fn a_version_that_cannot_be_read_is_never_a_restart_trigger() {
+        // No lock at all, and a lock predating version recording (a bare pid).
+        assert_eq!(
+            restart_decision("9.9.9", None, true, None, 0),
+            RestartDecision::Hold
+        );
+        let bare = parse_lock("4242").expect("a bare pid is a valid lock file");
+        assert_eq!(decide("9.9.9", &bare), RestartDecision::Hold);
+        // A body the daemon has not stamped yet: the flock is held, the version is unknown.
+        assert!(parse_lock("").is_none());
+        // Junk on either side.
+        for theirs in ["nightly", "0.4", "0.4.4.1", "v0.4.4", ""] {
+            assert_eq!(
+                decide("9.9.9", &lock_of(7, theirs)),
+                RestartDecision::Hold,
+                "{theirs:?} is not a version this rule can rank"
+            );
+        }
+        assert_eq!(
+            decide("git-build", &lock_of(7, "0.0.1")),
+            RestartDecision::Hold,
+            "a build whose OWN version is unrankable evicts nothing"
+        );
+        // A pre-release and its release read as the same version, so neither evicts the other.
+        assert_eq!(
+            decide("0.4.4", &lock_of(7, "0.4.4-rc.1")),
+            RestartDecision::Hold
+        );
+        assert_eq!(
+            decide("0.4.4-rc.1", &lock_of(7, "0.4.4")),
+            RestartDecision::Hold
+        );
+    }
+
+    #[test]
+    fn eviction_requires_a_live_pid() {
+        let old = lock_of(4242, "0.0.1");
+        assert_eq!(decide("0.4.4", &old), RestartDecision::Evict { pid: 4242 });
+        assert_eq!(
+            restart_decision("0.4.4", Some(&old), false, None, 0),
+            RestartDecision::Hold,
+            "a lock file keeps its body after the daemon exits; signalling that pid could hit a \
+             recycled process, and there is nothing to evict anyway"
+        );
+    }
+
+    #[test]
+    fn the_cooldown_bounds_a_restart_that_does_not_stick() {
+        let old = lock_of(4242, "0.0.1");
+        let cooldown = RESTART_COOLDOWN.as_millis() as u64;
+        let evict = RestartDecision::Evict { pid: 4242 };
+        // Nothing recorded, or the last attempt is older than the cooldown: the eviction stands.
+        assert_eq!(
+            restart_decision("0.4.4", Some(&old), true, None, 1_000_000),
+            evict
+        );
+        assert_eq!(
+            restart_decision(
+                "0.4.4",
+                Some(&old),
+                true,
+                Some(1_000_000),
+                1_000_000 + cooldown
+            ),
+            evict
+        );
+        // Inside the window it holds, however correct the eviction is — this is the flap guard, so
+        // it deliberately overrules a true "the running daemon is older".
+        assert_eq!(
+            restart_decision(
+                "0.4.4",
+                Some(&old),
+                true,
+                Some(1_000_000),
+                1_000_000 + cooldown - 1
+            ),
+            RestartDecision::Hold
+        );
+        // A stamp in the future (a clock that went backwards) reads as zero elapsed, so it holds.
+        assert_eq!(
+            restart_decision("0.4.4", Some(&old), true, Some(2_000_000), 1_000_000),
+            RestartDecision::Hold
+        );
+    }
+
+    /// The anti-symmetry theorem, the whole reason this rule cannot loop: for ANY pair of builds, at
+    /// most one direction is an eviction. Two installs racing each other over one server would
+    /// otherwise churn a real tmux probe session and every control client, once per check — about
+    /// once a second under a status-line driver.
+    ///
+    /// Every veto is switched off here (pid alive, no cooldown) so the property is proved of the
+    /// version rule itself rather than of the guards around it.
+    #[test]
+    fn no_two_builds_can_ever_evict_each_other() {
+        use proptest::prelude::*;
+
+        // A generator that mixes well-formed triples with the strings the rule must refuse.
+        let version = prop_oneof![
+            (0u64..3, 0u64..12, 0u64..12).prop_map(|(a, b, c)| format!("{a}.{b}.{c}")),
+            (0u64..3, 0u64..12, 0u64..12).prop_map(|(a, b, c)| format!("{a}.{b}.{c}-rc.1")),
+            Just("0.4".to_string()),
+            Just("nightly".to_string()),
+            Just(String::new()),
+        ];
+        proptest!(|((a, b) in (version.clone(), version))| {
+            let a_evicts_b = decide(&a, &lock_of(11, &b));
+            let b_evicts_a = decide(&b, &lock_of(22, &a));
+            prop_assert!(
+                !(matches!(a_evicts_b, RestartDecision::Evict { .. })
+                    && matches!(b_evicts_a, RestartDecision::Evict { .. })),
+                "{a} and {b} evict each other, which is a restart loop"
+            );
+            // And the diagonal: a build never evicts itself, so a matched pair is quiescent.
+            prop_assert_eq!(decide(&a, &lock_of(11, &a)), RestartDecision::Hold);
+        });
     }
 
     #[test]

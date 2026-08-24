@@ -49,7 +49,8 @@ similar = { version = "3", features = ["inline"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm", "layout-cache"] }
 crossterm = "0.29"
 nucleo = "0.5"
-# Pure-crate invariant testing (dev-only): property tests for the tma-core / tma-ui-core folds.
+# Pure-crate invariant testing (dev-only): property tests for the tma-core / tma-ui-core folds and
+# the runtime's upgrade-restart rule.
 # Default-off: no `ProptestConfig` anywhere, so the fork/timeout runner (rusty-fork, tempfile) is
 # dead weight. `bit-set` is the shrink bookkeeping the default runner needs.
 proptest = { version = "1", default-features = false, features = ["std", "bit-set"] }
