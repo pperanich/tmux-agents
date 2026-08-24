@@ -806,6 +806,160 @@ pub(crate) struct StampArgs {
 
 #[cfg(test)]
 mod tests {
+
+    /// Every user-typeable flag must have a row in `docs/reference/cli.md`, in the section for the
+    /// command that offers it.
+    ///
+    /// `--help` and the reference are the two places a user looks, and this project has already
+    /// shipped one contradiction between them. Nothing kept them in step: the only existing pin
+    /// (`--since`, above) covers a single flag's wording, so a whole new flag could be added,
+    /// helped, completed and shipped with no reference row at all — which is what nearly happened
+    /// to `tma daemon --restart` / `--stop`.
+    ///
+    /// Hidden flags are exempt by definition (they are not a public interface, and the completions
+    /// guard proves they reach no script). `tma debug stamp` is exempt by declaration: cli.md says
+    /// "Internal, unstable: ... Not a public interface", and that sentence is asserted here so the
+    /// exemption cannot outlive the reason for it.
+    #[test]
+    fn every_visible_flag_has_a_row_in_cli_md() {
+        use clap::CommandFactory;
+        use std::collections::BTreeMap;
+
+        /// cli.md split at its `##` headings, keyed by heading text. Only `##`, so a command's
+        /// `###` subsections (`tma status`'s `--format`, `tma act`'s exit codes) stay part of the
+        /// command they belong to.
+        fn sections(md: &str) -> BTreeMap<&str, String> {
+            let mut out = BTreeMap::new();
+            let mut heading = "";
+            let mut body = String::new();
+            for line in md.lines() {
+                if let Some(rest) = line.strip_prefix("## ") {
+                    out.insert(heading, std::mem::take(&mut body));
+                    heading = rest.trim();
+                } else {
+                    body.push_str(line);
+                    body.push('\n');
+                }
+            }
+            out.insert(heading, body);
+            out
+        }
+
+        /// The first cell of every table row in `body`, paired with the whole row.
+        fn rows(body: &str) -> impl Iterator<Item = (&str, &str)> {
+            body.lines().filter_map(|line| {
+                let row = line.trim_start().strip_prefix('|')?;
+                Some((row.split('|').next().unwrap_or("").trim(), row))
+            })
+        }
+
+        /// Whether the row's first cell NAMES `--long`. The cell may list several spellings
+        /// (`` `-c`, `--client` ``) and may carry a value placeholder (`` `--pane <ID>` ``).
+        fn cell_names(cell: &str, long: &str) -> bool {
+            cell.split(',').any(|form| {
+                let form = form.trim().trim_matches('`');
+                form == format!("--{long}") || form.starts_with(&format!("--{long} "))
+            })
+        }
+
+        /// Whether some table row in `body` DEFINES `--long`, by naming it in the row's first
+        /// cell. A mention anywhere in a row is not enough: `--stop`'s row says "Mutually
+        /// exclusive with `--ensure` and `--restart`", which would otherwise pass for two flags
+        /// that have no row of their own.
+        fn defines(body: &str, long: &str) -> bool {
+            rows(body).any(|(cell, _)| cell_names(cell, long))
+        }
+
+        /// The other legitimate form, used by the `tma debug` section: a subcommand with no
+        /// section of its own is documented by ONE row in its parent's subcommand table, and its
+        /// flags are named in that row's prose. `| `explain` | ... `--json` emits the versioned
+        /// schema. |` documents `tma debug explain --json` as well as a row of its own would.
+        fn described_by_its_own_row(body: &str, name: &str, long: &str) -> bool {
+            rows(body)
+                .filter(|(cell, _)| *cell == format!("`{name}`"))
+                .any(|(_, row)| {
+                    row.contains(&format!("`--{long}`")) || row.contains(&format!("`--{long} "))
+                })
+        }
+
+        fn walk(
+            cmd: &clap::Command,
+            path: &str,
+            secs: &BTreeMap<&str, String>,
+            shared: &str,
+            missing: &mut Vec<String>,
+        ) {
+            // The one declared exemption. It has no subcommands, so nothing below is skipped.
+            if path != "tma debug stamp" {
+                // A subcommand with no section of its own (`tma debug explain`) is documented
+                // under its parent, so the whole ancestor chain counts.
+                let mut scopes = vec![shared.to_string()];
+                let mut owner = path;
+                loop {
+                    if let Some(body) = secs.get(format!("`{owner}`").as_str()) {
+                        scopes.push(body.clone());
+                    }
+                    match owner.rfind(' ') {
+                        Some(cut) => owner = &owner[..cut],
+                        None => break,
+                    }
+                }
+                // A command with a section of its own must carry its flags in that section's
+                // tables; only one documented by a single row elsewhere may lean on that row.
+                let own_row = (!secs.contains_key(format!("`{path}`").as_str()))
+                    .then(|| cmd.get_name().to_owned());
+                for arg in cmd.get_arguments().filter(|a| !a.is_hide_set()) {
+                    if let Some(long) = arg.get_long() {
+                        let found = scopes.iter().any(|body| defines(body, long))
+                            || own_row.as_deref().is_some_and(|name| {
+                                scopes
+                                    .iter()
+                                    .any(|b| described_by_its_own_row(b, name, long))
+                            });
+                        if !found {
+                            missing.push(format!("{path} --{long}"));
+                        }
+                    }
+                }
+            }
+            for sub in cmd.get_subcommands().filter(|s| !s.is_hide_set()) {
+                walk(
+                    sub,
+                    &format!("{path} {}", sub.get_name()),
+                    secs,
+                    shared,
+                    missing,
+                );
+            }
+        }
+
+        let md = include_str!("../../../docs/reference/cli.md");
+        assert!(
+            md.contains("`stamp` | Internal, unstable"),
+            "the `debug stamp` exemption below rests on cli.md declaring it internal and unstable; \
+             if that changed, document its flags and drop the exemption"
+        );
+        let secs = sections(md);
+        // The two tables every command draws on rather than repeating: the global flags and the
+        // selector, which subcommand sections link to instead of listing.
+        let shared = format!(
+            "{}{}",
+            secs.get("Global options")
+                .expect("cli.md has a Global options section"),
+            secs.get("Selector flags")
+                .expect("cli.md has a Selector flags section")
+        );
+
+        let mut missing = Vec::new();
+        walk(&Cli::command(), "tma", &secs, &shared, &mut missing);
+        assert!(
+            missing.is_empty(),
+            "these flags are offered by `--help` and have no row of their own in \
+             docs/reference/cli.md:\n  {}\n\nAdd a row to that command's section, or mark the \
+             flag `hide = true` if it is not a public interface.",
+            missing.join("\n  ")
+        );
+    }
     use super::*;
 
     /// The row key a supervisor loop must feed back into `wait --since`, named in one place so the

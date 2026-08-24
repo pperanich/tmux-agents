@@ -733,6 +733,7 @@ Usage: tma init [OPTIONS]
 |---|---|
 | `--yes` | Apply every step without the interactive diff confirmations (scripts, tests). |
 | `--daemon` | Also start the event-hub daemon for this server. |
+| `--no-daemon` | Wire no daemon at all: omit the server-start launcher `install-keys` writes by default, and start none for this server. Cannot be combined with `--daemon`. |
 | `--config-dir <DIR>` | Override the tma config dir holding the managed `tmux.conf` and the per-server `hooks-state-<server>.toml` (env `TMA_CONFIG_DIR`). |
 | `--conf <PATH>` | The tmux config to mark with the keybindings `source-file` line, and the file the status-line instructions name. Same default as `install-keys --conf`. |
 

@@ -17,8 +17,8 @@ pub(crate) fn run(args: CompletionsArgs) -> ExitCode {
 ///
 /// clap_complete's generators filter hidden *values* but not hidden subcommands or args, so
 /// generating straight from `Cli::command()` would offer `tma supervise`, `tma event`,
-/// `tma clear-attention` and `tma daemon --sweep-ms` — three internal verbs and five test hooks,
-/// none of which anyone should be typing. clap has no way to drop an item from a built `Command`,
+/// `tma clear-attention` and `tma daemon --sweep-ms` — three internal verbs and the `daemon`
+/// subcommand's hidden hooks, none of which anyone should be typing. clap has no way to drop an item from a built `Command`,
 /// so each node is rebuilt from its visible parts instead.
 ///
 /// Rebuilding means the command-level properties are copied by hand, which is what
@@ -30,7 +30,7 @@ fn completion_tree() -> clap::Command {
 
 /// Whether anything at or below `cmd` is marked `hide`. A node with nothing to prune is cloned
 /// verbatim below, which is what keeps the hand-copied property list from mattering for the rest of
-/// the tree: in tma's, only the root (three internal verbs) and `daemon` (five test hooks) are
+/// the tree: in tma's, only the root (three internal verbs) and `daemon` (its hidden hooks) are
 /// rebuilt at all.
 fn hides_anything(cmd: &clap::Command) -> bool {
     cmd.get_arguments().any(clap::Arg::is_hide_set)
@@ -87,9 +87,24 @@ mod tests {
         String::from_utf8(out).expect("the generators write utf-8")
     }
 
+    /// Every hidden long flag anywhere in the parse tree, as `--name`. Derived rather than listed:
+    /// a hand-kept list silently stops covering the newest hook, which is exactly what happened to
+    /// `--fake-version` — added, correctly pruned, and never pinned.
+    fn hidden_long_flags(cmd: &clap::Command, out: &mut Vec<String>) {
+        for arg in cmd.get_arguments().filter(|a| a.is_hide_set()) {
+            if let Some(long) = arg.get_long() {
+                out.push(format!("--{long}"));
+            }
+        }
+        for sub in cmd.get_subcommands() {
+            hidden_long_flags(sub, out);
+        }
+    }
+
     /// The whole point of rebuilding the tree. `supervise`, `event` and `clear-attention` are
-    /// spawned by tmux hooks and by tma itself, never typed, and `daemon`'s five test hooks steer
-    /// the sweep cadence and the detach staging. clap_complete would list every one of them.
+    /// spawned by tmux hooks and by tma itself, never typed, and `daemon`'s hidden hooks steer the
+    /// sweep cadence, the detach staging, the stamped version and the shutdown timing.
+    /// clap_complete would list every one of them.
     #[test]
     fn hidden_subcommands_and_args_reach_no_generated_script() {
         let tree = completion_tree();
@@ -97,15 +112,20 @@ mod tests {
         for name in ["event", "clear-attention", "supervise"] {
             assert!(!offered.contains(&name), "the tree still carries {name}");
         }
+        let mut hidden = Vec::new();
+        hidden_long_flags(&Cli::command(), &mut hidden);
+        // A floor and a spot check, so a walk that quietly found nothing cannot pass this on no
+        // evidence at all — the failure mode of a derived list.
+        assert!(
+            hidden.len() >= 7,
+            "only {} hidden flags found; the walk is not seeing the tree: {hidden:?}",
+            hidden.len()
+        );
+        for known in ["--sweep-ms", "--detach-stage2", "--fake-version"] {
+            assert!(hidden.iter().any(|f| f == known), "the walk missed {known}");
+        }
         // The flags are distinctive enough to look for in the scripts themselves, which is where a
         // generator that started emitting hidden args again would show up.
-        let hidden = [
-            "--status-file",
-            "--probe-cross-session",
-            "--sweep-ms",
-            "--detach-stage2",
-            "--detach-session",
-        ];
         for shell in [
             clap_complete::Shell::Bash,
             clap_complete::Shell::Zsh,
@@ -114,7 +134,7 @@ mod tests {
             clap_complete::Shell::PowerShell,
         ] {
             let script = script(shell);
-            for name in hidden {
+            for name in &hidden {
                 assert!(
                     !script.contains(name),
                     "{shell} completion offers the hidden {name}"
