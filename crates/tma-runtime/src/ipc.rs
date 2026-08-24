@@ -1243,18 +1243,21 @@ mod tests {
             "a held flock is the whole point: this must read as owned"
         );
 
-        drop(held);
-        // Measured on macOS: an flock released by closing its fd is not always visible as free to
-        // an immediate re-lock in the same process. That is why `stop_daemon_at` polls rather than
-        // probing once, and why this waits rather than asserting on the first read.
-        let deadline = Instant::now() + Duration::from_secs(2);
-        while !lock_is_free(&paths.lock) && Instant::now() < deadline {
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        // Release EXPLICITLY rather than by dropping the fd. Two reasons, both learned the hard
+        // way. Measured on macOS, an flock released by closing its fd is not always visible as free
+        // to an immediate re-lock in the same process (which is why `stop_daemon_at` polls rather
+        // than probing once). And polling `lock_is_free` to wait that out is not a sound way to
+        // assert release, because this function deliberately reports EVERY non-`NotFound` open
+        // failure as held: under a full-suite run the process can be near its fd ceiling, `open`
+        // fails with EMFILE, and the poll can never satisfy. That combination made this test flake
+        // under `cargo test --workspace` while passing standalone every time.
+        rustix::fs::flock(&held, rustix::fs::FlockOperation::Unlock)
+            .expect("unlock the flock we took");
         assert!(
             lock_is_free(&paths.lock),
             "releasing the flock frees the lock again"
         );
+        drop(held);
 
         assert!(
             !lock_is_free(&paths.dir),
