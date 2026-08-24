@@ -325,6 +325,14 @@ fn wait_for_socket(s: &Scratch, timeout: Duration) -> Option<PathBuf> {
     }
 }
 
+/// Whether a daemon is ACCEPTING on this server's socket right now — the probe every management
+/// verb uses (`ipc::daemon_answers`), rather than "a socket file exists". A daemon that unlinked
+/// its socket on the way out leaves no file; one that crashed after binding leaves a file nothing
+/// answers on.
+fn daemon_answers(s: &Scratch) -> bool {
+    socket_file(s).is_some_and(|p| UnixStream::connect(p).is_ok())
+}
+
 /// The headline acceptance: a daemon-applied stamp is byte-for-byte identical (modulo the injected
 /// wall clock) to a direct-stamp of the same event, proving the same guarded-stamp adapter.
 #[test]
@@ -1172,24 +1180,32 @@ fn restart_starts_a_daemon_when_none_was_running() {
     terminate(pid);
 }
 
-/// `--ensure` and `--restart` say two different things about a running daemon, so asking for both
-/// is a usage error (clap, exit 2) rather than a silent precedence rule.
+/// The three mode flags each say a different thing about a running daemon (leave it, replace it,
+/// end it), so any pair is a usage error (clap, exit 2) rather than a silent precedence rule.
+/// All three pairings, because `--stop` declares its exclusions in a separate `conflicts_with_all`
+/// from `--restart`'s `conflicts_with`: pinning one pairing says nothing about the other two.
 #[test]
-fn ensure_and_restart_together_are_a_usage_error() {
-    let out = Command::new(common::tma_bin())
-        .args(["daemon", "--ensure", "--restart"])
-        .output()
-        .expect("run tma daemon");
-    assert_eq!(
-        out.status.code(),
-        Some(2),
-        "clap must reject the pair before anything is signalled"
-    );
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        stderr.contains("--restart") && stderr.contains("--ensure"),
-        "the error names both flags: {stderr}"
-    );
+fn the_daemon_mode_flags_are_pairwise_exclusive() {
+    for [a, b] in [
+        ["--ensure", "--restart"],
+        ["--ensure", "--stop"],
+        ["--restart", "--stop"],
+    ] {
+        let out = Command::new(common::tma_bin())
+            .args(["daemon", a, b])
+            .output()
+            .expect("run tma daemon");
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "clap must reject {a} {b} before anything is signalled"
+        );
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            stderr.contains(a) && stderr.contains(b),
+            "the error for {a} {b} names both flags: {stderr}"
+        );
+    }
 }
 
 /// THE LOOP GUARD, end to end. A newer build evicts an older resident daemon **exactly once**, and
@@ -1488,5 +1504,143 @@ fn stop_with_nothing_running_is_a_clean_no_op() {
     assert!(
         stdout.contains("no daemon was running"),
         "it distinguishes 'there was none' from 'stopped one': {stdout}"
+    );
+}
+
+/// The second half of the stop condition, against the real window it exists for. A daemon unlinks
+/// its socket BEFORE releasing the single-instance lock, so in between it is unreachable and still
+/// owns this server; `--shutdown-delay-ms` widens that always-present gap to something a test can
+/// stand in for.
+///
+/// Waiting only for the socket to go quiet — the stop condition this feature shipped with before
+/// the fix — declares the daemon stopped inside that gap. The replacement then loses the flock,
+/// exits as a duplicate, and `--restart` finishes with NOTHING running for this server while
+/// reporting a stop it did perform and a start it did not.
+#[test]
+fn restart_waits_out_a_daemon_that_still_holds_the_lock() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+
+    // 1200 ms: comfortably longer than the ~10 ms a measured shutdown takes, and comfortably
+    // shorter than the 2 s `ipc::stop_daemon_at` is allowed to wait.
+    let mut old = spawn_daemon_args(&s, &["--shutdown-delay-ms", "1200"]);
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    let old_pid =
+        daemon_pid(&s, common::POLL_CEILING).expect("the resident daemon records its pid");
+
+    let out = run_restart(&s);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success(), "restart failed: {stdout}{stderr}");
+    assert!(
+        old.wait_exit(common::POLL_CEILING),
+        "the delayed daemon must really be gone"
+    );
+
+    // The outcome, not the wording: something is serving this server, and it is not the old pid.
+    assert!(
+        daemon_answers(&s),
+        "a restart that raced the lock leaves nothing running at all: {stdout}{stderr}"
+    );
+    let new_pid = daemon_pid(&s, common::POLL_CEILING).expect("the replacement records its pid");
+    assert_ne!(
+        new_pid, old_pid,
+        "the lock body still names the daemon that was stopped, so no replacement ever started"
+    );
+    terminate(new_pid);
+}
+
+/// A `--restart` whose replacement definitively failed must not exit 0. `offer_daemon_restart`
+/// reads that exit code as "the skew is resolved", so `tma install-hooks --yes` would otherwise
+/// report a clean install over a dead daemon — and any bind failure takes this path.
+///
+/// A directory where the socket must bind fails the bind every time: `remove_file` cannot clear it
+/// and `UnixListener::bind` cannot replace it.
+#[test]
+fn restart_exits_nonzero_when_the_replacement_cannot_bind() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+
+    // Learn this server's socket path from a daemon that does come up, then take the path away.
+    let mut running = spawn_daemon(&s);
+    let sock = wait_for_socket(&s, common::POLL_CEILING).expect("the daemon binds its socket");
+    let pid = daemon_pid(&s, common::POLL_CEILING).expect("it records its pid");
+    terminate(pid);
+    assert!(running.wait_exit(common::POLL_CEILING));
+    assert!(
+        !sock.exists(),
+        "a clean shutdown unlinks the socket, leaving the path free to occupy"
+    );
+    std::fs::create_dir(&sock).expect("put a directory where the socket must bind");
+
+    let out = run_restart(&s);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a restart that left nothing running must not exit 0: {stdout}{stderr}"
+    );
+    assert!(
+        stderr.contains("never answered"),
+        "and it says the replacement never came up: {stderr}"
+    );
+    assert!(!daemon_answers(&s), "nothing can be serving this server");
+}
+
+/// A wedged daemon: the stop times out, but the SIGTERM has already been delivered, so the daemon
+/// dies the moment it unwedges and no replacement was ever spawned. "cannot stop the running
+/// daemon" alone reads as "nothing changed", which is the opposite of what happened — with
+/// `autostart` off (the default) the user is left with no daemon and no idea one is coming.
+///
+/// SIGSTOP stages it deterministically: a stopped process takes the signal but cannot act on it.
+#[test]
+fn a_wedged_daemon_is_told_the_sigterm_stands() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+
+    let mut wedged = spawn_daemon(&s);
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    let pid = daemon_pid(&s, common::POLL_CEILING).expect("the daemon records its pid");
+    signal(pid, rustix::process::Signal::STOP);
+
+    let out = run_restart(&s);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success(),
+        "a restart that stopped nothing and started nothing is a failure"
+    );
+    assert!(
+        stderr.contains("cannot stop the running daemon"),
+        "it still reports the timeout: {stderr}"
+    );
+    assert!(
+        stderr.contains("SIGTERM has been delivered"),
+        "and says the signal stands, so this is not 'nothing changed': {stderr}"
+    );
+    assert!(
+        stderr.contains("tma daemon --ensure"),
+        "and names the way back once the daemon has gone: {stderr}"
+    );
+
+    // Let it unwedge: the pending SIGTERM lands and it exits, exactly as the message says.
+    signal(pid, rustix::process::Signal::CONT);
+    assert!(
+        wedged.wait_exit(common::POLL_CEILING),
+        "the delivered SIGTERM really does take effect once the daemon runs again"
     );
 }
