@@ -200,6 +200,7 @@ fn main() -> ExitCode {
             detach_stage2: args.detach_stage2,
             detach_session: args.detach_session,
             fake_version: args.fake_version,
+            shutdown_delay_ms: args.shutdown_delay_ms,
         }),
         Some(Command::Init(args)) => {
             let launch_daemon = daemon_launcher(
@@ -372,6 +373,7 @@ fn run_daemon_verb(
         detach_stage2: false,
         detach_session: false,
         fake_version: None,
+        shutdown_delay_ms: None,
     })
 }
 

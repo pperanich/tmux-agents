@@ -333,6 +333,12 @@ pub(crate) struct DaemonCmdArgs {
     /// the upgrade-restart guard is exercisable end to end from a single build. Nothing else reads it.
     #[arg(long = "fake-version", hide = true, value_name = "VERSION")]
     pub(crate) fake_version: Option<String>,
+    /// INTERNAL/TEST: at shutdown, hold the single-instance lock this many milliseconds after the
+    /// socket has been unlinked. That gap is real and always there (the socket goes first); this
+    /// only widens it to something a test can stand in, so the stop condition that waits for the
+    /// LOCK rather than the socket is exercisable.
+    #[arg(long = "shutdown-delay-ms", hide = true, value_name = "MS")]
+    pub(crate) shutdown_delay_ms: Option<u64>,
 }
 
 /// Args for the internal `tma clear-attention <pane>` command.

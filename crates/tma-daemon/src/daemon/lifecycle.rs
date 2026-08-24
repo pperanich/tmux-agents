@@ -75,11 +75,44 @@ fn evict_older(paths: &Paths, opts: &DaemonOpts) {
             eprintln!("tma: cannot replace the older daemon (pid {pid}): {err}");
         }
         // Stopped, or it had already gone on its own; either way nothing holds this server now.
-        // (`stop_daemon_at` cannot report NoServer — the paths ARE the server.)
-        _ => {
+        StopOutcome::Stopped | StopOutcome::NotRunning => {
             if !spawn_detached(opts) {
                 eprintln!("tma: stopped the older daemon but could not spawn its replacement");
             }
+        }
+    }
+}
+
+/// What a wedged daemon leaves behind, said plainly. [`ipc::stop_daemon_at`] reports a timeout only
+/// AFTER its SIGTERM went out, so "cannot stop the running daemon" on its own reads as "nothing
+/// changed" when in fact the signal stands and the daemon will exit the moment it unwedges. With
+/// `autostart` off (the default) nothing then brings one back, so the user needs the follow-up.
+fn report_stop_timeout(err: &str) {
+    eprintln!("tma: cannot stop the running daemon: {err}");
+    eprintln!(
+        "     The SIGTERM has been delivered and stands, so it may still exit once it unwedges — \
+         this is not\n     \"nothing changed\". Once it is gone, `tma daemon --ensure` starts one."
+    );
+}
+
+/// `tma daemon --stop`: stop the daemon for this server and leave it stopped. The counterpart to
+/// `--restart` for the case where you want the daemon gone rather than replaced — detection falls
+/// back to the poll tier, which is strictly additive, so nothing breaks. Nothing running is a clean
+/// exit 0, the same no-op discipline `reload` keeps (`reload` puts its no-op line on stderr; both
+/// no-ops are exit 0, which is the part that matters to a script).
+pub(super) fn stop_running(paths: &Paths) -> ExitCode {
+    match ipc::stop_daemon_at(paths) {
+        StopOutcome::Failed(err) => {
+            report_stop_timeout(&err);
+            ExitCode::FAILURE
+        }
+        StopOutcome::NotRunning => {
+            println!("tma: no daemon was running for this server");
+            ExitCode::SUCCESS
+        }
+        StopOutcome::Stopped => {
+            println!("tma: stopped the running daemon; detection is on the poll tier until one starts again");
+            ExitCode::SUCCESS
         }
     }
 }
@@ -90,37 +123,14 @@ fn evict_older(paths: &Paths, opts: &DaemonOpts) {
 /// restart obviously wants the older daemon, which is how a deliberate downgrade is served. Not
 /// starting one at all would be a second verb for a job `--ensure` already does, so a restart with
 /// nothing running just starts one.
-/// `tma daemon --stop`: stop the daemon for this server and leave it stopped. The counterpart to
-/// `--restart` for the case where you want the daemon gone rather than replaced — detection falls
-/// back to the poll tier, which is strictly additive, so nothing breaks. Nothing running is a clean
-/// exit 0, matching `reload`'s no-op discipline.
-pub(super) fn stop_running(paths: &Paths) -> ExitCode {
-    match ipc::stop_daemon_at(paths) {
-        StopOutcome::Failed(err) => {
-            eprintln!("tma: cannot stop the running daemon: {err}");
-            ExitCode::FAILURE
-        }
-        StopOutcome::NotRunning => {
-            println!("tma: no daemon was running for this server");
-            ExitCode::SUCCESS
-        }
-        // Stopped. (`stop_daemon_at` cannot report NoServer — the paths ARE the server.)
-        _ => {
-            println!("tma: stopped the running daemon; detection is on the poll tier until one starts again");
-            ExitCode::SUCCESS
-        }
-    }
-}
-
 pub(super) fn restart_running(paths: &Paths, opts: &DaemonOpts) -> ExitCode {
     match ipc::stop_daemon_at(paths) {
         StopOutcome::Failed(err) => {
-            eprintln!("tma: cannot stop the running daemon: {err}");
+            report_stop_timeout(&err);
             return ExitCode::FAILURE;
         }
         StopOutcome::NotRunning => println!("tma: no daemon was running for this server"),
-        // Stopped. (`stop_daemon_at` cannot report NoServer — the paths ARE the server.)
-        _ => println!("tma: stopped the running daemon"),
+        StopOutcome::Stopped => println!("tma: stopped the running daemon"),
     }
     if !spawn_detached(opts) {
         eprintln!("tma: failed to spawn the detached daemon");
@@ -130,11 +140,14 @@ pub(super) fn restart_running(paths: &Paths, opts: &DaemonOpts) -> ExitCode {
         println!("tma: daemon restarted ({})", ipc::VERSION);
         ExitCode::SUCCESS
     } else {
-        // The socket binds within tens of milliseconds; the control-mode behaviour probe that runs
-        // before the accept loop can take a couple of seconds more. Not answering yet is worth
-        // saying, but it is not a failed restart.
-        eprintln!("tma: the daemon was launched but has not answered on its socket yet");
-        ExitCode::SUCCESS
+        // A failure, not a slow start. The control-mode behaviour probe that can take seconds runs
+        // INSIDE `serve`, after `UnixListener::bind`, and `daemon_answers` is a connect that
+        // succeeds off the listen backlog within tens of milliseconds — so nothing answering after
+        // [`UP_TIMEOUT`] means the replacement did not come up (a failed bind is the usual cause).
+        // Exit 0 here would tell `offer_daemon_restart` the skew was resolved, and
+        // `tma install-hooks --yes` would report a clean install over a dead daemon.
+        eprintln!("tma: the daemon was launched but never answered on its socket; nothing is running for this server");
+        ExitCode::FAILURE
     }
 }
 
@@ -237,6 +250,7 @@ pub(super) fn run_foreground(tmux: &Tmux, paths: &Paths, opts: DaemonOpts) -> Ex
     let status_file = opts.status_file.clone();
     let probe_cross_session = opts.probe_cross_session;
     let sweep_ms = opts.sweep_ms;
+    let shutdown_delay_ms = opts.shutdown_delay_ms;
     // Single-instance lock. Held for the process's life; released automatically on exit
     // or crash, so a stale lock is always reclaimable.
     let lock = match claim_lock(&paths.lock) {
@@ -309,8 +323,15 @@ pub(super) fn run_foreground(tmux: &Tmux, paths: &Paths, opts: DaemonOpts) -> Ex
         manifest_dir.as_deref(),
     );
 
-    // Explicit cleanup; `lock` drops here, releasing the flock.
+    // Explicit cleanup; `lock` drops here, releasing the flock. The order is load-bearing and is
+    // why `ipc::stop_daemon_at` waits for the LOCK rather than for the socket to go quiet: between
+    // the two lines this daemon is unreachable and still owns the server, so a replacement spawned
+    // in the gap exits as a duplicate and leaves nothing running at all.
     cleanup(&paths.socket);
+    // INTERNAL/TEST (`--shutdown-delay-ms`): widen exactly that gap so the wait is observable.
+    if let Some(ms) = shutdown_delay_ms {
+        std::thread::sleep(Duration::from_millis(ms));
+    }
     drop(lock);
     ExitCode::SUCCESS
 }

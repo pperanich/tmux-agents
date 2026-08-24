@@ -290,11 +290,10 @@ pub fn reload_daemon(tmux: &Tmux) -> ReloadOutcome {
     }
 }
 
-/// Outcome of a stop request. Same shape as [`ReloadOutcome`] so the two management verbs report
-/// the same four situations in the same words.
+/// Outcome of a stop request. Mirrors [`ReloadOutcome`] minus its `NoServer`: every caller here
+/// already holds resolved [`Paths`], so "there is no server" cannot arise.
+#[derive(Debug, PartialEq, Eq)]
 pub enum StopOutcome {
-    /// No tmux server for this handle ⇒ no daemon to stop.
-    NoServer,
     /// A live daemon was signalled and is gone: its socket no longer answers AND its
     /// single-instance lock is free, so a replacement can be spawned straight away.
     Stopped,
@@ -313,18 +312,11 @@ const STOP_TIMEOUT: Duration = Duration::from_secs(2);
 /// The poll step while waiting out a signalled daemon.
 const STOP_POLL: Duration = Duration::from_millis(10);
 
-/// Stop the per-server daemon (`tma daemon --restart`'s first half). Tier-2 like [`reload_daemon`],
-/// so the bin reaches the daemon without importing tier 3.
-pub fn stop_daemon(tmux: &Tmux) -> StopOutcome {
-    let Some(socket_path) = resolve_socket_path(tmux) else {
-        return StopOutcome::NoServer;
-    };
-    stop_daemon_at(&paths_for(&socket_path))
-}
-
-/// [`stop_daemon`] against already-resolved paths, for a caller that holds them (the daemon's own
-/// `--restart` / upgrade-eviction paths). Never returns [`StopOutcome::NoServer`]: the paths ARE the
-/// server. SIGTERM only — see the inline note on why SIGKILL is never an escalation here.
+/// Stop the daemon on already-resolved paths (`tma daemon --restart`'s first half, `--stop`, and
+/// the upgrade eviction). Tier-2 like [`reload_daemon`], so the bin reaches the daemon without
+/// importing tier 3. There is no `tmux`-resolving sibling: every caller reaches this holding its
+/// own [`Paths`], and a second entry point would be a second place for the two to drift.
+/// SIGTERM only — see the inline note on why SIGKILL is never an escalation here.
 pub fn stop_daemon_at(paths: &Paths) -> StopOutcome {
     // Liveness gate, exactly as `reload_daemon` does it: a successful connect proves a daemon is
     // accepting right now, and the connection is dropped without a frame, so it reads EOF.
@@ -358,7 +350,17 @@ pub fn stop_daemon_at(paths: &Paths) -> StopOutcome {
     // immediate re-lock; a retry a moment later succeeds.
     let deadline = Instant::now() + STOP_TIMEOUT;
     loop {
-        if !daemon_answers(paths) && lock_is_free(&paths.lock) {
+        let answering = daemon_answers(paths);
+        if !answering && lock_is_free(&paths.lock) {
+            return StopOutcome::Stopped;
+        }
+        // A concurrent stop already won: the pid we signalled is gone, and something else is
+        // answering for this server. The condition above can never be satisfied now (the
+        // replacement holds both the socket and the lock), so without this the loser of a race
+        // between two `--restart` clients would run out its budget and report a stop timeout on
+        // an outcome that is exactly what it asked for — which `install-hooks` turns into a
+        // failed install.
+        if answering && !pid_is_live(pid) {
             return StopOutcome::Stopped;
         }
         if Instant::now() >= deadline {
@@ -377,11 +379,17 @@ pub fn daemon_answers(paths: &Paths) -> bool {
 }
 
 /// Whether the single-instance flock is currently unheld — the "no daemon owns this server" test a
-/// respawn needs. Takes the lock only to drop it again, and never creates the file: an absent lock
-/// is trivially free.
+/// respawn needs. Takes the lock only to drop it again, and never creates the file.
+///
+/// A MISSING lock file is the only trivially-free case: nothing can hold an flock on a file that is
+/// not there. Every other open failure (a directory in the lock's place, a permission the 0700
+/// runtime dir should never have) says the state is unknown, and unknown reads as HELD — a false
+/// "free" makes [`stop_daemon_at`] report a stop that did not happen and race a replacement against
+/// a daemon still owning the server.
 fn lock_is_free(lock: &Path) -> bool {
-    let Ok(file) = std::fs::OpenOptions::new().write(true).open(lock) else {
-        return true;
+    let file = match std::fs::OpenOptions::new().write(true).open(lock) {
+        Ok(f) => f,
+        Err(err) => return err.kind() == std::io::ErrorKind::NotFound,
     };
     rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok()
 }
@@ -1010,6 +1018,27 @@ mod tests {
         assert!(parse_lock("0\n").is_none());
     }
 
+    /// A [`Paths`] trio under a fresh scratch directory, with nothing on disk yet: each test
+    /// creates only the files it needs. `paths_for` cannot serve here — it keys off the real
+    /// runtime dir, which the suite must not write into.
+    fn scratch_paths(tag: &str) -> Paths {
+        let dir = std::env::temp_dir().join(format!(
+            "tma_ipc_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        Paths {
+            socket: dir.join("server.sock"),
+            lock: dir.join("server.lock"),
+            restart_stamp: dir.join("server.restart"),
+            dir,
+        }
+    }
+
     /// A lock body as the daemon on `version` would have written it, with `pid`.
     fn lock_of(pid: i32, version: &str) -> LockInfo {
         parse_lock(&render_lock(pid as u32, version)).expect("a rendered lock body parses")
@@ -1135,6 +1164,180 @@ mod tests {
             restart_decision("0.4.4", Some(&old), true, Some(2_000_000), 1_000_000),
             RestartDecision::Hold
         );
+    }
+
+    /// The cooldown's only persistence, which nothing above touches. Every case in
+    /// [`the_cooldown_bounds_a_restart_that_does_not_stick`] hands the stamp to the pure rule
+    /// directly, so gutting [`note_restart`] to a no-op leaves them all green while the flap guard
+    /// is gone entirely — and the flap is the one failure the cooldown exists for: a newer build
+    /// whose daemon will not stay up, evicted afresh by every `--ensure` (about once a second under
+    /// a status-line driver), each cycle churning a real tmux probe session and every control client.
+    ///
+    /// So: a real eviction must WRITE a stamp, at `restart_stamp`, that the same decision reads back.
+    #[test]
+    fn a_noted_restart_is_read_back_as_the_cooldown() {
+        let paths = scratch_paths("cooldown");
+        // A live daemon of an older build: this process's own pid, so the liveness probe inside
+        // `upgrade_restart_decision` is genuine rather than a guess about some number.
+        let me = std::process::id();
+        std::fs::write(&paths.lock, render_lock(me, "0.0.1")).unwrap();
+        let evict = RestartDecision::Evict { pid: me as i32 };
+        let now = 1_700_000_000_000u64;
+        assert_eq!(
+            upgrade_restart_decision(&paths, "9.9.9", now),
+            evict,
+            "with no stamp on disk the eviction stands"
+        );
+
+        note_restart(&paths, now);
+        let cooldown = RESTART_COOLDOWN.as_millis() as u64;
+        for t in [now, now + 1, now + cooldown - 1] {
+            assert_eq!(
+                upgrade_restart_decision(&paths, "9.9.9", t),
+                RestartDecision::Hold,
+                "a second eviction {}ms after the first is the flap, and must be held off",
+                t - now
+            );
+        }
+        assert_eq!(
+            upgrade_restart_decision(&paths, "9.9.9", now + cooldown),
+            evict,
+            "and the window ends: the eviction is allowed again"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&paths.restart_stamp).ok(),
+            Some(now.to_string()),
+            "and it is `restart_stamp` the note landed in — the one path the decision reads"
+        );
+
+        let _ = std::fs::remove_dir_all(&paths.dir);
+    }
+
+    /// The half of [`stop_daemon_at`]'s stop condition that is not "the socket went quiet". A
+    /// daemon unlinks its socket BEFORE its lock fd closes, so in between it is silent and still
+    /// owns the server; a replacement spawned in that gap exits as a duplicate and the restart
+    /// leaves nothing running at all.
+    #[test]
+    fn lock_is_free_reports_the_flock_and_not_the_file() {
+        let paths = scratch_paths("lockfree");
+        assert!(
+            lock_is_free(&paths.lock),
+            "a lock file that does not exist is trivially free: nothing can hold an flock on it"
+        );
+
+        let held = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&paths.lock)
+            .unwrap();
+        assert!(
+            lock_is_free(&paths.lock),
+            "an existing but unflocked lock file is free"
+        );
+        assert!(
+            rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok()
+        );
+        assert!(
+            !lock_is_free(&paths.lock),
+            "a held flock is the whole point: this must read as owned"
+        );
+
+        drop(held);
+        // Measured on macOS: an flock released by closing its fd is not always visible as free to
+        // an immediate re-lock in the same process. That is why `stop_daemon_at` polls rather than
+        // probing once, and why this waits rather than asserting on the first read.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !lock_is_free(&paths.lock) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            lock_is_free(&paths.lock),
+            "releasing the flock frees the lock again"
+        );
+
+        assert!(
+            !lock_is_free(&paths.dir),
+            "an open failure that is not `NotFound` is unknown, and unknown must read as held: \
+             a false free reports a stop that never happened"
+        );
+
+        let _ = std::fs::remove_dir_all(&paths.dir);
+    }
+
+    /// The losing racer in concurrent `--restart` must not report failure on someone else's
+    /// success. Once another client's replacement owns the server, the wait loop's ordinary
+    /// condition can never hold for the pid THIS client signalled: the socket answers (the
+    /// replacement) and the lock is held (by the replacement), so the budget runs out and a stop
+    /// timeout is reported for an outcome that is exactly what was asked for. Inside
+    /// `install-hooks` that turns a correct install into `ExitCode::FAILURE`.
+    ///
+    /// Staged rather than raced: a bare listener stands in for the replacement (so the socket
+    /// answers throughout) and the lock names a real process that really does die on the SIGTERM
+    /// `stop_daemon_at` sends.
+    #[test]
+    fn a_stop_whose_target_died_under_a_live_replacement_reports_success() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let paths = scratch_paths("racer");
+        let dir = paths.dir.clone();
+        // The stand-in replacement has to ACCEPT, not merely bind: `daemon_answers` connects, so a
+        // listener that never accepts fills its backlog after ~128 probes and starts refusing —
+        // which reads as the daemon going quiet and would stage the wrong situation entirely.
+        let listener = std::os::unix::net::UnixListener::bind(&paths.socket)
+            .expect("bind the stand-in replacement");
+        listener.set_nonblocking(true).unwrap();
+        let closing = Arc::new(AtomicBool::new(false));
+        let accepting = {
+            let closing = Arc::clone(&closing);
+            std::thread::spawn(move || {
+                while !closing.load(Ordering::Relaxed) {
+                    match listener.accept() {
+                        Ok((conn, _)) => drop(conn),
+                        Err(_) => std::thread::sleep(Duration::from_millis(2)),
+                    }
+                }
+            })
+        };
+        // The "old daemon" the lock names: a real process, so the SIGTERM and the liveness probe
+        // are both genuine.
+        let mut sleeper = std::process::Command::new("sleep")
+            .arg("30")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn the stand-in old daemon");
+        let pid = sleeper.id();
+        std::fs::write(&paths.lock, render_lock(pid, "0.0.1")).unwrap();
+
+        let stopper = std::thread::spawn(move || {
+            let started = Instant::now();
+            (stop_daemon_at(&paths), started.elapsed())
+        });
+        // Reap it the moment the stopper's SIGTERM lands: an unreaped zombie still answers the
+        // signal-0 liveness probe, so nothing would ever read as gone.
+        let _ = sleeper.wait();
+        let (outcome, elapsed) = stopper.join().expect("the stopper thread");
+
+        assert_eq!(
+            outcome,
+            StopOutcome::Stopped,
+            "the pid we signalled is gone and a replacement is answering: that IS a stop"
+        );
+        assert!(
+            elapsed < STOP_TIMEOUT,
+            "and it must be recognized promptly rather than waited out: took {elapsed:?}"
+        );
+        assert!(
+            !pid_is_live(pid as i32),
+            "the stand-in really did die (otherwise this test proves nothing)"
+        );
+
+        closing.store(true, Ordering::Relaxed);
+        accepting.join().expect("the accept thread");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// The anti-symmetry theorem, the whole reason this rule cannot loop: for ANY pair of builds, at

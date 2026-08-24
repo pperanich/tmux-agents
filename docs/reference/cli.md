@@ -672,6 +672,14 @@ The daemon is stopped with SIGTERM and never escalated to SIGKILL: it reaps its
 `tmux -C` control clients only on a clean exit, so a killed daemon would leave one
 behind per monitored session. A daemon that will not take SIGTERM is reported
 rather than killed, and `--restart` exits nonzero without starting a replacement.
+That report is not "nothing changed": the SIGTERM has been delivered and stands,
+so the daemon exits as soon as it unwedges. Start one again with `--ensure` once
+it has gone (with the default `autostart = false`, nothing else will).
+
+`--restart` also exits nonzero when the replacement was spawned but never
+answered on the socket, which means it failed to come up — the usual cause is
+something occupying the socket path. The bind happens before the daemon's
+control-mode probe, so a slow start is not mistaken for a failed one.
 
 ## `tma reload`
 

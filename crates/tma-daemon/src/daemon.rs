@@ -85,6 +85,11 @@ pub struct DaemonOpts {
     /// INTERNAL/TEST: the build version this daemon stamps into its lock file, instead of its own.
     /// Changes nothing else, so the upgrade-restart guard is exercisable end to end from one build.
     pub fake_version: Option<String>,
+    /// INTERNAL/TEST: milliseconds to hold the single-instance lock after unlinking the socket at
+    /// shutdown. Widens a gap that is always there so `ipc::stop_daemon_at`'s lock-free half of the
+    /// stop condition is observable. Deliberately NOT forwarded to a spawned daemon: the delay
+    /// belongs to the instance a test starts by hand, never to its replacement.
+    pub shutdown_delay_ms: Option<u64>,
 }
 
 /// Dispatch `tma daemon`. `--ensure` is the idempotent launcher; without it we run the
