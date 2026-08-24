@@ -22,7 +22,7 @@ This puts a `tma` binary on your `PATH` (in `~/.cargo/bin`). Check it:
 
 ```
 $ tma --version
-tma 0.4.4
+tma 0.4.5
 ```
 
 If you would rather install from the Nix flake or the Home Manager module, take
