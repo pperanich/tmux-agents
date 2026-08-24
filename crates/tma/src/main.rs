@@ -30,6 +30,7 @@ use tma_runtime::{config, cycle, debug, event, json, manifests};
 use tma_ui::{jump, picker, surfaces, watch};
 
 use cli::{Cli, Command};
+use cli_support::{DaemonLauncher, DaemonMode};
 use debug_cmd::run_debug;
 use dispatch::{
     run_clear_attention, run_dashboard_cmd, run_jump_cmd, run_ls, run_reload, run_status,
@@ -67,11 +68,12 @@ fn main() -> ExitCode {
     // result is discarded so a failed launch never fails or delays the command (the daemon is
     // strictly additive); `autostart_eligible` excludes `event` and the management/diagnostic verbs.
     if config.daemon.autostart && autostart_eligible(&cli.command) {
-        let _ = ensure_daemon(
+        let _ = run_daemon_verb(
             &config,
             server.clone(),
             manifest_dir.clone(),
             cli.config.clone(),
+            DaemonMode::Ensure,
         );
     }
     match cli.command {
@@ -186,6 +188,7 @@ fn main() -> ExitCode {
         }),
         Some(Command::Daemon(args)) => tma_daemon::run_cli(tma_daemon::DaemonOpts {
             ensure: args.ensure,
+            restart: args.restart,
             server: server.clone(),
             manifest_dir,
             config_path: cli.config,
@@ -195,48 +198,65 @@ fn main() -> ExitCode {
             sweep_ms: args.sweep_ms,
             detach_stage2: args.detach_stage2,
             detach_session: args.detach_session,
+            fake_version: args.fake_version,
         }),
-        Some(Command::Init(args)) => init::run(init::InitOpts {
-            assume_yes: args.yes,
-            daemon: args.daemon,
-            no_daemon: args.no_daemon,
-            config_dir: args.config_dir,
-            conf: args.conf,
-            server: server.clone(),
-            manifest_dir,
-            config_path: cli.config,
-            config,
-            ensure_daemon,
-        }),
-        Some(Command::InstallHooks(args)) => install::run(install::InstallOpts {
-            statusline: match (args.statusline, args.no_statusline) {
-                (true, _) => install::Statusline::Install,
-                (_, true) => install::Statusline::Remove,
-                _ => install::Statusline::Keep,
-            },
-            agent: args.agent,
-            all: args.all,
-            uninstall: args.uninstall,
-            check: args.check,
-            assume_yes: args.yes,
-            server: server.clone(),
-            manifest_dir,
-            settings: args.settings,
-            gemini_settings: args.gemini_settings,
-            config_dir: args.config_dir,
-            wrapper_path: args.wrapper_path,
-            wrapper_ref: args
-                .wrapper_ref
-                .map_or(config.install.wrapper_ref, Into::into),
-            opencode_plugin: args.opencode_plugin,
-            codex_config: args.codex_config,
-            codex_hooks: args.codex_hooks,
-            cursor_hooks: args.cursor_hooks,
-            cursor_cli_config: args.cursor_cli_config,
-            pi_extension: args.pi_extension,
-            focus_events: config.focus.events,
-            agents: config.agent_overrides,
-        }),
+        Some(Command::Init(args)) => {
+            let launch_daemon = daemon_launcher(
+                &config,
+                server.clone(),
+                manifest_dir.clone(),
+                cli.config.clone(),
+            );
+            init::run(init::InitOpts {
+                assume_yes: args.yes,
+                daemon: args.daemon,
+                no_daemon: args.no_daemon,
+                config_dir: args.config_dir,
+                conf: args.conf,
+                server: server.clone(),
+                manifest_dir,
+                config,
+                launch_daemon,
+            })
+        }
+        Some(Command::InstallHooks(args)) => {
+            let launch_daemon = daemon_launcher(
+                &config,
+                server.clone(),
+                manifest_dir.clone(),
+                cli.config.clone(),
+            );
+            install::run(install::InstallOpts {
+                statusline: match (args.statusline, args.no_statusline) {
+                    (true, _) => install::Statusline::Install,
+                    (_, true) => install::Statusline::Remove,
+                    _ => install::Statusline::Keep,
+                },
+                agent: args.agent,
+                all: args.all,
+                uninstall: args.uninstall,
+                check: args.check,
+                assume_yes: args.yes,
+                server: server.clone(),
+                manifest_dir,
+                settings: args.settings,
+                gemini_settings: args.gemini_settings,
+                config_dir: args.config_dir,
+                wrapper_path: args.wrapper_path,
+                wrapper_ref: args
+                    .wrapper_ref
+                    .map_or(config.install.wrapper_ref, Into::into),
+                opencode_plugin: args.opencode_plugin,
+                codex_config: args.codex_config,
+                codex_hooks: args.codex_hooks,
+                cursor_hooks: args.cursor_hooks,
+                cursor_cli_config: args.cursor_cli_config,
+                pi_extension: args.pi_extension,
+                focus_events: config.focus.events,
+                agents: config.agent_overrides,
+                launch_daemon: Some(launch_daemon),
+            })
+        }
         Some(Command::InstallKeys(args)) => install_keys::run(install_keys::InstallKeysOpts {
             uninstall: args.uninstall,
             check: args.check,
@@ -324,19 +344,21 @@ fn autostart_eligible(command: &Option<Command>) -> bool {
     )
 }
 
-/// Run the idempotent `tma daemon --ensure` spawn, reusing the one launcher the `Daemon` arm
-/// dispatches so it cannot diverge from a manual `tma daemon --ensure`. Auto-start discards the
-/// exit code (a spawn failure must never reach the surface); `tma init --daemon` asked for the
-/// daemon explicitly, so it reads it. The detached daemon re-reads config from `config_path`; the
-/// cloned `config` only feeds the foreground loader the ensure branch skips.
-fn ensure_daemon(
+/// Run one of the daemon management verbs, reusing the one launcher the `Daemon` arm dispatches so
+/// a chained step cannot diverge from the same command typed by hand. Auto-start discards the exit
+/// code (a spawn failure must never reach the surface); `tma init --daemon` and the restart offers
+/// asked for the daemon explicitly, so they read it. The detached daemon re-reads config from
+/// `config_path`; the cloned `config` only feeds the foreground loader these branches skip.
+fn run_daemon_verb(
     config: &config::Config,
     server: tmux::Server,
     manifest_dir: Option<PathBuf>,
     config_path: Option<PathBuf>,
+    mode: DaemonMode,
 ) -> ExitCode {
     tma_daemon::run_cli(tma_daemon::DaemonOpts {
-        ensure: true,
+        ensure: mode == DaemonMode::Ensure,
+        restart: mode == DaemonMode::Restart,
         server,
         manifest_dir,
         config_path,
@@ -346,6 +368,28 @@ fn ensure_daemon(
         sweep_ms: None,
         detach_stage2: false,
         detach_session: false,
+        fake_version: None,
+    })
+}
+
+/// The [`DaemonLauncher`] handed to the chained steps (`init`, `install-hooks`), with the target
+/// and config already bound. A closure rather than a fn pointer so those modules carry no daemon
+/// plumbing at all: tier 3 is reachable only from this file (tests/tier_boundary.rs).
+fn daemon_launcher(
+    config: &config::Config,
+    server: tmux::Server,
+    manifest_dir: Option<PathBuf>,
+    config_path: Option<PathBuf>,
+) -> DaemonLauncher {
+    let config = config.clone();
+    Box::new(move |mode| {
+        run_daemon_verb(
+            &config,
+            server.clone(),
+            manifest_dir.clone(),
+            config_path.clone(),
+            mode,
+        )
     })
 }
 

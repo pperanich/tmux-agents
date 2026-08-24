@@ -707,6 +707,10 @@ fn gate(r: &Report) -> (usize, usize) {
     warnings += usize::from(r.process_walk_error.is_some());
     // A detached server only matters while nothing else keeps state fresh.
     warnings += usize::from(r.attached_clients == 0 && !r.daemon_alive);
+    // A resident daemon of another build IS a misconfiguration, not a posture fact: it maps events
+    // with the code and manifests it started with, and an event it maps to the old verdict is ACKed,
+    // so the firing hook skips its own stamp. No amount of reloading fixes it.
+    warnings += usize::from(daemon_version_matches(r.daemon_version.as_deref()) == Some(false));
     warnings += usize::from(!r.status_enabled);
     // Installed mouse bindings that no click can ever reach.
     warnings += usize::from(r.mouse_bindings && !r.mouse_enabled);
@@ -1169,8 +1173,8 @@ mod tests {
             "the skew is named: {text}"
         );
         assert!(
-            text.contains("tma daemon --ensure"),
-            "and says how to pick up the new build: {text}"
+            text.contains("tma daemon --restart"),
+            "and names the verb that picks up the new build, not a two-step improvisation: {text}"
         );
 
         // Matching build, and an old lock file with no version: no warning either way.
@@ -1178,5 +1182,23 @@ mod tests {
         assert!(!render_text(&report).contains("differs from this CLI"));
         report.daemon_version = None;
         assert!(!render_text(&report).contains("differs from this CLI"));
+    }
+
+    /// The skew gates red. A daemon carrying older detection code does not merely cost latency: an
+    /// event it maps to the OLD verdict is ACKed, so the firing hook skips its own stamp and the
+    /// transition is wrong rather than late. That has to reach a CI gate.
+    #[test]
+    fn a_daemon_of_another_build_gates_red() {
+        let mut r = clean_report();
+        r.daemon_alive = true;
+        r.daemon_version = Some(ipc::VERSION.to_string());
+        assert_eq!(gate(&r).0, 0, "a matching build is not a finding");
+
+        r.daemon_version = Some("0.0.1".to_string());
+        assert_eq!(gate(&r).0, 1, "the skew is one warning");
+
+        // A lock file predating version recording has nothing to compare, so it stays green.
+        r.daemon_version = None;
+        assert_eq!(gate(&r).0, 0);
     }
 }

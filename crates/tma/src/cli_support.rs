@@ -1,5 +1,6 @@
-//! Shared bin plumbing: the "no tmux server" error and the load-manifests-or-exit shape, each
-//! reused verbatim across the surface subcommands so their message + exit code cannot drift.
+//! Shared bin plumbing: the "no tmux server" error, the load-manifests-or-exit shape, and the
+//! daemon-management seam the chained setup steps share, each reused verbatim across the
+//! subcommands so their message + exit code cannot drift.
 
 use std::path::Path;
 use std::process::ExitCode;
@@ -104,4 +105,65 @@ pub(crate) fn warn_manifest_failures(failures: &[ManifestFailure]) {
     for f in failures {
         eprintln!("tma: skipping manifest {}: {}", f.path.display(), f.error);
     }
+}
+
+// --- the daemon-management seam ---------------------------------------------------
+
+/// Which daemon verb a chained step is asking `main` to run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DaemonMode {
+    /// `tma daemon --ensure`: start one if none is running.
+    Ensure,
+    /// `tma daemon --restart`: replace whatever is running with this build.
+    Restart,
+}
+
+/// The daemon launcher `main` injects into the chained setup steps (`init`, `install-hooks`), with
+/// the target server and config already bound. Tier 3 is reachable only from the `tma daemon`
+/// dispatch site (tests/tier_boundary.rs), so a step that needs a daemon started calls this
+/// instead of naming the daemon crate.
+pub(crate) type DaemonLauncher = Box<dyn Fn(DaemonMode) -> ExitCode>;
+
+/// Offer to replace a resident daemon whose build differs from this binary's, under the same
+/// diff-and-confirm discipline as the config writes around it: say what is there, what it costs,
+/// and change nothing without a `y` (or `--yes`).
+///
+/// A resident daemon keeps the detection code it started with, so hooks that were just wired or
+/// rewired reach whatever build is already resident — which is why the two steps that rewire them
+/// are where this is offered. Silent when there is no server, no daemon, a matching build, or a
+/// lock file predating version recording (nothing to compare).
+///
+/// Returns `false` only when a CONFIRMED restart failed. Declining is not a failure: everything the
+/// caller wrote is already in place, and the daemon is strictly additive.
+pub(crate) fn offer_daemon_restart(
+    tmux: &tma_tmux::tmux::Tmux,
+    assume_yes: bool,
+    launch: &DaemonLauncher,
+) -> bool {
+    use tma_runtime::ipc;
+    let Some(status) = ipc::daemon_status(tmux) else {
+        return true; // no server ⇒ no daemon to speak of
+    };
+    // `DaemonStatus` reports a version only for a daemon that answered, so this is both gates.
+    let Some(running) = status.version.as_deref() else {
+        return true; // nothing running, or a lock file that records no version
+    };
+    if running == ipc::VERSION {
+        return true;
+    }
+    let mine = ipc::VERSION;
+    println!(
+        "\ntma: the daemon running for this server is build {running}, but this is {mine}. A \
+         daemon keeps the\n     detection code it started with, so it will not pick up this build \
+         (`tma reload` re-reads\n     config and manifests, not the binary)."
+    );
+    println!(
+        "     Proposed: stop that daemon and start {mine} in its place. Nothing is lost while it \
+         is\n     down — a hook that cannot reach a daemon stamps the pane itself."
+    );
+    if !assume_yes && !crate::install::confirm() {
+        println!("tma: left the running daemon alone; `tma daemon --restart` when you are ready");
+        return true;
+    }
+    matches!(launch(DaemonMode::Restart), ExitCode::SUCCESS)
 }

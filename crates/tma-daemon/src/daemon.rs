@@ -1,7 +1,8 @@
 //! The event-hub daemon: socket, single-instance lock, wire protocol, control-mode client pool,
 //! on-demand capture, and notification dispatch. Strictly additive: with none running `tma event`
 //! direct-stamps and every one-shot works unchanged. `tma daemon` runs the loop; `--ensure` is the
-//! idempotent launcher. Socket + lock are keyed by a hash of the server's `#{socket_path}`, which
+//! idempotent launcher and `--restart` puts THIS build in a resident daemon's place (the opt-in
+//! `[daemon] restart_on_upgrade` does that automatically, but only ever from a strictly newer build). Socket + lock are keyed by a hash of the server's `#{socket_path}`, which
 //! `tma event` recomputes identically, so two servers never share a daemon; an `flock` enforces
 //! single-instance. Events apply through the *same* guarded-stamp adapter the direct path uses; a
 //! same-`#{socket_path}` restart is caught by a startup-`#{pid}` recheck and exits rather than
@@ -28,7 +29,7 @@ mod serve;
 mod subscribers;
 mod sys;
 
-use lifecycle::{ensure_running, run_foreground, run_intermediate};
+use lifecycle::{ensure_running, restart_running, run_foreground, run_intermediate};
 use sys::ensure_dir;
 
 /// Report the user manifests the load skipped. The daemon's log is its stderr (the detached stages
@@ -54,6 +55,10 @@ enum SignalAction {
 pub struct DaemonOpts {
     /// `true` for `--ensure`: spawn a detached daemon if none is running, then exit 0.
     pub ensure: bool,
+    /// `true` for `--restart`: stop the daemon running for this server (if any) and start one from
+    /// THIS binary. Unconditional in both directions — a deliberate downgrade is a restart from the
+    /// older binary. Mutually exclusive with [`Self::ensure`] (clap rejects the pair).
+    pub restart: bool,
     pub server: tma_tmux::tmux::Server,
     pub manifest_dir: Option<PathBuf>,
     /// The loaded config, used by the foreground loop for the fold + daemon knobs + notify command
@@ -75,6 +80,9 @@ pub struct DaemonOpts {
     /// INTERNAL: the detached daemon (hidden `--detach-session`, set only by the intermediate stage).
     /// Triggers a startup `setsid`; a foreground/service-managed `tma daemon` leaves this false.
     pub detach_session: bool,
+    /// INTERNAL/TEST: the build version this daemon stamps into its lock file, instead of its own.
+    /// Changes nothing else, so the upgrade-restart guard is exercisable end to end from one build.
+    pub fake_version: Option<String>,
 }
 
 /// Dispatch `tma daemon`. `--ensure` is the idempotent launcher; without it we run the
@@ -99,7 +107,9 @@ pub fn run_cli(opts: DaemonOpts) -> ExitCode {
         return ExitCode::FAILURE;
     }
 
-    if opts.ensure {
+    if opts.restart {
+        restart_running(&paths, &opts)
+    } else if opts.ensure {
         ensure_running(&paths, &opts)
     } else {
         run_foreground(&tmux, &paths, opts)

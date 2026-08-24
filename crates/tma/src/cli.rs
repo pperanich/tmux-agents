@@ -293,13 +293,19 @@ pub(crate) struct InstallKeysArgs {
     pub(crate) config_dir: Option<PathBuf>,
 }
 
-/// Args for `tma daemon [--ensure]`. The target server comes from the global
+/// Args for `tma daemon [--ensure|--restart]`. The target server comes from the global
 /// `--socket-name`; `--manifest-dir` is forwarded to a spawned daemon for test isolation.
 #[derive(clap::Args)]
 pub(crate) struct DaemonCmdArgs {
     /// Spawn a detached daemon if none is running for this server, then exit 0 (idempotent).
     #[arg(long)]
     pub(crate) ensure: bool,
+    /// Stop the daemon running for this server and start one from THIS binary — how an upgraded
+    /// `tma` takes effect, since a resident daemon keeps the code it started with and `tma reload`
+    /// only re-reads config and manifests. Works in both directions: run it from the older binary
+    /// to go back. Starts one if none was running.
+    #[arg(long, conflicts_with = "ensure")]
+    pub(crate) restart: bool,
     /// INTERNAL/TEST: write the control-pool introspection status (membership, `-F` probe
     /// verdict, sweep interval, edge + recovery counts) to this file. No effect on behavior.
     #[arg(long, hide = true, value_name = "PATH")]
@@ -318,6 +324,10 @@ pub(crate) struct DaemonCmdArgs {
     /// INTERNAL: detached daemon (intermediate-set). Triggers the startup `setsid`.
     #[arg(long = "detach-session", hide = true)]
     pub(crate) detach_session: bool,
+    /// INTERNAL/TEST: stamp this build version into the lock file instead of this binary's own, so
+    /// the upgrade-restart guard is exercisable end to end from a single build. Nothing else reads it.
+    #[arg(long = "fake-version", hide = true, value_name = "VERSION")]
+    pub(crate) fake_version: Option<String>,
 }
 
 /// Args for the internal `tma clear-attention <pane>` command.

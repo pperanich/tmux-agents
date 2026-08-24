@@ -3,17 +3,24 @@
 
 use std::io::Write;
 use std::os::unix::net::UnixListener;
+use std::path::Path;
 use std::process::ExitCode;
+use std::time::{Duration, Instant};
 
 use rustix::io::Errno;
 
-use tma_runtime::ipc::{self, Paths};
+use tma_runtime::ipc::{self, Paths, RestartDecision, StopOutcome};
 use tma_runtime::manifests;
 use tma_tmux::tmux::Tmux;
 
 use super::serve::serve;
 use super::sys::{cleanup, flock_nb, install_signal_pipe, set_mode_0600};
 use super::{log_manifest_failures, DaemonOpts};
+
+/// How long the restart paths wait for a freshly spawned daemon to answer before saying so. The
+/// spawn is otherwise fire-and-forget, but a verb called "restart" that reports success while
+/// nothing is listening is a lie the user has no way to check.
+const UP_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// `--ensure`: if a daemon already holds the lock, no-op; else spawn a detached daemon. The child
 /// re-acquires the lock (the authoritative guard); this probe only avoids a doomed spawn when running.
@@ -35,12 +42,91 @@ pub(super) fn ensure_running(paths: &Paths, opts: &DaemonOpts) -> ExitCode {
                     eprintln!("tma: failed to spawn the detached daemon");
                     return ExitCode::FAILURE;
                 }
+            } else if opts.config.daemon.restart_on_upgrade {
+                // A daemon holds the lock. Opt-in only: replace it if this build is strictly newer.
+                drop(lock);
+                evict_older(paths, opts);
             }
             // else: lock held ⇒ a daemon is already up ⇒ idempotent no-op.
             ExitCode::SUCCESS
         }
         // Best-effort launcher: an unwritable lock path is not worth failing a hook over.
         Err(_) => ExitCode::SUCCESS,
+    }
+}
+
+/// `[daemon] restart_on_upgrade`: on the branch where a daemon already holds the lock, replace it if
+/// and only if this build is STRICTLY NEWER than the one it recorded. The whole rule (and the
+/// reasoning behind its asymmetry) lives in [`ipc::restart_decision`]; this is the effecting half.
+///
+/// Best-effort and silent when it declines: `--ensure` runs on every hook and, with autostart on,
+/// before every surface, so it must stay a no-op that costs one lock read.
+fn evict_older(paths: &Paths, opts: &DaemonOpts) {
+    let RestartDecision::Evict { pid } =
+        ipc::upgrade_restart_decision(paths, ipc::VERSION, tma_runtime::now_ms())
+    else {
+        return;
+    };
+    // Recorded before the signal: an eviction that fails to bring a daemon back still counts
+    // against the cooldown, which is exactly the case the cooldown exists for.
+    ipc::note_restart(paths, tma_runtime::now_ms());
+    match ipc::stop_daemon_at(paths) {
+        StopOutcome::Failed(err) => {
+            eprintln!("tma: cannot replace the older daemon (pid {pid}): {err}");
+        }
+        // Stopped, or it had already gone on its own; either way nothing holds this server now.
+        // (`stop_daemon_at` cannot report NoServer — the paths ARE the server.)
+        _ => {
+            if !spawn_detached(opts) {
+                eprintln!("tma: stopped the older daemon but could not spawn its replacement");
+            }
+        }
+    }
+}
+
+/// `--restart`: stop whatever daemon this server has and bring THIS build up in its place.
+///
+/// Unconditional and direction-free, unlike the automatic path: an older binary being asked to
+/// restart obviously wants the older daemon, which is how a deliberate downgrade is served. Not
+/// starting one at all would be a second verb for a job `--ensure` already does, so a restart with
+/// nothing running just starts one.
+pub(super) fn restart_running(paths: &Paths, opts: &DaemonOpts) -> ExitCode {
+    match ipc::stop_daemon_at(paths) {
+        StopOutcome::Failed(err) => {
+            eprintln!("tma: cannot stop the running daemon: {err}");
+            return ExitCode::FAILURE;
+        }
+        StopOutcome::NotRunning => println!("tma: no daemon was running for this server"),
+        // Stopped. (`stop_daemon_at` cannot report NoServer — the paths ARE the server.)
+        _ => println!("tma: stopped the running daemon"),
+    }
+    if !spawn_detached(opts) {
+        eprintln!("tma: failed to spawn the detached daemon");
+        return ExitCode::FAILURE;
+    }
+    if await_daemon_up(paths) {
+        println!("tma: daemon restarted ({})", ipc::VERSION);
+        ExitCode::SUCCESS
+    } else {
+        // The socket binds within tens of milliseconds; the control-mode behaviour probe that runs
+        // before the accept loop can take a couple of seconds more. Not answering yet is worth
+        // saying, but it is not a failed restart.
+        eprintln!("tma: the daemon was launched but has not answered on its socket yet");
+        ExitCode::SUCCESS
+    }
+}
+
+/// Wait out [`UP_TIMEOUT`] for a daemon to start answering on this server's socket.
+fn await_daemon_up(paths: &Paths) -> bool {
+    let deadline = Instant::now() + UP_TIMEOUT;
+    loop {
+        if ipc::daemon_answers(paths) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
     }
 }
 
@@ -66,6 +152,9 @@ fn build_daemon_command(opts: &DaemonOpts) -> Option<std::process::Command> {
     }
     if let Some(path) = &opts.config_path {
         cmd.arg("--config").arg(path);
+    }
+    if let Some(version) = &opts.fake_version {
+        cmd.arg("--fake-version").arg(version);
     }
     Some(cmd)
 }
@@ -128,26 +217,22 @@ pub(super) fn run_foreground(tmux: &Tmux, paths: &Paths, opts: DaemonOpts) -> Ex
     let sweep_ms = opts.sweep_ms;
     // Single-instance lock. Held for the process's life; released automatically on exit
     // or crash, so a stale lock is always reclaimable.
-    let lock = match std::fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .write(true)
-        .open(&paths.lock)
-    {
-        Ok(f) => f,
+    let lock = match claim_lock(&paths.lock) {
+        Ok(Some(f)) => f,
+        Ok(None) => {
+            // Another daemon owns this server. Not an error: exit cleanly (matches `--ensure`).
+            eprintln!("tma: daemon already running for this server");
+            return ExitCode::SUCCESS;
+        }
         Err(err) => {
             eprintln!("tma: cannot open daemon lock: {err}");
             return ExitCode::FAILURE;
         }
     };
-    if !flock_nb(&lock) {
-        // Another daemon owns this server. Not an error: exit cleanly (matches `--ensure`).
-        eprintln!("tma: daemon already running for this server");
-        return ExitCode::SUCCESS;
-    }
-    // Record our pid in the flock-held lock file so `tma reload` (`ipc::reload_daemon`) can find
-    // this daemon to send it SIGHUP. Best-effort: reload degrades to a message if unreadable.
-    write_pid(&lock);
+    // Record our pid and build in the flock-held lock file so `tma reload` (`ipc::reload_daemon`)
+    // can find this daemon to signal it and the upgrade check can rank it. Best-effort: both
+    // degrade to a message if unreadable.
+    write_pid(&lock, opts.fake_version.as_deref().unwrap_or(ipc::VERSION));
 
     let config = opts.config;
     let manifests = match manifests::load(manifest_dir.as_deref(), &config.agent_overrides) {
@@ -208,11 +293,116 @@ pub(super) fn run_foreground(tmux: &Tmux, paths: &Paths, opts: DaemonOpts) -> Ex
     ExitCode::SUCCESS
 }
 
-/// Record the daemon's pid and build version in the flock-held lock file: the pid so `tma reload`
-/// can find it to send SIGHUP, the version so `tma doctor` can spot a resident daemon older than the
-/// CLI talking to it. Best-effort; truncates first so a shorter body never leaves stale bytes.
-fn write_pid(lock: &std::fs::File) {
+/// Open the per-server lock and take the single-instance flock, emptying the file the instant it is
+/// ours. `Ok(None)` when another daemon holds it.
+///
+/// The truncation is not tidiness, it is the correctness half. A lock file keeps its body after the
+/// daemon that wrote it exits — only the flock is released — so between taking the lock and
+/// stamping our own pid the file still describes our PREDECESSOR. A reader that finds the lock held
+/// and reads that body sees a stale version belonging to a dead (possibly recycled) pid, and the
+/// upgrade check would act on it: evicting a brand-new, correct daemon, or signalling whatever now
+/// owns that pid. Truncating here makes the window read as EMPTY instead, which every reader
+/// already treats as "unknown, do nothing". Nothing may write to the lock between here and
+/// [`write_pid`].
+fn claim_lock(path: &Path) -> std::io::Result<Option<std::fs::File>> {
+    let lock = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)?;
+    if !flock_nb(&lock) {
+        return Ok(None);
+    }
     let _ = lock.set_len(0);
-    let body = ipc::render_lock(std::process::id(), ipc::VERSION);
+    Ok(Some(lock))
+}
+
+/// Record the daemon's pid and build `version` in the flock-held lock file: the pid so `tma reload`
+/// can find it to send a signal, the version so `tma doctor` and the upgrade check can tell a
+/// resident daemon from the CLI talking to it. Best-effort. Writes from offset 0 into the file
+/// [`claim_lock`] just emptied, which is the only state it is ever called in.
+fn write_pid(lock: &std::fs::File, version: &str) {
+    let body = ipc::render_lock(std::process::id(), version);
     let _ = (&mut &*lock).write_all(body.as_bytes());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scratch_lock(tag: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "tma_lifecycle_{tag}_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("server.lock")
+    }
+
+    /// The window the upgrade check would otherwise act on: a lock file still describing the
+    /// PREVIOUS daemon while a new, correct one already holds the flock. Taking the lock must empty
+    /// it, so a reader in that window parses nothing (⇒ unknown ⇒ leave the daemon alone) rather
+    /// than a version that is a lie about a dead pid.
+    #[test]
+    fn taking_the_lock_empties_the_previous_daemons_body() {
+        let path = scratch_lock("claim");
+        // A dead predecessor's leftovers: the body survives its exit, only the flock is released.
+        std::fs::write(&path, ipc::render_lock(4242, "0.0.1")).unwrap();
+        assert!(ipc::parse_lock(&std::fs::read_to_string(&path).unwrap()).is_some());
+
+        let lock = claim_lock(&path).expect("open the lock").expect("take it");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            "",
+            "the body must be gone the instant the flock is ours, before any pid is stamped"
+        );
+        assert!(
+            ipc::parse_lock(&std::fs::read_to_string(&path).unwrap()).is_none(),
+            "and an empty body reads as no lock info at all"
+        );
+
+        // The stamp then lands at offset 0: exactly the body, with nothing of the predecessor left.
+        write_pid(&lock, "9.9.9");
+        let body = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(body, ipc::render_lock(std::process::id(), "9.9.9"));
+        let info = ipc::parse_lock(&body).expect("the stamped body parses");
+        assert_eq!(info.pid, std::process::id() as i32);
+        assert_eq!(info.version.as_deref(), Some("9.9.9"));
+
+        // Release the flock BEFORE unlinking: a lock held on a deleted inode outlives the file.
+        drop(lock);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    /// A second claim while the first is held declines instead of truncating: the running daemon's
+    /// recorded pid must survive a would-be duplicate's attempt to start.
+    #[test]
+    fn a_second_claim_declines_and_leaves_the_body_alone() {
+        let path = scratch_lock("dup");
+        let held = claim_lock(&path).expect("open").expect("take");
+        write_pid(&held, "1.2.3");
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        assert!(
+            claim_lock(&path).expect("open").is_none(),
+            "the flock is held, so the second daemon must decline"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            before,
+            "a declined claim must not empty the running daemon's body"
+        );
+
+        // Reclaim-after-release is deliberately NOT asserted here. Measured on macOS: an flock
+        // released by closing the fd is not always visible as free to an immediate re-lock in the
+        // same process — a retry microseconds later succeeds. That is why `ipc::stop_daemon_at`
+        // waits for the lock in a bounded poll rather than probing once. `single_instance_flock`
+        // covers reclaim across processes, which is the case that actually matters.
+        drop(held);
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
 }

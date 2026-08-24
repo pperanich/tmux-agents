@@ -190,6 +190,56 @@ fn run_ensure(s: &Scratch) -> bool {
         .success()
 }
 
+/// Run `tma daemon --ensure` against an explicit config file (the `restart_on_upgrade` opt-in).
+fn run_ensure_with(s: &Scratch, config: &Path) -> bool {
+    s.command()
+        .args(["daemon", "--ensure", "--socket-name", &s.socket])
+        .args(["--config", config.to_str().expect("utf-8 config path")])
+        .output()
+        .expect("run --ensure")
+        .status
+        .success()
+}
+
+/// Run `tma daemon --restart` and return its whole output (the reported lines separate "stopped one"
+/// from "there was none", which the exit status cannot).
+fn run_restart(s: &Scratch) -> std::process::Output {
+    s.command()
+        .args(["daemon", "--restart", "--socket-name", &s.socket])
+        .output()
+        .expect("run --restart")
+}
+
+/// The build version the lock file currently records, `None` when there is no lock, no parsable
+/// body, or a body predating version recording.
+fn lock_version(s: &Scratch) -> Option<String> {
+    let body = std::fs::read_to_string(lock_file(s)?).ok()?;
+    parse_lock(&body)?.version
+}
+
+/// Poll the lock file until it records `want`. Returns false on timeout, so a caller reports which
+/// version it never saw rather than hanging.
+fn wait_lock_version(s: &Scratch, want: &str, timeout: Duration) -> bool {
+    let deadline = Instant::now() + timeout;
+    loop {
+        if lock_version(s).as_deref() == Some(want) {
+            return true;
+        }
+        if Instant::now() >= deadline {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// SIGTERM a daemon this test does not own as a `Child` (one a restart spawned detached), so it
+/// tears its control clients down cleanly rather than leaking one per session.
+fn terminate(pid: u32) {
+    if let Some(p) = rustix::process::Pid::from_raw(pid as i32) {
+        let _ = rustix::process::kill_process(p, rustix::process::Signal::TERM);
+    }
+}
+
 /// Run `tma reload` and return its whole output. The exit status alone cannot separate the two
 /// success outcomes — `Signaled` and `NotRunning` both exit 0 — so the caller reads the reported
 /// line as well: `Signaled` on stdout, `NotRunning` on stderr.
@@ -1041,4 +1091,328 @@ fn silent_connection_does_not_delay_a_hook_event() {
 
     // Keep the silent clients alive until here so they were genuinely pending during the event.
     drop(silent);
+}
+
+// ---- the upgrade restart: the explicit verb, and the opt-in automatic one ----------------
+//
+// Every daemon below records its build in the lock file (`write_pid`). The hidden
+// `--fake-version` flag changes ONLY what it stamps there, so one `cargo test` build can play both
+// sides of a version skew — an old resident daemon and a new binary, or the reverse — without
+// installing two tma binaries.
+
+/// The explicit verb: `--restart` replaces whatever is resident with THIS build, and waits until
+/// the replacement answers before saying so.
+#[test]
+fn restart_replaces_a_resident_daemon_of_another_build() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+
+    let mut old = spawn_daemon_args(&s, &["--fake-version", "0.0.1"]);
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    let old_pid =
+        daemon_pid(&s, common::POLL_CEILING).expect("the resident daemon records its pid");
+    assert!(wait_lock_version(&s, "0.0.1", common::POLL_CEILING));
+
+    let out = run_restart(&s);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "restart failed: {stdout}");
+    assert!(
+        stdout.contains("stopped the running daemon") && stdout.contains("daemon restarted"),
+        "restart reports both halves, and only after the replacement answered: {stdout}"
+    );
+
+    assert!(
+        old.wait_exit(common::POLL_CEILING),
+        "the resident daemon must be gone, not merely unreachable"
+    );
+    assert!(
+        wait_lock_version(&s, VERSION, common::POLL_CEILING),
+        "the replacement stamps this build over the old body"
+    );
+    let new_pid = daemon_pid(&s, common::POLL_CEILING).expect("the replacement records its pid");
+    assert_ne!(new_pid, old_pid, "a different process is serving now");
+    terminate(new_pid);
+}
+
+/// A restart with nothing running is a start, not an error: a second verb for the job `--ensure`
+/// already does would be the only alternative.
+#[test]
+fn restart_starts_a_daemon_when_none_was_running() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+
+    let out = run_restart(&s);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "restart failed: {stdout}");
+    assert!(
+        stdout.contains("no daemon was running"),
+        "it says there was nothing to stop: {stdout}"
+    );
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    let pid = daemon_pid(&s, common::POLL_CEILING).expect("the started daemon records its pid");
+    terminate(pid);
+}
+
+/// `--ensure` and `--restart` say two different things about a running daemon, so asking for both
+/// is a usage error (clap, exit 2) rather than a silent precedence rule.
+#[test]
+fn ensure_and_restart_together_are_a_usage_error() {
+    let out = Command::new(common::tma_bin())
+        .args(["daemon", "--ensure", "--restart"])
+        .output()
+        .expect("run tma daemon");
+    assert_eq!(
+        out.status.code(),
+        Some(2),
+        "clap must reject the pair before anything is signalled"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("--restart") && stderr.contains("--ensure"),
+        "the error names both flags: {stderr}"
+    );
+}
+
+/// THE LOOP GUARD, end to end. A newer build evicts an older resident daemon **exactly once**, and
+/// every later `--ensure` is a no-op.
+///
+/// The failure this pins is not hypothetical: with `autostart` on, a status-line driver runs
+/// `--ensure` about once a second, so a rule that could fire twice would churn a real tmux probe
+/// session and drop every control client at that cadence. The rule that makes it impossible is
+/// `ipc::restart_decision`'s strict "newer evicts older" — proved anti-symmetric by property test;
+/// this is the same rule observed against real processes.
+#[test]
+fn an_upgrade_restart_fires_once_and_then_leaves_the_daemon_alone() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+    let cfg = s.workdir.join("restart-on-upgrade.toml");
+    std::fs::write(&cfg, "[daemon]\nrestart_on_upgrade = true\n").unwrap();
+
+    let mut old = spawn_daemon_args(&s, &["--fake-version", "0.0.1"]);
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    let old_pid = daemon_pid(&s, common::POLL_CEILING).expect("the old daemon records its pid");
+    assert!(wait_lock_version(&s, "0.0.1", common::POLL_CEILING));
+
+    // Control: the automatic restart is opt-in, so a plain `--ensure` leaves the old build serving.
+    assert!(run_ensure(&s));
+    std::thread::sleep(Duration::from_millis(300));
+    assert_eq!(
+        daemon_pid(&s, Duration::from_secs(1)),
+        Some(old_pid),
+        "without `restart_on_upgrade` a skewed daemon is never replaced under you"
+    );
+    assert_eq!(lock_version(&s).as_deref(), Some("0.0.1"));
+
+    // Opted in: one restart.
+    assert!(run_ensure_with(&s, &cfg));
+    assert!(
+        wait_lock_version(&s, VERSION, common::POLL_CEILING),
+        "the newer build replaced the older daemon"
+    );
+    let new_pid = daemon_pid(&s, common::POLL_CEILING).expect("the replacement records its pid");
+    assert_ne!(new_pid, old_pid);
+    assert!(
+        old.wait_exit(common::POLL_CEILING),
+        "the evicted daemon exited rather than lingering"
+    );
+
+    // Quiescence: the versions now match, so nothing further happens however often it is checked.
+    for lap in 0..6 {
+        assert!(run_ensure_with(&s, &cfg), "lap {lap}");
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            daemon_pid(&s, Duration::from_secs(1)),
+            Some(new_pid),
+            "lap {lap}: the same daemon must still be serving; a restart here is the loop"
+        );
+    }
+    assert_eq!(lock_version(&s).as_deref(), Some(VERSION));
+    terminate(new_pid);
+}
+
+/// The other direction of the same rule, which is what makes the loop impossible rather than merely
+/// unlikely: an OLDER build never evicts a newer daemon, however often it checks. Were the rule
+/// symmetric ("versions differ ⇒ restart"), two installs sharing one server would take turns.
+#[test]
+fn an_older_build_never_evicts_a_newer_daemon() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+    let cfg = s.workdir.join("restart-on-upgrade.toml");
+    std::fs::write(&cfg, "[daemon]\nrestart_on_upgrade = true\n").unwrap();
+
+    // A daemon from a build far newer than the one running this test.
+    let _newer = spawn_daemon_args(&s, &["--fake-version", "9.9.9"]);
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    let pid = daemon_pid(&s, common::POLL_CEILING).expect("the newer daemon records its pid");
+    assert!(wait_lock_version(&s, "9.9.9", common::POLL_CEILING));
+
+    for lap in 0..4 {
+        assert!(run_ensure_with(&s, &cfg), "lap {lap}");
+        std::thread::sleep(Duration::from_millis(50));
+        assert_eq!(
+            daemon_pid(&s, Duration::from_secs(1)),
+            Some(pid),
+            "lap {lap}: an older build must leave a newer daemon alone"
+        );
+        assert_eq!(lock_version(&s).as_deref(), Some("9.9.9"), "lap {lap}");
+    }
+}
+
+/// A lock file keeps its body after the daemon that wrote it exits — only the flock is released —
+/// so the recorded version outlives the process it described. That stale body must never be acted
+/// on: the pid in it is dead (and may since have been recycled onto something else).
+#[test]
+fn a_dead_daemons_stale_lock_is_replaced_rather_than_acted_on() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+    let cfg = s.workdir.join("restart-on-upgrade.toml");
+    std::fs::write(&cfg, "[daemon]\nrestart_on_upgrade = true\n").unwrap();
+
+    let mut old = spawn_daemon_args(&s, &["--fake-version", "0.0.1"]);
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    let old_pid = daemon_pid(&s, common::POLL_CEILING).expect("the old daemon records its pid");
+    assert!(wait_lock_version(&s, "0.0.1", common::POLL_CEILING));
+
+    signal(old_pid, rustix::process::Signal::TERM);
+    assert!(
+        old.wait_exit(common::POLL_CEILING),
+        "the daemon exits on TERM"
+    );
+    assert_eq!(
+        lock_version(&s).as_deref(),
+        Some("0.0.1"),
+        "the body survives the process: this is exactly the stale state the guards exist for"
+    );
+
+    // The flock is free, so this is an ordinary start, not an eviction. What matters is the result:
+    // the new daemon owns the lock and the stale body is gone, replaced by its own.
+    assert!(run_ensure_with(&s, &cfg));
+    assert!(
+        wait_lock_version(&s, VERSION, common::POLL_CEILING),
+        "the started daemon stamps its own build over the dead one's"
+    );
+    let new_pid = daemon_pid(&s, common::POLL_CEILING).expect("the new daemon records its pid");
+    assert_ne!(new_pid, old_pid);
+    terminate(new_pid);
+}
+
+/// `install-hooks` repoints the agent's hooks at THIS binary, but a resident daemon of another
+/// build is what those hooks would reach — so the install ends by offering to replace it, and
+/// `--yes` accepts. Every agent config path here is pinned into the scratch workdir, so the real
+/// `~/.claude/settings.json` and `~/.config/tma` are never touched (SAFETY).
+#[test]
+fn install_hooks_offers_to_replace_a_resident_daemon_of_another_build() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+
+    let mut old = spawn_daemon_args(&s, &["--fake-version", "0.0.1"]);
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    let old_pid =
+        daemon_pid(&s, common::POLL_CEILING).expect("the resident daemon records its pid");
+    assert!(wait_lock_version(&s, "0.0.1", common::POLL_CEILING));
+
+    let out = s
+        .command()
+        .args([
+            "install-hooks",
+            "claude",
+            "--yes",
+            "--socket-name",
+            &s.socket,
+        ])
+        .env("TMA_CLAUDE_SETTINGS", s.workdir.join("settings.json"))
+        .env("TMA_CONFIG_DIR", s.workdir.join("cfg"))
+        .env("TMA_WRAPPER_PATH", s.workdir.join("bin/tma-hook"))
+        .output()
+        .expect("run install-hooks");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "install-hooks failed: {stdout}");
+    assert!(
+        stdout.contains("build 0.0.1, but this is") && stdout.contains(VERSION),
+        "the offer names both builds: {stdout}"
+    );
+
+    assert!(
+        old.wait_exit(common::POLL_CEILING),
+        "`--yes` accepts the offer, so the old daemon is replaced"
+    );
+    assert!(wait_lock_version(&s, VERSION, common::POLL_CEILING));
+    let new_pid = daemon_pid(&s, common::POLL_CEILING).expect("the replacement records its pid");
+    assert_ne!(new_pid, old_pid);
+    terminate(new_pid);
+}
+
+/// The same install against a daemon of the SAME build says nothing and changes nothing: the offer
+/// is a skew report, not a routine "restart your daemon" nag on every install.
+#[test]
+fn install_hooks_leaves_a_matching_daemon_alone_and_silent() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+
+    let _daemon = spawn_daemon(&s);
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    let pid = daemon_pid(&s, common::POLL_CEILING).expect("the daemon records its pid");
+    assert!(wait_lock_version(&s, VERSION, common::POLL_CEILING));
+
+    let out = s
+        .command()
+        .args([
+            "install-hooks",
+            "claude",
+            "--yes",
+            "--socket-name",
+            &s.socket,
+        ])
+        .env("TMA_CLAUDE_SETTINGS", s.workdir.join("settings.json"))
+        .env("TMA_CONFIG_DIR", s.workdir.join("cfg"))
+        .env("TMA_WRAPPER_PATH", s.workdir.join("bin/tma-hook"))
+        .output()
+        .expect("run install-hooks");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "install-hooks failed: {stdout}");
+    assert!(
+        !stdout.contains("but this is"),
+        "no skew, so no offer: {stdout}"
+    );
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        daemon_pid(&s, Duration::from_secs(1)),
+        Some(pid),
+        "the running daemon is untouched"
+    );
 }

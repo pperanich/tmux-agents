@@ -1,8 +1,8 @@
 //! `tma init`: the first-run wizard. It runs the setup a new user otherwise assembles by hand from
 //! three files and five commands — detect which supported agents are actually installed, wire each
-//! one's hooks ([`crate::install`]), install the keybindings ([`crate::install_keys`]), optionally
-//! start the daemon — and ends with the [`crate::doctor`] report so the resulting posture is
-//! visible rather than assumed.
+//! one's hooks ([`crate::install`]), install the keybindings ([`crate::install_keys`]), replace a
+//! resident daemon of another build, optionally start one — and ends with the [`crate::doctor`]
+//! report so the resulting posture is visible rather than assumed.
 //!
 //! It chains those commands rather than reimplementing them, so every write keeps its own
 //! diff-before-write confirmation and stays idempotent. The one step it does NOT perform is the
@@ -13,12 +13,13 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use crate::cli_support::{self, DaemonLauncher, DaemonMode};
 use crate::config::Config;
+use crate::doctor;
 use crate::install::{self, resolve_tmux_conf};
 use crate::install_keys;
 use crate::manifests::LoadedManifest;
 use crate::tmux::Tmux;
-use crate::{cli_support, doctor};
 
 /// Options for `tma init` (parsed from the CLI in `main`).
 pub(crate) struct InitOpts {
@@ -40,19 +41,11 @@ pub(crate) struct InitOpts {
     /// The loaded config: `[[agent]]` overrides and `[focus] events` for the install steps,
     /// `[telemetry]`/`[api]` for the closing doctor report, and the whole of it for the daemon.
     pub config: Config,
-    /// Where that config came from, forwarded to a daemon this wizard spawns so it re-reads the
-    /// same file.
-    pub config_path: Option<PathBuf>,
-    /// The idempotent daemon launcher, injected by `main`: tier 3 is reachable only from the
-    /// `tma daemon` dispatch site (tests/tier_boundary.rs), so `--daemon` calls this instead of
-    /// naming the daemon crate here.
-    pub ensure_daemon: EnsureDaemon,
+    /// The daemon launcher, injected by `main`: tier 3 is reachable only from the `tma daemon`
+    /// dispatch site (tests/tier_boundary.rs), so `--daemon` and the skew offer call this instead
+    /// of naming the daemon crate here.
+    pub launch_daemon: DaemonLauncher,
 }
-
-/// The `tma daemon --ensure` launcher `main` hands to [`InitOpts::ensure_daemon`]: config, target
-/// server, manifest dir, config path.
-pub(crate) type EnsureDaemon =
-    fn(&Config, tma_tmux::tmux::Server, Option<PathBuf>, Option<PathBuf>) -> ExitCode;
 
 /// A binary name that identifies a runtime rather than an agent. Several unrelated programs run
 /// under each of these, so finding one on `$PATH` is no evidence that the agent is installed.
@@ -212,6 +205,9 @@ fn install_opts(opts: &InitOpts, agent: &str) -> install::InstallOpts {
         pi_extension: None,
         focus_events: opts.config.focus.events,
         agents: opts.config.agent_overrides.clone(),
+        // The wizard wires every detected agent in turn and then makes the daemon-skew offer once
+        // itself; handing the launcher down here would ask the same question per agent.
+        launch_daemon: None,
     }
 }
 
@@ -296,14 +292,16 @@ pub(crate) fn run(opts: InitOpts) -> ExitCode {
         failed = true;
     }
 
+    // A daemon that was already running when the wizard started is still the build it started with,
+    // so everything wired above reaches THAT build until it is replaced. Offered before the
+    // `--daemon` step below, which is an idempotent `--ensure` and would no-op over a skewed daemon.
+    if !cli_support::offer_daemon_restart(&tmux, opts.assume_yes, &opts.launch_daemon) {
+        failed = true;
+    }
+
     if opts.daemon {
         println!();
-        if ok((opts.ensure_daemon)(
-            &opts.config,
-            opts.server.clone(),
-            opts.manifest_dir.clone(),
-            opts.config_path.clone(),
-        )) {
+        if ok((opts.launch_daemon)(DaemonMode::Ensure)) {
             // The launch is fire-and-forget, so a daemon that never answers is worth naming — but
             // not a failed setup: everything above works without it (the daemon is additive).
             if !await_daemon(&tmux) {

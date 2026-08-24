@@ -68,8 +68,7 @@ pub(super) fn render_text(r: &Report) -> String {
             let running = r.daemon_version.as_deref().unwrap_or("unknown");
             out.push_str(&format!(
                 "         version {running} differs from this CLI ({}) — `tma reload` only re-reads \
-                 config and manifests; stop the daemon and run `tma daemon --ensure` to pick up \
-                 the new build\n",
+                 config and manifests; run `tma daemon --restart` to put this build in its place\n",
                 ipc::VERSION
             ));
         }

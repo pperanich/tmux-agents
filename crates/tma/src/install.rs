@@ -132,6 +132,10 @@ pub(crate) struct InstallOpts {
     pub focus_events: bool,
     /// `[[agent]]` config: enable/disable + custom process-name maps.
     pub agents: Vec<crate::config::AgentConfig>,
+    /// The daemon launcher `main` injects, used only to offer the restart when the wiring above
+    /// lands in front of a resident daemon of another build. `None` suppresses the offer, which is
+    /// what `tma init` passes: it wires each agent in turn and makes the offer once itself.
+    pub launch_daemon: Option<crate::cli_support::DaemonLauncher>,
 }
 
 /// Recorded tmux-hook install metadata, persisted to `hooks-state.toml`.
@@ -203,8 +207,32 @@ pub(crate) fn run(opts: InstallOpts) -> ExitCode {
         );
     }
 
+    let code = wire(&manifests, &paths, &config_dir, &wrapper, &tmux, &opts);
+    // The wiring now points at THIS binary, but a daemon that was already running still carries the
+    // build it started with, so every event the new hooks fire reaches that older code. Offered only
+    // after a clean install: nothing to pick up when the wiring failed or was just removed.
+    if matches!(code, ExitCode::SUCCESS) && !opts.uninstall {
+        if let Some(launch) = opts.launch_daemon.as_ref() {
+            if !cli_support::offer_daemon_restart(&tmux, opts.assume_yes, launch) {
+                return ExitCode::FAILURE;
+            }
+        }
+    }
+    code
+}
+
+/// Wire (or unwire) whatever the flags name: `--all` over every already-wired agent, else the one
+/// named agent. Split from [`run`] so the daemon-skew offer above has a single place to sit.
+fn wire(
+    manifests: &[LoadedManifest],
+    paths: &ConfigPaths,
+    config_dir: &Path,
+    wrapper: &Wrapper,
+    tmux: &Tmux,
+    opts: &InstallOpts,
+) -> ExitCode {
     if opts.all {
-        return run_all(&manifests, &paths, &config_dir, &wrapper, &tmux, &opts);
+        return run_all(manifests, paths, config_dir, wrapper, tmux, opts);
     }
 
     let Some(agent) = opts.agent.as_deref() else {
@@ -222,20 +250,20 @@ pub(crate) fn run(opts: InstallOpts) -> ExitCode {
     if opts.uninstall {
         uninstall(
             lm,
-            &manifests,
-            &paths,
-            &config_dir,
-            &wrapper,
-            &tmux,
+            manifests,
+            paths,
+            config_dir,
+            wrapper,
+            tmux,
             opts.assume_yes,
         )
     } else {
         install(
             lm,
-            &paths,
-            &config_dir,
-            &wrapper,
-            &tmux,
+            paths,
+            config_dir,
+            wrapper,
+            tmux,
             opts.assume_yes,
             opts.focus_events,
             opts.statusline,
