@@ -586,6 +586,11 @@ This is self-healing, not state-driving: at 30–60 s it is ~30× cheaper than t
 1–2 s poll loop and its latency only bounds the *repair* of anomalies, not normal
 detection. Design invariant: **events drive state; the sweep repairs it.**
 
+The cadence is a deadline, not a delay measured from the last wake. The poll waits the
+time *remaining* to the next sweep; waiting a fresh full interval after every wake let a
+burst that then fell quiet push the repair out to nearly twice the configured cadence —
+which is precisely the window in which a missed edge has nothing else to fall back on.
+
 One ordering constraint rides on the sweep. The poll cycle also runs the ordered-input
 attention clear (a `list-clients` read, and only when some pane carries the flag), and
 the serve loop dispatches notifications *after* the sweep from that same persisted

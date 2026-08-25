@@ -138,8 +138,14 @@ pub(super) fn serve(
         // (before the possibly-long sweep poll) so a freshly-quiet pane's edge is promptly observable.
         let edges_before = pool.edges_emitted();
         // While clientless, recheck server liveness within ~1 s (see `ControlPool::is_empty`); with
-        // clients a gone server wakes us via `%exit`/EOF, so the long sweep cadence stands.
-        let iter_sweep = effective_sweep(pool.is_empty(), sweep, empty_pool_recheck);
+        // clients a gone server wakes us via `%exit`/EOF, so the long sweep cadence stands. The wait
+        // is bounded by the next sweep's DEADLINE, not a fresh full cadence, so activity cannot
+        // push the repair sweep out toward twice its configured interval.
+        let iter_sweep = effective_sweep(
+            pool.is_empty(),
+            until_sweep(last_sweep, Instant::now(), sweep),
+            empty_pool_recheck,
+        );
         // Time enters the pool tick at this boundary: the monotone deadline clock and the wall epoch
         // stamped onto any edge emitted this wake.
         let timeout = control::tick(&mut pool, Instant::now(), tma_runtime::now_ms(), iter_sweep);
@@ -616,6 +622,16 @@ fn effective_sweep(pool_empty: bool, sweep: Duration, empty_pool_recheck: Durati
     }
 }
 
+/// How long until the next reconciliation sweep is due, floored at 10 ms so an already-overdue
+/// sweep cannot turn the poll into a busy spin. The loop waits this, not the raw cadence: waking on
+/// activity and then re-arming a full interval is what let an idle-after-a-burst daemon slip its
+/// sweep toward twice the configured cadence.
+fn until_sweep(last_sweep: Instant, now: Instant, sweep: Duration) -> Duration {
+    sweep
+        .saturating_sub(now.saturating_duration_since(last_sweep))
+        .max(Duration::from_millis(10))
+}
+
 /// Sweep-due predicate: the reconciliation sweep runs once `now` is at least `sweep` past the last
 /// one. `now` is threaded (not read here) so the cadence is deterministic under test; `saturating_`
 /// keeps a non-advancing clock from panicking.
@@ -674,6 +690,25 @@ mod tests {
             effective_sweep(true, Duration::from_millis(500), recheck),
             Duration::from_millis(500),
             "an already-shorter sweep is not lengthened"
+        );
+    }
+
+    /// The wait tracks the sweep's deadline: it shrinks as the cadence is consumed and never
+    /// re-arms a full interval, so a late wake still leaves an (immediately due) 10 ms floor.
+    #[test]
+    fn until_sweep_tracks_the_deadline_not_the_cadence() {
+        let t0 = Instant::now();
+        let sweep = Duration::from_secs(45);
+        assert_eq!(until_sweep(t0, t0, sweep), sweep, "fresh sweep ⇒ full wait");
+        assert_eq!(
+            until_sweep(t0, t0 + Duration::from_secs(44), sweep),
+            Duration::from_secs(1),
+            "44 s in ⇒ 1 s left, not another 45"
+        );
+        assert_eq!(
+            until_sweep(t0, t0 + Duration::from_secs(90), sweep),
+            Duration::from_millis(10),
+            "overdue ⇒ 10 ms floor, never a zero-timeout spin"
         );
     }
 
