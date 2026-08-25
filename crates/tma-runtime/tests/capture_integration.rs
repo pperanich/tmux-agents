@@ -352,8 +352,9 @@ fn reconciliation_sweep_fans_out_and_clears_dead() {
         return;
     }
     let s = Scratch::new_daemon("t20");
-    // Two never-announced agents on IDLE `sleep` panes (no output ⇒ no activity edges ⇒ the
-    // on-demand path stays at zero captures, isolating the sweep fan-out).
+    // Two never-announced agents on IDLE `sleep` panes: past the one-time look each session gets
+    // when its control client attaches, they emit no activity edges, so the on-demand counter
+    // stands still and every later capture is provably the sweep fan-out.
     let (_pane1, pid1) = new_idle_session(&s, "s1");
     let (_pane2, pid2) = new_idle_session(&s, "s2");
     let names = process_names_toml(&s, "s1", pid1);
@@ -382,6 +383,10 @@ fn reconciliation_sweep_fans_out_and_clears_dead() {
         &["--sweep-ms", "800", "--config", conf.to_str().unwrap()],
     );
     s.expect_status("clients", "2");
+    // Drain the attach look (one edge per pane of a newly covered session) so what follows
+    // measures the sweep alone.
+    wait_quiescent(&s);
+    let on_demand = s.status_u64("on_demand_captures");
 
     // Every sweep captures both never-announced agents: the N-capture fan-out, the only place it
     // occurs.
@@ -390,8 +395,9 @@ fn reconciliation_sweep_fans_out_and_clears_dead() {
     eprintln!("reconciliation sweep wall time: {wall_ms} ms (2 agents)");
     assert_eq!(
         s.status_u64("on_demand_captures"),
-        0,
-        "no fan-out on the on-demand path (idle panes emit no edges): ≤1 there, 2 in the sweep"
+        on_demand,
+        "no repeating fan-out on the on-demand path (idle panes emit no further edges): \
+         every capture the sweeps add is the sweep's"
     );
     // Discovery: both never-announced panes now carry a state stamp.
     assert!(!s
@@ -711,6 +717,116 @@ fn claude_transcript_viewer_capture_is_not_blocked() {
             "{name}: overlay freezes the prior idle stamp (held), never restated from history"
         );
     }
+}
+
+// --- 6. Attach window: output printed before the control client attached still gets captured. ---
+
+/// Seconds the shim below stalls the pool's control-mode attach. Only has to outlast the burst, so
+/// the pane is provably silent by the time `%output` delivery starts; the daemon's quiet threshold
+/// is 1 s, so 3 leaves no ambiguity without padding the suite.
+const SLOW_ATTACH_SECS: u32 = 3;
+
+/// The absolute `tmux` the shim execs. `command -v` rather than a fixed path: the suites run on
+/// whatever tmux the box provides (homebrew, nix, distro).
+fn real_tmux_path() -> String {
+    let out = Command::new("sh")
+        .args(["-c", "command -v tmux"])
+        .output()
+        .expect("command -v tmux");
+    let p = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(!p.is_empty(), "tmux not on PATH");
+    p
+}
+
+/// Write a `tmux` shim that stalls every control-mode attach AFTER the first, and return its path.
+/// The daemon's push probe attaches first and must stay fast (a probe that misses its marker
+/// degrades the daemon to the 5 s sweep, and the sweep — not the quiet edge — would then be what
+/// rescues the pane, which is the opposite of what this test asserts). The pool's attach is the
+/// second, and stalling it is what opens the pre-attach window.
+fn slow_attach_tmux(s: &Scratch) -> PathBuf {
+    use std::os::unix::fs::PermissionsExt;
+    let shim = s.workdir.join("slow-attach-tmux");
+    let count = s.workdir.join("attach-count");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\n\
+             case \" $* \" in\n\
+             *\" -C attach-session \"*)\n\
+             n=$(cat '{count}' 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > '{count}'\n\
+             [ \"$n\" -gt 1 ] && sleep {secs} ;;\n\
+             esac\n\
+             exec '{real}' \"$@\"\n",
+            count = count.display(),
+            secs = SLOW_ATTACH_SECS,
+            real = real_tmux_path(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+    shim
+}
+
+/// A pane that printed its blocked prompt while the daemon's control client was still attaching is
+/// still captured. tmux streams `%output` from the attach onward and never replays what came
+/// before, so the burst here produces no activity mark at all — and a blocked prompt is the absence
+/// of further output, so no later edge would arrive either. The daemon must therefore look at the
+/// panes of a session the moment its client's coverage actually starts. Regression: the pool
+/// counted a client as membership at spawn, so this pane sat unstamped until a sweep (which, being
+/// a full cadence out, is past every caller's patience).
+#[test]
+fn slow_control_attach_still_captures_the_blocked_pane() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("t26");
+    let (pane, pid) = new_shell_session(&s, "s1");
+    let names = process_names_toml(&s, "s1", pid);
+    write_manifest(
+        &s,
+        &format!(
+            "min_engine_version = \"0.1\"\n\
+         [identity]\nprocess_names = [{names}]\n\
+         [capture]\nvisible = [\"working\", \"idle\", \"blocked\"]\n\
+         [[rules]]\nstate = \"blocked\"\ndetail = \"permission\"\npriority = 100\n\
+         region = \"tail_lines(50)\"\nmatch = {{ contains = \"tma-block-marker\" }}\n",
+        ),
+    );
+
+    let shim = slow_attach_tmux(&s);
+    let status = s.status_path();
+    let child = s
+        .command()
+        .args(["daemon", "--socket-name", &s.socket])
+        .args(["--manifest-dir", s.workdir.to_str().unwrap()])
+        .args(["--status-file", status.to_str().unwrap()])
+        .env("TMA_TMUX_BIN", &shim)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn daemon");
+    let _daemon = DaemonGuard::new(child);
+
+    // `clients=1` lands as soon as the `tmux -C` child is SPAWNED — the shim is still sleeping, so
+    // the client has not attached and the session has no `%output` coverage yet. That gap is the
+    // whole test: burst into it.
+    s.expect_status("clients", "1");
+    burst(&s, &pane, "echo tma-block-marker");
+
+    assert!(
+        wait_opt(&s, &pane, "@agent_state", "blocked"),
+        "a pane that printed during the attach window must still be captured"
+    );
+    assert_eq!(s.get(&pane, "#{@agent_source}"), "capture");
+    // The 45 s sweep cannot have run inside the poll ceiling: the on-demand tier caught it.
+    assert_eq!(
+        s.status_u64("sweeps"),
+        0,
+        "the post-attach look must come from the on-demand tier, not a reconciliation sweep"
+    );
 }
 
 // --- helpers --------------------------------------------------------------------------------
