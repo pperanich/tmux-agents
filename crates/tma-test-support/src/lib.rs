@@ -394,6 +394,28 @@ const ATTACH_LIFETIME: Duration = Duration::from_secs(120);
 /// magnitude inside it), so a lapse means the condition never happened, not that the box was busy.
 pub const POLL_CEILING: Duration = Duration::from_secs(45);
 
+/// The pane options [`Scratch::forensics`] dumps: the stamp a capture/event writes plus the two
+/// clocks that say WHEN it was written, which is what separates "never stamped" from "stamped late"
+/// from "stamped with the wrong verdict" — the three outcomes a timing failure has to tell apart.
+const AGENT_STAMP_KEYS: &[&str] = &[
+    "@agent_name",
+    "@agent_state",
+    "@agent_source",
+    "@agent_detail",
+    "@agent_since",
+    "@agent_stamped_at",
+    "@agent_evidence_at",
+    "@agent_attention",
+];
+
+/// Screen lines [`Scratch::forensics`] quotes per pane: enough to show the marker a rule matches on
+/// (or its absence) without burying the counters above it in a CI log.
+const FORENSIC_TAIL_LINES: usize = 8;
+
+/// Daemon-log lines [`Scratch::forensics`] quotes. The daemon's startup banner is 1–3 lines and the
+/// rest is exceptional, so this holds a whole ordinary run plus whatever went wrong.
+const FORENSIC_LOG_LINES: usize = 20;
+
 /// The prompt [`Scratch::new_shell_pane`] pins on its isolated shell. Exported so a test can anchor
 /// a capture needle on it: `SHELL_PROMPT` + the keystroke is text only a delivered key can produce,
 /// where the bare keystroke could be anything the developer's own rc had already painted.
@@ -618,6 +640,90 @@ impl Scratch {
         self.workdir.join("status")
     }
 
+    /// The conventional daemon stderr log path (`<workdir>/daemon.log`). Daemon spawns in the
+    /// suites route `stderr` here rather than to `/dev/null`, so [`Scratch::forensics`] can quote
+    /// the daemon's own account of what it did (probe verdict, degrade, reload, dropped seeds).
+    pub fn daemon_log_path(&self) -> PathBuf {
+        self.workdir.join("daemon.log")
+    }
+
+    /// A `Stdio` writing to [`Scratch::daemon_log_path`], for a daemon spawn's `stderr`.
+    /// Truncating: one daemon per path per test, so a stale log can only mislead.
+    pub fn daemon_log_stdio(&self) -> std::process::Stdio {
+        match File::create(self.daemon_log_path()) {
+            Ok(f) => std::process::Stdio::from(f),
+            // A log we cannot open is a diagnostic loss, never a test failure.
+            Err(_) => std::process::Stdio::null(),
+        }
+    }
+
+    /// Everything a timing failure needs, as one block to append to a panic message: the daemon's
+    /// status counters, each named pane's `@agent_*` stamp, the tail of each pane's screen, and the
+    /// tail of the daemon log. Built EAGERLY at the assertion, which is what makes it survive —
+    /// [`Scratch`]'s `Drop` deletes the workdir, so nothing here is readable after the unwind.
+    ///
+    /// Never panics and never fails: a missing file becomes a `<none>` line, because a forensics
+    /// helper that can itself blow up would replace the failure it was meant to explain.
+    pub fn forensics(&self, panes: &[&str]) -> String {
+        let mut out = format!("\n--- forensics (socket {}) ---\n", self.socket);
+        let status = self.status();
+        if status.is_empty() {
+            out.push_str("status: <none: daemon never wrote it>\n");
+        } else {
+            out.push_str("status:\n");
+            for (k, v) in &status {
+                out.push_str(&format!("  {k}={v}\n"));
+            }
+        }
+        for pane in panes {
+            out.push_str(&format!("pane {pane}:\n"));
+            for key in AGENT_STAMP_KEYS {
+                let v = self.pane_option(pane, key);
+                out.push_str(&format!(
+                    "  {key}={}\n",
+                    if v.is_empty() { "<unset>" } else { &v }
+                ));
+            }
+            let text = self.tmux(&["capture-pane", "-p", "-t", pane]);
+            let text = String::from_utf8_lossy(&text.stdout);
+            let tail: Vec<&str> = text
+                .lines()
+                .filter(|l| !l.trim().is_empty())
+                .rev()
+                .take(FORENSIC_TAIL_LINES)
+                .collect();
+            out.push_str("  screen tail (newest first):\n");
+            if tail.is_empty() {
+                out.push_str("    <empty or unreadable>\n");
+            }
+            for line in tail {
+                out.push_str(&format!("    | {line}\n"));
+            }
+        }
+        out.push_str(&format!(
+            "daemon log ({}):\n",
+            self.daemon_log_path().display()
+        ));
+        match std::fs::read_to_string(self.daemon_log_path()) {
+            Ok(log) if !log.trim().is_empty() => {
+                let lines: Vec<&str> = log.lines().collect();
+                let skip = lines.len().saturating_sub(FORENSIC_LOG_LINES);
+                if skip > 0 {
+                    out.push_str(&format!("  <{skip} earlier lines elided>\n"));
+                }
+                for line in &lines[skip..] {
+                    out.push_str(&format!("  | {line}\n"));
+                }
+            }
+            // Both an absent file and an empty one are worth naming: an empty log means the daemon
+            // started and said nothing, an absent one means the spawn never routed stderr here.
+            Ok(_) => out.push_str("  <empty: daemon logged nothing>\n"),
+            Err(e) => out.push_str(&format!("  <unreadable: {e}>\n")),
+        }
+        out.push_str("--- end forensics ---");
+        out
+    }
+
     /// Parse the daemon status file into a `key=value` map; empty when it does not exist yet.
     pub fn status(&self) -> BTreeMap<String, String> {
         let mut map = BTreeMap::new();
@@ -653,7 +759,8 @@ impl Scratch {
             if Instant::now() >= end {
                 panic!(
                     "daemon status `{key}` never reached {want:?} within {POLL_CEILING:?} \
-                     (last seen: {got:?})"
+                     (last seen: {got:?}){}",
+                    self.forensics(&[])
                 );
             }
             std::thread::sleep(Duration::from_millis(100));
