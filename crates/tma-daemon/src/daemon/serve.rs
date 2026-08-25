@@ -338,6 +338,11 @@ pub(super) fn serve(
             status_dirty = true;
         }
 
+        // A client just finished attaching: its session had no `%output` coverage until this
+        // moment, so seed its panes active. Each then emits one quiet edge on the NEXT iteration's
+        // drain, which keeps the demotion ordering (fold before apply) intact.
+        control::seed_attached(&mut pool, tmux, Instant::now());
+
         // A pane/window lifecycle event ⇒ recompute the window and session summaries so a closed
         // agent pane's rollups clear promptly, even with no `SessionEnd`. Server-gone ends the loop.
         if fx.need_summary {

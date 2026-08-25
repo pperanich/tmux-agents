@@ -98,10 +98,17 @@ struct ControlClient {
     _stdin: ChildStdin,
     child: Child,
     stdout: ChildStdout,
+    /// `#{session_name}` at spawn: the key `list-panes` reports a pane's session under, so the
+    /// attach seeding can find the panes this client covers.
+    session_name: String,
     /// In-progress line bytes (no trailing newline yet).
     buf: Vec<u8>,
     /// Set after an over-length line is salvaged: drop bytes until the next newline to resync.
     skip_to_newline: bool,
+    /// `true` once the client has produced its first control-mode byte, which is the attach: tmux
+    /// streams `%output` from the attach on, never replaying what a pane printed before it. Until
+    /// then the pool holds a client but no coverage.
+    attached: bool,
     /// EOF or a read error was seen: this client is defunct and will be reaped + re-attached
     /// on the next reconcile.
     dead: bool,
@@ -110,7 +117,7 @@ struct ControlClient {
 impl ControlClient {
     /// Spawn a control client attached to `session_id`. stdout/stdin are pipes; stdout is set
     /// non-blocking so the daemon's `poll` loop can drain it without blocking.
-    fn spawn(tmux: &Tmux, session_id: &str) -> std::io::Result<ControlClient> {
+    fn spawn(tmux: &Tmux, session_id: &str, session_name: &str) -> std::io::Result<ControlClient> {
         let mut cmd = tmux.control_client_command(session_id);
         let mut child = cmd
             .stdin(Stdio::piped())
@@ -124,8 +131,10 @@ impl ControlClient {
             _stdin: stdin,
             child,
             stdout,
+            session_name: session_name.to_string(),
             buf: Vec::new(),
             skip_to_newline: false,
+            attached: false,
             dead: false,
         })
     }
@@ -140,7 +149,12 @@ impl ControlClient {
                     self.dead = true;
                     return;
                 }
-                Ok(n) => self.ingest(&chunk[..n], out),
+                Ok(n) => {
+                    // First byte off a control client is its attach handshake: coverage of the
+                    // session starts here, not at spawn.
+                    self.attached = true;
+                    self.ingest(&chunk[..n], out);
+                }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => return,
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => {
@@ -246,6 +260,9 @@ pub struct ControlPool {
     active: HashMap<String, Instant>,
     /// Bounded active→quiet edge queue for the capture tier.
     edges: VecDeque<ActivityEdge>,
+    /// `#{session_name}`s whose client has attached but whose panes [`seed_attached`] has not
+    /// looked at yet: they were uncovered until that moment, so each needs one look.
+    newly_attached: Vec<String>,
     /// Monotone counters for the introspection status file (tests + operators).
     edges_emitted: u64,
     recoveries: u64,
@@ -267,6 +284,7 @@ impl ControlPool {
             clients: HashMap::new(),
             active: HashMap::new(),
             edges: VecDeque::new(),
+            newly_attached: Vec::new(),
             edges_emitted: 0,
             recoveries: 0,
             ever_populated: false,
@@ -300,7 +318,7 @@ impl ControlPool {
             if !self.clients.contains_key(&s.id) {
                 // Best-effort: a spawn failure retries on the next reconcile rather than
                 // failing the daemon.
-                if let Ok(client) = ControlClient::spawn(tmux, &s.id) {
+                if let Ok(client) = ControlClient::spawn(tmux, &s.id, &s.name) {
                     self.clients.insert(s.id.clone(), client);
                 }
             }
@@ -321,10 +339,15 @@ impl ControlPool {
             .collect()
     }
 
-    /// Drain the client whose fd polled readable, appending its notifications to `out`.
+    /// Drain the client whose fd polled readable, appending its notifications to `out`. A client
+    /// crossing into `attached` here records its session for the one post-attach look.
     fn read_client(&mut self, session_id: &str, out: &mut Vec<Notification>) {
         if let Some(c) = self.clients.get_mut(session_id) {
+            let was_attached = c.attached;
             c.read_available(out);
+            if !was_attached && c.attached {
+                self.newly_attached.push(c.session_name.clone());
+            }
         }
     }
 
@@ -502,7 +525,8 @@ pub fn probe_push(tmux: &Tmux, cross_session: bool) -> ProbeOutcome {
 /// Attach a control client to `attach_session` and watch its `%output` stream for
 /// [`PROBE_MARKER`] within [`PROBE_TIMEOUT`]. The client is reaped on return.
 fn probe_watch(tmux: &Tmux, attach_session: &str) -> std::io::Result<bool> {
-    let mut client = ControlClient::spawn(tmux, attach_session)?;
+    // The probe's client never joins the pool, so its session name is irrelevant here.
+    let mut client = ControlClient::spawn(tmux, attach_session, "")?;
     let deadline = Instant::now() + PROBE_TIMEOUT;
     // A small rolling buffer: keep only enough tail to catch a marker split across reads.
     let mut buf: Vec<u8> = Vec::new();
@@ -591,6 +615,26 @@ pub fn dispatch_ready(
         fx.need_reconcile = true;
     }
     fx
+}
+
+/// Mark every pane of a just-attached session active, so each emits one active→quiet edge and the
+/// capture tier looks at it once. tmux streams `%output` only from the attach on, so a pane that
+/// printed its blocked prompt while the client was still starting produces no further output and
+/// would otherwise sit unnoticed until a sweep. Cost is one `list-panes` per attach (daemon start,
+/// a new session, a client respawn) plus the capture tier's usual one-capture-per-agent-pane; a
+/// pane still producing output just has its mark refreshed, so the edge still fires exactly once.
+/// A failed read is dropped: the sweep remains the backstop.
+pub fn seed_attached(pool: &mut ControlPool, tmux: &Tmux, now: Instant) {
+    let sessions = std::mem::take(&mut pool.newly_attached);
+    if sessions.is_empty() {
+        return;
+    }
+    let Ok(panes) = tmux.list_panes() else {
+        return;
+    };
+    for p in panes.iter().filter(|p| sessions.contains(&p.session)) {
+        pool.mark_active(p.pane_id.clone(), now);
+    }
 }
 
 /// Advance the pool's timers once per loop wake: emit any due quiet edges, then report the
