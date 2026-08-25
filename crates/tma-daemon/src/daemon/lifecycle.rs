@@ -282,6 +282,18 @@ pub(super) fn run_foreground(tmux: &Tmux, paths: &Paths, opts: DaemonOpts) -> Ex
         }
     };
 
+    // Signal handlers BEFORE the socket exists: the socket file is the "daemon is up" signal
+    // `tma daemon --stop` and the tests key on, so a TERM aimed the instant it appears must
+    // already have a handler. Installed after the bind, that TERM hit the default disposition
+    // and killed the process with the socket left behind (no cleanup runs).
+    let sig_read = match install_signal_pipe() {
+        Some(fd) => fd,
+        None => {
+            eprintln!("tma: cannot install signal handler");
+            return ExitCode::FAILURE;
+        }
+    };
+
     // Bind the socket, clearing any stale file a crashed predecessor left behind (its flock
     // is already gone, so we legitimately own this server now).
     let _ = std::fs::remove_file(&paths.socket);
@@ -300,15 +312,6 @@ pub(super) fn run_foreground(tmux: &Tmux, paths: &Paths, opts: DaemonOpts) -> Ex
         cleanup(&paths.socket);
         return ExitCode::FAILURE;
     }
-
-    let sig_read = match install_signal_pipe() {
-        Some(fd) => fd,
-        None => {
-            eprintln!("tma: cannot install signal handler");
-            cleanup(&paths.socket);
-            return ExitCode::FAILURE;
-        }
-    };
 
     serve(
         tmux,

@@ -10,6 +10,14 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **A SIGTERM aimed the instant the daemon's socket appeared could kill it without cleanup.** The
+  socket was bound before the signal handlers were installed, and the socket file is exactly the
+  "daemon is up" signal `tma daemon --stop` and supervisors key on — so a TERM landing in that gap
+  hit the default disposition, and the dead daemon left its socket file behind. Handlers are now
+  installed before the bind, so a daemon whose socket exists always shuts down cleanly.
+
 ## [0.5.1] - 2026-08-25
 
 ### Fixed
