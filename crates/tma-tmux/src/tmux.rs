@@ -35,6 +35,9 @@ const SEP: char = '\u{1f}';
 pub(crate) struct SessionInfo {
     /// Stable `$N` id (survives renames); the pool keys and attaches on this.
     pub id: String,
+    /// `#{session_name}`, the key `list-panes` reports a pane's session under, so the pool can
+    /// resolve "which panes does this client cover" without a second lookup.
+    pub name: String,
 }
 
 /// Errors from the tmux/ps read path. `ServerGone` is an expected, clean exit.

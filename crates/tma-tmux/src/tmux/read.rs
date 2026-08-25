@@ -162,17 +162,23 @@ impl PaneRecord {
 }
 
 impl Tmux {
-    /// Enumerate live sessions by `session_id` (`list-sessions -F`): the pool's membership basis.
-    /// `session_id` (`$N`) is stable across renames, so the pool keys on it.
+    /// Enumerate live sessions (`list-sessions -F`): the pool's membership basis. `session_id`
+    /// (`$N`) is stable across renames, so the pool keys on it; the name rides along because
+    /// `list-panes` reports a pane's session by name, and the pool needs that join at attach.
     pub(crate) fn list_sessions(&self) -> Result<Vec<SessionInfo>, TmuxError> {
-        let out = self.run(&["list-sessions", "-F", "#{session_id}"])?;
+        let format = format!("#{{session_id}}{SEP}#{{session_name}}");
+        let out = self.run(&["list-sessions", "-F", &format])?;
         let mut sessions = Vec::new();
         for line in out.lines() {
             if line.is_empty() {
                 continue;
             }
+            // A name is never absent, but a truncated row must not drop the session from the
+            // pool's membership basis: fall back to an empty name (it only gates edge seeding).
+            let (id, name) = line.split_once(SEP).unwrap_or((line, ""));
             sessions.push(SessionInfo {
-                id: line.to_string(),
+                id: id.to_string(),
+                name: name.to_string(),
             });
         }
         Ok(sessions)

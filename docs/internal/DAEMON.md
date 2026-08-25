@@ -555,6 +555,16 @@ The phase-1 manifest detector is unchanged as a library (D7) but is now *trigger
   the moment to look.
 - **contradiction** — hook state says `working` but the pane has been quiet past a
   threshold: capture to confirm or correct.
+- **attach** — a session's control client finished attaching, so its panes go from
+  uncovered to covered at that instant. tmux streams `%output` from the attach onward
+  and never replays what came before, and a hookless `blocked` prompt *is* the absence
+  of further output — so a pane that fell silent during the attach would emit no edge
+  ever again. Every pane of the freshly attached session is therefore marked active
+  once, which produces the usual one edge (and one capture per agent pane) a quiet
+  threshold later. Fires on daemon start, on a new session, and on a client respawn.
+  Without it the pool counted a client as coverage from `spawn`, while the attach can
+  take seconds on a loaded box (measured: p50 4 ms idle, p50 3.8 s under CPU
+  saturation), and everything printed in that gap was lost until a sweep.
 - **reconciliation sweep** — see below.
 
 For a fleet of hook-capable agents, captures approach zero. For hookless agents, the
@@ -575,6 +585,11 @@ cycle — every 30–60 s (configurable):
 This is self-healing, not state-driving: at 30–60 s it is ~30× cheaper than the v1
 1–2 s poll loop and its latency only bounds the *repair* of anomalies, not normal
 detection. Design invariant: **events drive state; the sweep repairs it.**
+
+The cadence is a deadline, not a delay measured from the last wake. The poll waits the
+time *remaining* to the next sweep; waiting a fresh full interval after every wake let a
+burst that then fell quiet push the repair out to nearly twice the configured cadence —
+which is precisely the window in which a missed edge has nothing else to fall back on.
 
 One ordering constraint rides on the sweep. The poll cycle also runs the ordered-input
 attention clear (a `list-clients` read, and only when some pane carries the flag), and
