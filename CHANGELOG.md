@@ -10,6 +10,29 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **One slow `list-panes` could cost a blocked pane a full sweep of latency.** The post-attach look
+  added in 0.5.1 took its queue of just-covered sessions *before* the `list-panes` that drives it,
+  so a read that hit the daemon's 3-second per-command cap discarded the look for good — and a pane
+  that printed its prompt during the attach window then waited out the 45-second reconciliation
+  sweep, which is the exact latency the post-attach look exists to remove. That cap is reached
+  routinely on a saturated machine (on a 3-core CI runner, process spawn alone measures a 3.8-second
+  median), so this was not a rare path. The seed is now retried, promptly: the queue is taken only
+  after the read returns, and the daemon shortens its next wake to 250 ms while one is owed.
+- **A push probe whose session-create call timed out leaked that session into the pool.** The
+  timeout means only that the call did not return in three seconds; tmux had usually created the
+  probe session anyway, and its id was lost with the error, so the daemon attached a control client
+  to its own throwaway session and held it for the rest of its life. The probe now tears down by the
+  name it chose, and the normal teardown retries by name if the id-keyed kill fails.
+
+### Changed
+
+- The daemon's `--status-file` gained `pending_seeds`, `seed_retries`, and `dropped_edges`. All
+  three count work the daemon could not do because a tmux command timed out; a nonzero value is the
+  signature of a machine slow enough that state updates are arriving on the sweep cadence rather
+  than the near-instant quiet edge.
+
 ## [0.5.2] - 2026-08-25
 
 ### Fixed
