@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.4.6] - 2026-08-24
+
 ### Fixed
 
 - **`tma wait --until done` could retract the very mark it was waiting for and then block to its
@@ -501,7 +503,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.4.5...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.4.6...HEAD
+[0.4.6]: https://github.com/pperanich/tmux-agents/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/pperanich/tmux-agents/compare/v0.4.4...v0.4.5
 [0.4.4]: https://github.com/pperanich/tmux-agents/compare/v0.4.3...v0.4.4
 [0.4.3]: https://github.com/pperanich/tmux-agents/compare/v0.4.2...v0.4.3
