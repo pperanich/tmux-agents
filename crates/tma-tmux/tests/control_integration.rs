@@ -191,11 +191,21 @@ fn one_quiet_edge_per_output_burst() {
         .parse()
         .unwrap_or(0);
 
-    // One output burst: several rapid lines, all within the quiet threshold.
-    for _ in 0..5 {
-        s.tmux(&["send-keys", "-t", &pane, "echo tma-burst", "Enter"]);
-        std::thread::sleep(Duration::from_millis(60));
-    }
+    // One output burst: five rapid lines, all inside the 1 s quiet threshold. The pane's own shell
+    // loop emits them, from a SINGLE `send-keys`. Five separate `send-keys` calls would put five
+    // process spawns inside the window being measured, and one spawn slower than ~940 ms (routine
+    // on a saturated runner, where spawn measures p50 3.8 s) would split the burst in two and fail
+    // the count below — a harness artifact indistinguishable from the collapse regressing.
+    assert!(s
+        .tmux(&[
+            "send-keys",
+            "-t",
+            &pane,
+            "i=0; while [ $i -lt 5 ]; do echo tma-burst; i=$((i+1)); done",
+            "Enter",
+        ])
+        .status
+        .success());
 
     // Past the quiet threshold, exactly one new edge fires for the burst.
     common::poll_until("the burst produced an edge", || {
@@ -205,8 +215,19 @@ fn one_quiet_edge_per_output_burst() {
             .unwrap_or(baseline)
             > baseline
     });
-    // A negative window: give any spurious extra edges a moment to (wrongly) appear before counting.
-    std::thread::sleep(Duration::from_millis(500));
+    // The negative window: wait for the pool to fall quiescent rather than sleeping 500 ms. A
+    // spurious second edge can only appear a full quiet threshold (1 s) after more output, so the
+    // old fixed sleep was half as long as the event it was meant to exclude; quiescence is
+    // `active == 0` held past that threshold, which is the condition itself.
+    assert!(
+        common::wait_daemon_quiescent(
+            &s.status_path(),
+            Duration::from_millis(1200),
+            common::POLL_CEILING,
+        ),
+        "the pool never fell quiescent after the burst{}",
+        s.forensics(&[&pane])
+    );
     let final_edges: u64 = s
         .status()
         .get("edges")
@@ -215,7 +236,8 @@ fn one_quiet_edge_per_output_burst() {
     assert_eq!(
         final_edges - baseline,
         1,
-        "exactly one active→quiet edge per burst (baseline {baseline}, final {final_edges})"
+        "exactly one active→quiet edge per burst (baseline {baseline}, final {final_edges}){}",
+        s.forensics(&[&pane])
     );
 }
 
