@@ -33,6 +33,33 @@ fn stamp_blocked_claude(s: &Scratch, pane: &str) {
     s.set_opt(pane, "@agent_pid", "4242");
 }
 
+/// Stamp `pane` as a fresh `blocked/permission` opencode agent with a pending request id and an
+/// endpoint: the fireable state for the `[api]` `permission-reply` lane.
+fn stamp_blocked_opencode(s: &Scratch, pane: &str, request_id: &str, endpoint: &str) {
+    stamp_blocked_claude(s, pane);
+    s.set_opt(pane, "@agent_name", "opencode");
+    s.set_opt(pane, "@agent_permission_request", request_id);
+    s.set_opt(pane, "@agent_api_endpoint", endpoint);
+}
+
+/// A one-shot HTTP/1.1 server on `127.0.0.1:0` that answers `status_line` to the first request;
+/// returns `(http_base_url, join_handle)`.
+fn mock_http(status_line: &'static str) -> (String, std::thread::JoinHandle<()>) {
+    use std::io::{Read, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let handle = std::thread::spawn(move || {
+        let Ok((mut stream, _)) = listener.accept() else {
+            return;
+        };
+        let _ = stream.read(&mut [0u8; 1024]);
+        let _ = stream.write_all(
+            format!("{status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
+        );
+    });
+    (base, handle)
+}
+
 /// Stamp `pane` as a fresh IDLE claude agent. `--state done` is then idle + `@agent_attention`, so
 /// the marker alone decides the match — which is what the clear ordering turns on.
 fn stamp_idle_claude(s: &Scratch, pane: &str) {
@@ -224,8 +251,62 @@ fn vanished_pane_exits_three() {
     }
     let s = Scratch::new("act_vanished");
     let _pane = s.new_shell_pane();
-    let out = act(&s, &["approve", "--pane", "%999"]);
+    let out = act(&s, &["approve", "--pane", "%999", "--json"]);
     assert_eq!(out.status.code(), Some(3), "a nonexistent pane is exit 3");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(r#""reason":"pane-gone""#),
+        "the tmux producer of `vanished` names the pane: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("pane %999 vanished"),
+        "a genuinely gone pane still says so: {stderr}"
+    );
+}
+
+/// A permission reply the server answers `404` is the REQUEST that went away, not the pane. The
+/// `vanished` outcome and exit 3 are deliberate (the act's target disappeared), but the message and
+/// the `reason` token have to name which target: re-firing approve at an already-answered request is
+/// the most likely refusal on the API lane and "pane vanished" points the user at tmux for something
+/// tmux did not do.
+#[test]
+fn api_404_is_request_gone_and_never_blames_the_pane() {
+    if !have_tmux() {
+        return;
+    }
+    let (endpoint, server) = mock_http("HTTP/1.1 404 Not Found");
+    let s = Scratch::new("act_api_404");
+    let pane = s.new_shell_pane();
+    stamp_blocked_opencode(&s, &pane, "per_spent", &endpoint);
+
+    let out = act(&s, &["approve", "--pane", &pane, "--json"]);
+    let _ = server.join();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a spent request is still exit 3"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(r#""outcome":"vanished""#),
+        "the outcome token does not move: {stdout}"
+    );
+    assert!(
+        stdout.contains(r#""reason":"request-gone""#),
+        "the reason names the request: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("pane"),
+        "the pane is alive and must not be blamed: {stderr}"
+    );
+    assert!(
+        stderr.contains("already answered or withdrawn"),
+        "the line says what actually happened: {stderr}"
+    );
+    // The pane really is still there, so the assertion above is not vacuously true.
+    assert_eq!(s.pane_option(&pane, "@agent_name"), "opencode");
 }
 
 /// `--all` fans out over every selector-matched pane: both panes get the keystroke, the envelope

@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use tma_core::{ActionKind, ActionManifest, AgentRow, FoldConfig, Selector, When};
-use tma_runtime::broker::{self, ActResult, Outcome, TmuxBroker};
+use tma_runtime::broker::{self, ActResult, Gone, Outcome, TmuxBroker};
 use tma_runtime::json::{JsonWriter, JSON_SCHEMA};
 use tma_runtime::{actions, cycle, manifests, MenuItem};
 
@@ -390,7 +390,17 @@ fn human_note(r: &ActResult) -> Option<String> {
             r.pane,
             r.reason().unwrap_or("refused"),
         )),
-        Outcome::Vanished => Some(format!("tma: pane {} vanished (exit {code})", r.pane)),
+        // `vanished` is one token for two events; the sentence has to name which. A 404 on the API
+        // lane is the permission request, on a pane that is still perfectly alive, and pointing the
+        // user at tmux for it sends them looking in the wrong place.
+        Outcome::Vanished(Gone::Pane) => {
+            Some(format!("tma: pane {} vanished (exit {code})", r.pane))
+        }
+        Outcome::Vanished(Gone::Request) => Some(format!(
+            "tma: `{}` found nothing to answer on {}: the request was already answered or \
+             withdrawn (exit {code})",
+            r.action, r.pane
+        )),
         Outcome::Error(msg) => Some(format!("tma: `{}` failed: {msg} (exit {code})", r.action)),
     }
 }
@@ -820,7 +830,7 @@ mod tests {
             Outcome::Spawned,
             Outcome::Timeout,
             Outcome::Refused(Refusal::Gate(RefusalReason::Gated)),
-            Outcome::Vanished,
+            Outcome::Vanished(Gone::Pane),
             Outcome::Error(String::new()),
         ]
         .iter()
@@ -878,7 +888,7 @@ mod tests {
             "%3",
             Outcome::Refused(Refusal::Gate(RefusalReason::Gated)),
         );
-        let vanished = result("approve", "%4", Outcome::Vanished);
+        let vanished = result("approve", "%4", Outcome::Vanished(Gone::Pane));
         let errored = result("approve", "%5", Outcome::Error("boom".to_string()));
         let worst = |rs: &[ActResult]| {
             rs.iter()

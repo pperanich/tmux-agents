@@ -261,8 +261,17 @@ fn api_action_404_is_vanished() {
         broker::FireArgs::default(),
     );
     let _ = server.join();
-    assert_eq!(r.outcome, Outcome::Vanished, "a 404 is the target vanished");
+    assert_eq!(
+        r.outcome.token(),
+        "vanished",
+        "a 404 is the target vanished"
+    );
     assert_eq!(r.exit_code(), 3);
+    assert_eq!(
+        r.reason(),
+        Some("request-gone"),
+        "the request went away; the pane is still here"
+    );
 }
 
 #[test]

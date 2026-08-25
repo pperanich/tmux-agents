@@ -10,6 +10,17 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **`tma act` blamed the pane when an OpenCode permission reply came back `404`.** Re-firing
+  `approve` at a request the server had already answered or withdrawn printed
+  `tma: pane %0 vanished (exit 3)` for a pane that was plainly still there. The `vanished` outcome
+  and exit 3 do not move (the act's target really did disappear), but the line now says what
+  happened: ``tma: `approve` found nothing to answer on %0: the request was already answered or
+  withdrawn (exit 3)``. `--json` `reason`, previously `null` on every `vanished` result, now carries
+  which target went away: `request-gone` for the API 404, `pane-gone` for tmux's own
+  `can't find pane` / `no such pane`.
+
 ## [0.5.0] - 2026-08-25
 
 ### Fixed

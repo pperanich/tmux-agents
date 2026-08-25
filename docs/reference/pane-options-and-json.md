@@ -242,7 +242,7 @@ The result of firing one action, a schema-1 object with this exact key set. See
 | `pane` | string | the target pane id |
 | `outcome` | string | the closed outcome token (below) |
 | `exit_code` | number | the process exit code this outcome maps to; for an `exited` outcome it is the exec child's own code |
-| `reason` | string or null | the refusal reason token when `outcome` is `refused`, `null` otherwise |
+| `reason` | string or null | the refusal reason token when `outcome` is `refused`, which target went away when `outcome` is `vanished`, `null` otherwise |
 
 `tma act --all --json` wraps those same objects: `{ "schema": 1, "results":
 [ ... ] }`, one element per resolved target in the order they were fired, each
@@ -257,11 +257,14 @@ API-channel answer delivered over HTTP, a 2xx), `exited` (a synchronous exec
 child finished; `exit_code` is its code), `spawned` (a detached supervisor
 launched), `timeout` (a synchronous child killed at `timeout_ms`), `refused`
 (`reason` carries which gate), `vanished` (tmux reports the pane gone, or an
-API target answered/withdrawn between gate and act — a 404), `error` (broker
-runtime failure: an unreachable API server, or a tmux command the server refused,
-whose stderr rides in the message). `reason` is one of `gated`,
-`requires-unmet`, `wrong-agent`, `no-coverage` (all exit `4`), or `locked` (exit
-`5`).
+API target answered/withdrawn between gate and act — a 404; `reason` carries
+which), `error` (broker runtime failure: an unreachable API server, or a tmux
+command the server refused, whose stderr rides in the message). `reason` is one
+of `gated`, `requires-unmet`, `wrong-agent`, `no-coverage` (all exit `4`),
+`locked` (exit `5`), or — on a `vanished` outcome, both exit `3` — `pane-gone`
+(tmux says the pane is gone) and `request-gone` (the API server answered `404`:
+the permission request was already answered or withdrawn, on a pane that is
+still there).
 
 ## `tma act` list document
 
