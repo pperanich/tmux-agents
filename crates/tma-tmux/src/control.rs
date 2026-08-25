@@ -41,6 +41,12 @@ pub const SWEEP_DEGRADED: Duration = Duration::from_secs(5);
 /// undetected with no client fd to EOF. Runtime value from `[daemon] zero_member_recheck_secs`.
 pub const EMPTY_POOL_RECHECK: Duration = Duration::from_secs(1);
 
+/// How soon the loop re-wakes to retry a post-attach seed whose `list-panes` read failed (see
+/// [`seed_attached`]). Kept under [`QUIET_THRESHOLD`] so a retried seed still produces its edge on
+/// the same cadence an ordinary `%output` burst would; and negligible next to what provoked it,
+/// since a read that fails on a loaded box has already spent the 3 s `TMUX_TIMEOUT` getting there.
+const SEED_RETRY: Duration = Duration::from_millis(250);
+
 /// Cap on buffered activity edges (bounded memory). If the consumer drains slowly the oldest edges
 /// are dropped; a lost capture trigger is self-healed by the reconciliation sweep.
 const MAX_EDGES: usize = 1024;
@@ -266,6 +272,10 @@ pub struct ControlPool {
     /// Monotone counters for the introspection status file (tests + operators).
     edges_emitted: u64,
     recoveries: u64,
+    /// How many post-attach seeds were deferred because their `list-panes` read failed. Nonzero
+    /// means the box was slow enough to trip `TMUX_TIMEOUT` mid-attach, which is the
+    /// one thing that turns a quiet-edge latency into a sweep-cadence one.
+    seed_retries: u64,
     /// Whether the pool has ever held ≥1 client, so the initial startup populate is not
     /// miscounted as a zero-member recovery.
     ever_populated: bool,
@@ -287,6 +297,7 @@ impl ControlPool {
             newly_attached: Vec::new(),
             edges_emitted: 0,
             recoveries: 0,
+            seed_retries: 0,
             ever_populated: false,
         }
     }
@@ -385,16 +396,23 @@ impl ControlPool {
 
     /// Poll timeout: the nearest active pane's quiet deadline (so the loop wakes to emit its edge),
     /// else the `sweep` cadence. Clamped to [10ms, sweep] so it never busy-spins. `now` is the
-    /// caller's monotone clock, threaded in so the clamp is deterministic under test.
+    /// caller's monotone clock, threaded in so the clamp is deterministic under test. A deferred
+    /// post-attach seed shortens it to [`SEED_RETRY`]: nothing else in the pool is waiting on a
+    /// timer then, so without this the retry would sit until the next sweep.
     fn poll_timeout(&self, now: Instant, sweep: Duration) -> Duration {
         let nearest = self
             .active
             .values()
             .map(|last| (*last + self.quiet_threshold).saturating_duration_since(now))
             .min();
-        match nearest {
+        let base = match nearest {
             Some(rem) => rem.max(Duration::from_millis(10)).min(sweep),
             None => sweep,
+        };
+        if self.newly_attached.is_empty() {
+            base
+        } else {
+            base.min(SEED_RETRY)
         }
     }
 
@@ -407,6 +425,13 @@ impl ControlPool {
     /// Total active→quiet edges emitted over the pool's life (monotone; introspection).
     pub fn edges_emitted(&self) -> u64 {
         self.edges_emitted
+    }
+
+    /// `true` while a post-attach seed is still owed a successful `list-panes` (see
+    /// [`seed_attached`]). The serve loop flushes status on it, so a run that hit the slow-box
+    /// path says so in its counters instead of only looking mysteriously late.
+    pub fn pending_seed(&self) -> bool {
+        !self.newly_attached.is_empty()
     }
 
     /// `true` when the pool holds no clients. The daemon then shortens its poll timeout so a gone
@@ -434,17 +459,24 @@ impl ControlPool {
     ) {
         let mut sids: Vec<&String> = self.clients.keys().collect();
         sids.sort();
+        let sessions = sids
+            .iter()
+            .map(|s| s.as_str())
+            .collect::<Vec<_>>()
+            .join(" ");
         let body = format!(
-            "probe={}\nsweep_ms={}\ndegraded={}\nclients={}\nsessions={}\nedges={}\nactive={}\nrecoveries={}\n{}",
-            probe.as_str(),
-            sweep.as_millis(),
-            u8::from(probe == ProbeOutcome::Unavailable),
-            self.clients.len(),
-            sids.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(" "),
-            self.edges_emitted,
-            self.active.len(),
-            self.recoveries,
-            extra,
+            "probe={probe}\nsweep_ms={sweep_ms}\ndegraded={degraded}\nclients={clients}\n\
+             sessions={sessions}\nedges={edges}\nactive={active}\nrecoveries={recoveries}\n\
+             pending_seeds={pending_seeds}\nseed_retries={seed_retries}\n{extra}",
+            probe = probe.as_str(),
+            sweep_ms = sweep.as_millis(),
+            degraded = u8::from(probe == ProbeOutcome::Unavailable),
+            clients = self.clients.len(),
+            edges = self.edges_emitted,
+            active = self.active.len(),
+            recoveries = self.recoveries,
+            pending_seeds = self.newly_attached.len(),
+            seed_retries = self.seed_retries,
         );
         // Best-effort, atomic-ish: write a temp then rename so a reader never sees a torn file.
         let tmp = path.with_extension("tmp");
@@ -494,7 +526,14 @@ pub fn probe_push(tmux: &Tmux, cross_session: bool) -> ProbeOutcome {
         // Could not create the probe session: fail OPEN, so a transient hiccup never pins the daemon
         // to the degraded sweep (the sweep still repairs real delivery failures). AssumedAvailable
         // keeps that cadence while recording that delivery was never actually observed.
-        Err(_) => return ProbeOutcome::AssumedAvailable,
+        Err(_) => {
+            // The error may be a `TMUX_TIMEOUT` expiry, which says only that the CALL did not
+            // return in 3 s — tmux may well have created the session, and we never got its id.
+            // Kill it by the name we chose, or the pool adopts a session the daemon does not know
+            // it owns and every "this daemon has one client" reader sees two forever.
+            let _ = tmux.kill_session(&name);
+            return ProbeOutcome::AssumedAvailable;
+        }
     };
 
     // Attach target: the probe session itself (should deliver its marker) or, for the forced
@@ -518,7 +557,12 @@ pub fn probe_push(tmux: &Tmux, cross_session: bool) -> ProbeOutcome {
         None => ProbeOutcome::Available,
     };
 
-    let _ = tmux.kill_session(&probe_sid);
+    // Retry the teardown by name once if the id-keyed kill failed: on a loaded box that failure is
+    // a `TMUX_TIMEOUT` expiry rather than a gone session, and a probe session left behind is one
+    // the pool will attach a client to and hold for the daemon's whole life.
+    if tmux.kill_session(&probe_sid).is_err() {
+        let _ = tmux.kill_session(&name);
+    }
     outcome
 }
 
@@ -623,15 +667,23 @@ pub fn dispatch_ready(
 /// would otherwise sit unnoticed until a sweep. Cost is one `list-panes` per attach (daemon start,
 /// a new session, a client respawn) plus the capture tier's usual one-capture-per-agent-pane; a
 /// pane still producing output just has its mark refreshed, so the edge still fires exactly once.
-/// A failed read is dropped: the sweep remains the backstop.
+///
+/// A failed read DEFERS the seed rather than dropping it: the queue is taken only once `list-panes`
+/// has actually returned. That read is a `tmux` one-shot under the 3 s `TMUX_TIMEOUT`
+/// cap, and on a CPU-saturated box (a 3-core CI runner mid-`cargo test`, where process spawn alone
+/// measures p50 3.8 s) it times out routinely. Dropping the seed there costs the pane a full sweep
+/// cadence — 45 s of an unnoticed blocked prompt — which is precisely the gap this function exists
+/// to close, so a transient failure must not spend it. [`ControlPool::poll_timeout`] shortens the
+/// next wake to [`SEED_RETRY`] while a seed is pending, so the retry is prompt rather than a sweep away.
 pub fn seed_attached(pool: &mut ControlPool, tmux: &Tmux, now: Instant) {
-    let sessions = std::mem::take(&mut pool.newly_attached);
-    if sessions.is_empty() {
+    if pool.newly_attached.is_empty() {
         return;
     }
     let Ok(panes) = tmux.list_panes() else {
+        pool.seed_retries += 1;
         return;
     };
+    let sessions = std::mem::take(&mut pool.newly_attached);
     for p in panes.iter().filter(|p| sessions.contains(&p.session)) {
         pool.mark_active(p.pane_id.clone(), now);
     }
@@ -816,6 +868,62 @@ mod tests {
             t <= QUIET_THRESHOLD && t < sweep,
             "active ⇒ near quiet deadline, got {t:?}"
         );
+    }
+
+    /// A `Tmux` whose binary cannot be spawned, standing in for the read that trips the 3 s
+    /// `TMUX_TIMEOUT` on a saturated box: both reach `seed_attached` as `Err`, which is the only
+    /// distinction the function makes.
+    fn unreadable_tmux() -> Tmux {
+        Tmux::connect(&crate::tmux::Server {
+            bin: Some("/nonexistent/tmux".into()),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn a_failed_seed_read_keeps_the_attach_queue_and_shortens_the_next_wake() {
+        let mut pool = ControlPool::default();
+        pool.newly_attached.push("s1".into());
+        let now = Instant::now();
+
+        seed_attached(&mut pool, &unreadable_tmux(), now);
+
+        // The queue survives: dropping it would leave every pane that printed during the attach
+        // window to the next sweep, which is the whole latency the seed exists to avoid.
+        assert_eq!(
+            pool.newly_attached,
+            ["s1"],
+            "a failed read must not consume the queue"
+        );
+        assert_eq!(
+            pool.seed_retries, 1,
+            "the deferral is counted for the status file"
+        );
+        assert!(pool.pending_seed());
+        // Nothing is active, so without the pending-seed clamp the loop would block a full sweep
+        // before retrying.
+        let t = pool.poll_timeout(now, SWEEP_NORMAL);
+        assert_eq!(
+            t, SEED_RETRY,
+            "a pending seed must shorten the wake, got {t:?}"
+        );
+    }
+
+    #[test]
+    fn repeated_seed_deferrals_do_not_duplicate_the_queue_entry() {
+        // The retry is idempotent by construction: the queue holds session NAMES, and a repeat
+        // deferral cannot enqueue the same session twice (only an attach does).
+        let mut pool = ControlPool::default();
+        pool.newly_attached.push("s1".into());
+        let tmux = unreadable_tmux();
+        seed_attached(&mut pool, &tmux, Instant::now());
+        seed_attached(&mut pool, &tmux, Instant::now());
+        assert_eq!(
+            pool.newly_attached,
+            ["s1"],
+            "retries must not duplicate the entry"
+        );
+        assert_eq!(pool.seed_retries, 2);
     }
 
     #[test]
