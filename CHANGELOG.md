@@ -12,6 +12,18 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Fixed
 
+- **A pane that printed while its control client was still attaching went undetected.** The daemon
+  counted a control-mode client as coverage the moment it was spawned, but tmux streams `%output`
+  only from the attach onward and never replays — so output produced in that gap (seconds wide on a
+  loaded box) raised no quiet edge, and a hookless blocked prompt, being the absence of further
+  output, never raised one later either. The pool now marks a session's panes active when its client
+  actually attaches, so each gets one on-demand look a quiet threshold later. This also covers
+  daemon start, new sessions, and client respawns after a dropped connection.
+- **The reconciliation sweep drifted a full cadence late.** The serve loop re-armed a fresh sweep
+  interval on every wake instead of waiting out the remaining time to the sweep deadline, so the
+  45-second default could first fire at ~83 seconds — late exactly when the attach gap above needed
+  the rescue. The poll now waits to the deadline.
+
 - **`tma act` blamed the pane when an OpenCode permission reply came back `404`.** Re-firing
   `approve` at a request the server had already answered or withdrawn printed
   `tma: pane %0 vanished (exit 3)` for a pane that was plainly still there. The `vanished` outcome
