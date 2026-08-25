@@ -9,9 +9,24 @@ for both: the pane-option schema and the JSON schemas.
 ## The stamp grammar
 
 Option values are machine tokens, never glyphs. State is one of the closed
-vocabulary `idle`, `working`, `blocked`, `unknown`; `@agent_detail` is a
-lowercase machine token (`permission`, `rate_limit`). Glyph and color rendering
+vocabulary `idle`, `working`, `blocked`, `unknown`. Glyph and color rendering
 happens only in the surfaces, and is configurable.
+
+`@agent_detail` is a lowercase machine token (`[a-z0-9_-]`) qualifying *why* the
+pane is in that state. **Unlike `state`, this vocabulary is open and unstable
+until 1.0**: an agent manifest may emit a token this engine has never heard of,
+and it round-trips intact rather than erroring. Read it defensively — match the
+tokens you know and degrade gracefully on the rest. What the bundled manifests
+emit today:
+
+| token | state | meaning |
+|---|---|---|
+| `permission` | `blocked` | a tool-use permission prompt: approving grants the one action in front of the user |
+| `plan` | `blocked` | a plan-approval dialog. Its affirmative option grants **every following action**, so `tma act approve` deliberately does not resolve here |
+| `trust` | `blocked` | a workspace-trust gate. Its affirmative option grants the **whole folder**, so neither `approve` nor `deny` resolves here |
+
+`tma-core` additionally declares `question`, `error`, `rate_limit`,
+`background` and `compacting` as constants; no bundled manifest emits them yet.
 
 Every `@agent_*_at` value is epoch **milliseconds** (13 digits today), not
 seconds. Millisecond resolution is what keeps two episodes opening in the same
@@ -90,7 +105,7 @@ A versioned, additive-only document. The top level is `{ "schema": 1, "agents":
 | `pane` | string | tmux pane id (e.g. `%5`) |
 | `agent` | string | agent name |
 | `state` | string | `idle` / `working` / `blocked` / `unknown` |
-| `detail` | string or null | detail token, `null` when none |
+| `detail` | string or null | detail token, `null` when none. [Open vocabulary](#the-stamp-grammar) — read defensively |
 | `since` | number | epoch **ms** of the last state transition (original unsuffixed key, kept for compatibility) |
 | `since_ms` | number | the same value as `since`; names the unit, preferred in new consumers |
 | `episode_ms` | number | epoch **ms** of the instant `wait --since` compares against: the later of `since_ms` and `@agent_turn_at`. Equal to `since_ms` until a second completion lands on a pane that never left `idle`, and the value a supervisor loop feeds back as its next `--since` (see [Drive a supervisor loop](../how-to/block-a-script-on-agent-state.md#drive-a-supervisor-loop)) |
@@ -166,21 +181,40 @@ set:
 
 | key | type | meaning |
 |---|---|---|
-| `schema` | number | payload schema version (`1`); kept the first key so a reader sees it up front |
+| `schema` | number | payload schema version (`2`); kept the first key so a reader sees it up front |
 | `agent` | string | agent name |
 | `pane` | string | tmux pane id |
 | `state` | string | the landed state (`blocked`, or `idle` for a completion) |
-| `detail` | string or null | detail token, `null` when none |
+| `detail` | string or null | detail token, `null` when none. [Open vocabulary](#the-stamp-grammar) — read defensively |
 | `session` | string or null | owning agent session id, `null` when none |
 | `locator` | string | `session:window.pane` |
-| `title` | string | pane title |
+| `title` | string | pane title. **Absent unless `[notify] include_title = true`** — see below |
 | `repo` | string | repo name resolved from the pane's working directory, `""` when it is not a checkout |
 | `branch` | string | branch name (the literal `HEAD` when detached), `""` when unresolved |
-| `since_ms` | number | age of the episode when the notification fired (`now - max(@agent_since, @agent_turn_at)` — the turn instant, since a second completion inside one idle run does not move `@agent_since`); a hook's own direct fire reads `0`, the daemon's reads its dispatch latency |
+| `since_ms` | number | age of the episode when the notification fired (`now - episode_ms`); a hook's own direct fire reads `0`, the daemon's reads its dispatch latency |
+| `episode_ms` | number | epoch **ms** of the episode this fire belongs to: `max(@agent_since, @agent_turn_at)`, the same instant the row's `episode_ms` reports. Absolute, so two fires for one episode carry the same value and a sink can collapse on it (`apns-collapse-id` and friends); `since_ms` is the age of this instant and cannot be compared for equality against a stored stamp |
 | `context_pct` | number or null | the pane's stored context-window utilization percent, `null` when the agent reports none |
 
+### The pane title is not sent
+
+The pane title is the one field whose content the pane's own program controls,
+and it routinely holds a branch name, a repo path or a prompt fragment.
+`notify.command` pipes this payload to whatever you configured — ntfy, Pushover,
+an Apple Shortcut — so the title would reach that service's operator on every
+fire. Since schema 2 it is **omitted by default**.
+
+`[notify] include_title = true` puts it back, and it governs all three carriers
+together: the payload's `title` key, the `TMA_TITLE` environment variable, and
+the `notify.log` audit line. The host-local `display-message` baseline is not a
+carrier and always shows the title.
+
+The standing rule for this payload: **no field enters it that is not safe
+world-readable.** Its writer is also the audit log's writer, and that log is the
+file most likely to end up pasted into an issue.
+
 The same values are also exported as environment variables (`TMA_AGENT`,
-`TMA_PANE`, `TMA_STATE`, `TMA_LOCATOR`, `TMA_TITLE`, `TMA_SINCE_MS`, plus
+`TMA_PANE`, `TMA_STATE`, `TMA_LOCATOR`, `TMA_SINCE_MS`, `TMA_EPISODE_MS`, plus
+`TMA_TITLE` when `include_title` is on,
 `TMA_DETAIL`, `TMA_SESSION`, `TMA_REPO`, `TMA_BRANCH` and `TMA_CONTEXT_PCT` when
 they have a value), so a hook reads whichever is more convenient. Unlike the
 JSON, a value with nothing to report is an unset variable rather than an empty

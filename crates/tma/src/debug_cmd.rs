@@ -96,7 +96,8 @@ fn run_notify_test(trigger: &str, config: &config::Config) -> ExitCode {
         .notify
         .commands()
         .overridden_by(config::notify_cmd_env());
-    let out = tma_runtime::notify::notify_test(&commands, trigger, tma_runtime::now_ms());
+    let sinks = config.notify.sinks();
+    let out = tma_runtime::notify::notify_test(&commands, &sinks, trigger, tma_runtime::now_ms());
 
     println!("payload   {}", out.payload);
     match &out.command {

@@ -62,6 +62,9 @@ format = "claude-statusline-json"
 # "❯ 1. Yes", so it stays a held history view rather than a false block.
 # Backed by real captures at two widths each: the notes.txt write permission and the
 # first-run trust dialog.
+# NOTE: this rule still MATCHES the plan and trust dialogs — it is the two priority-110 variant
+# rules at the bottom of this file that decide what they are stamped as. Widening this pattern
+# would break that, because the variants refine the same line.
 [[rules]]
 state = "blocked"
 detail = "permission"
@@ -109,3 +112,36 @@ state = "idle"
 priority = 40
 region = "tail_lines(6)"
 match = { any = [ { contains = "⏵⏵" }, { contains = "⏸" } ] }
+
+# --- blocked variants: the two dialogs whose option 1 is NOT "approve this one action" -----------
+# Both are same-line refinements of the rule above: the `❯ 1. Yes` anchor it matches is the very
+# line these two discriminate on, so the discriminator is inside the evaluated region wherever the
+# generic rule can fire. Priority 110 beats the generic 100, so the fold stamps the specific detail.
+# Order in the file does not decide the winner — the engine resolves highest-priority-per-state —
+# but these are APPENDED rather than inserted because `tests/claude_manifest.rs` maps rule indices
+# by declaration order.
+#
+# Why they need their own detail: `approve.toml` fires `1` at `blocked/permission`, and on these two
+# dialogs `1` does not mean "approve this action". Re-typing the dialog is sufficient to stop the
+# fire; the action manifests are unchanged. `deny.toml` is gated identically, so its Escape stops
+# firing here too — deliberate, with per-detail deny rules scheduled separately.
+# Captured on claude 2.1.236 at w60/w80/w100/w120/w200; option 1 reads the same at every width, so
+# the match is structural, not a narrow-pane artefact.
+
+# plan approval — option 1 is "Yes, and use auto mode": it does not approve one action, it switches
+# the session into auto-approving everything that follows.
+[[rules]]
+state = "blocked"
+detail = "plan"
+priority = 110
+region = "tail_lines(30)"
+match = { line_regex = '^\s*❯ 1\. Yes, and use auto mode' }
+
+# first-run trust gate — option 1 grants the whole folder read/edit/execute, and `1` is exactly what
+# approve fires.
+[[rules]]
+state = "blocked"
+detail = "trust"
+priority = 110
+region = "tail_lines(30)"
+match = { line_regex = '^\s*❯ 1\. Yes, I trust this folder' }

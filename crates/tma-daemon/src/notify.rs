@@ -589,6 +589,7 @@ mod tests {
             bell: true,
             osc: true,
             log: None,
+            include_title: false,
         };
         ns.reconfigure(
             NotifyCommands::default(),

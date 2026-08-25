@@ -345,6 +345,14 @@ pub struct NotifySection {
     /// answer to the daemon's in-memory transition ring: durable, and a record of what was sent.
     #[serde(default)]
     pub log: Option<String>,
+    /// Carry the pane title out to the notify carriers (default `false`). A pane title routinely
+    /// holds a branch name, a repo path or a prompt fragment, and `notify.command` pipes the payload
+    /// to whatever the user configured — ntfy, Pushover, an Apple Shortcut — so it reaches that
+    /// service's operator. Off by default, and it governs all three carriers together: the JSON
+    /// payload's `title` key, the `TMA_TITLE` env var, and the `notify.log` audit line. The
+    /// host-local `display-message` baseline is not a carrier and always shows the title.
+    #[serde(default)]
+    pub include_title: bool,
     /// `context_high`: fire once when a pane's context utilization crosses `threshold`, on its
     /// own `@agent_context_notified_at` armed flag (never the state lane's marker). Absent ⇒ disabled;
     /// a present sub-table with a `threshold` percent enables it. Rearms below `threshold - 10`.
@@ -391,6 +399,9 @@ pub struct NotifySinks {
     pub osc: bool,
     /// `notify.log`: the JSONL audit file every fire appends to, `None` when unconfigured.
     pub log: Option<PathBuf>,
+    /// `notify.include_title`: let the pane title out to the carriers. Default `false` — see
+    /// [`NotifySection::include_title`]. Every carrier reads this one flag, so they redact together.
+    pub include_title: bool,
 }
 
 /// The resolved notify commands: the global `notify.command` plus each trigger's optional override.
@@ -448,6 +459,7 @@ impl Default for NotifySection {
             bell: false,
             osc: false,
             log: None,
+            include_title: false,
             context_high: None,
         }
     }
@@ -476,6 +488,7 @@ impl NotifySection {
                 .as_ref()
                 .filter(|p| !p.is_empty())
                 .map(PathBuf::from),
+            include_title: self.include_title,
         }
     }
 

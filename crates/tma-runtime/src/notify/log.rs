@@ -14,11 +14,18 @@ pub(super) fn append(path: &Path, line: &str) {
             let _ = std::fs::create_dir_all(dir);
         }
     }
-    if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&path)
+    let mut opts = std::fs::OpenOptions::new();
+    opts.create(true).append(true);
+    // 0600, matching the daemon socket's discipline in `docs/explanation/security-model.md`. Without
+    // an explicit mode the file lands at `0666 & ~umask`: 0664 under the common `umask 002`, and
+    // world-WRITABLE under `umask 000`. `mode` applies only when this call creates the file, so an
+    // existing log keeps whatever the user set.
+    #[cfg(unix)]
     {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    if let Ok(mut f) = opts.open(&path) {
         use std::io::Write;
         // One write of a line that is far under PIPE_BUF-sized atomicity concerns for a regular
         // file; appended under O_APPEND so concurrent writers do not clobber each other's offsets.

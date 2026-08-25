@@ -209,9 +209,13 @@ log = "~/.local/state/tma/notifications.jsonl"
 Each line is the hook payload plus an `at` field with the fire time in epoch
 milliseconds; a detached action's completion is logged the same way, carrying
 `action` and `outcome` where a state line carries `state`. It is written by whichever process fired (daemon or hook), the
-parent directory is created for you, `~` is expanded, and the file is appended to,
-never rewritten. A log that cannot be written is skipped silently, since a hook
-must never fail on its notifications.
+parent directory is created for you, `~` is expanded, the file is created `0600`
+and appended to, never rewritten. A log that cannot be written is skipped
+silently, since a hook must never fail on its notifications.
+
+The line carries no pane title unless you set `include_title = true` — it shares
+one writer with the payload that goes to your carrier, so the two redact
+together.
 
 ```sh
 jq -r 'select(.state=="blocked") | "\(.at) \(.repo)@\(.branch) \(.locator)"' \

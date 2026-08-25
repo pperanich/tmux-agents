@@ -119,7 +119,8 @@ surface split changes.
 | `on` | `["blocked"]` | Which transitions fire a notification. Add `"done"` for working-to-idle completions. |
 | `bell` | `false` | Also ring the firing pane's terminal bell. |
 | `osc` | `false` | Also write an OSC 9 desktop notification (`<agent> <state>`) to the firing pane's tty. Off by default because emulator support varies; it crosses ssh/mosh/tmate, since the emulator at your end renders it. See [Set up notifications](../how-to/notifications.md#post-a-desktop-notification-from-the-terminal). |
-| `log` | unset | Path to a JSONL file; every fired notification appends one line (the hook payload plus an `at` epoch). `~` is expanded and parent directories are created. Errors are silent, never failing a hook. |
+| `log` | unset | Path to a JSONL file; every fired notification appends one line (the hook payload plus an `at` epoch). `~` is expanded and parent directories are created; the file is created `0600`. Errors are silent, never failing a hook. |
+| `include_title` | `false` | Send the pane title to the notify carriers. Off by default: a pane title routinely holds a branch name, a repo path or a prompt fragment, and `command` pipes the payload to whatever you configured (ntfy, Pushover, a Shortcut), so the title would reach that service's operator. Turning it on restores the payload's `title` key, the `TMA_TITLE` variable and the audit line's title together. The host-local `display-message` always shows the title and is unaffected. |
 | `blocked` | unset | A sub-table routing the `blocked` trigger: `{ command = "..." }`. |
 | `done` | unset | The same for the `done` trigger. |
 | `context_high` | unset | A sub-table `{ threshold = <percent>, command = "..." }`. When present, fire once when a pane's context utilization crosses `threshold`; naming the sub-table is the opt-in, so `threshold` is required (`command` is not). Unset means no context notifications. |
