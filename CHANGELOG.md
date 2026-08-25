@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.5.1] - 2026-08-25
+
 ### Fixed
 
 - **A pane that printed while its control client was still attaching went undetected.** The daemon
@@ -555,7 +557,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.0...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.1...HEAD
+[0.5.1]: https://github.com/pperanich/tmux-agents/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/pperanich/tmux-agents/compare/v0.4.6...v0.5.0
 [0.4.6]: https://github.com/pperanich/tmux-agents/compare/v0.4.5...v0.4.6
 [0.4.5]: https://github.com/pperanich/tmux-agents/compare/v0.4.4...v0.4.5
