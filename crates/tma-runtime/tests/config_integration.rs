@@ -277,8 +277,16 @@ fn custom_process_name_detects_a_formerly_unmatched_pane() {
 /// event, the caller's `[notify]` config, and one `tma event` fired exactly as the wrapper would with
 /// NO `TMA_NOTIFY_*` env at all, so only the config can fire it (no daemon runs). Returns the firing
 /// pane, having asserted the event direct-stamped `blocked`.
+/// A distinctive pane title the notify tests can search every carrier for. Shaped like the thing a
+/// real title leaks — a branch name with a ticket id — so a hit in a payload, a log line or an env
+/// var is unambiguous.
+const SECRET_TITLE: &str = "feat/ACME-1234-rotate-customer-keys";
+
 fn daemonless_blocked_fire(s: &Scratch, notify_toml: &str) -> String {
     let (pane, names) = setup_pane(s, "READY\\n");
+    // Every notify fire in this file runs against a pane with a title worth redacting, so the
+    // privacy assertions below have something real to look for.
+    s.tmux(&["select-pane", "-t", &pane, "-T", SECRET_TITLE]);
     let names_toml = names
         .iter()
         .map(|n| format!("\"{n}\""))
@@ -414,7 +422,96 @@ fn notify_log_appends_one_line_per_fire() {
         lines[0]
     );
     // No `command` is configured: the log is a standalone sink, not a side effect of a hook.
-    assert!(lines[0].starts_with(r#"{"schema":1,"at":"#));
+    assert!(lines[0].starts_with(r#"{"schema":2,"at":"#));
+
+    // A-512 / A-514, end to end through a real fire: the audit line must not carry the pane title.
+    // The log is the file most likely to be pasted into an issue, and it shares one writer with the
+    // payload that goes to a third-party carrier — so if the title is here, it went out too.
+    assert!(
+        !lines[0].contains(SECRET_TITLE) && !lines[0].contains(r#""title""#),
+        "the pane title reached the audit line: {}",
+        lines[0]
+    );
+    // A-515: the absolute episode stamp rides, and the age survives beside it.
+    assert!(
+        lines[0].contains(r#""episode_ms":"#) && lines[0].contains(r#""since_ms":"#),
+        "both episode fields present: {}",
+        lines[0]
+    );
+
+    // A-516: the log is created 0600. Without an explicit mode it lands at `0666 & ~umask` — 0664
+    // under the common `umask 002`, and world-WRITABLE under `umask 000`.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&log).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "notify log mode is 0o{mode:o}, want 0o600");
+    }
+}
+
+/// A-512 / A-514 for the two carriers a hook actually reads: the JSON on stdin and `TMA_TITLE`.
+/// Redacting the payload but not the env var would leave the title in the channel a shell one-liner
+/// interpolates, which is the one most `[notify] command` recipes use.
+#[test]
+fn the_pane_title_reaches_neither_the_payload_nor_tma_title() {
+    if !common::tmux_available() {
+        return;
+    }
+    let s = Scratch::new("notifyredact");
+    let seen = s.workdir.join("seen.txt");
+    daemonless_blocked_fire(
+        &s,
+        &format!(
+            "[notify]\nfrom_event = true\n\
+             command = 'cat >> {0}; printf \"\\nTMA_TITLE=[%s]\\n\" \"${{TMA_TITLE:-<unset>}}\" >> {0}'\n",
+            seen.display()
+        ),
+    );
+    let body = std::fs::read_to_string(&seen).unwrap_or_default();
+    assert!(!body.is_empty(), "the hook command did not run");
+    assert!(
+        !body.contains(SECRET_TITLE),
+        "the pane title reached the hook: {body}"
+    );
+    assert!(
+        body.contains("TMA_TITLE=[<unset>]"),
+        "TMA_TITLE must be unset, not empty: {body}"
+    );
+    // The rest of the payload still arrives, so a hook has something to format.
+    assert!(body.contains(r#""state":"blocked""#), "{body}");
+    assert!(body.contains(r#""episode_ms":"#), "{body}");
+}
+
+/// The back-compat lever, and the only thing that opens it: `[notify] include_title = true` puts the
+/// title back in all three carriers at once.
+#[test]
+fn include_title_restores_the_title_in_every_carrier() {
+    if !common::tmux_available() {
+        return;
+    }
+    let s = Scratch::new("notifytitleon");
+    let seen = s.workdir.join("seen.txt");
+    let log = s.workdir.join("fires.jsonl");
+    daemonless_blocked_fire(
+        &s,
+        &format!(
+            "[notify]\nfrom_event = true\ninclude_title = true\nlog = '{1}'\n\
+             command = 'cat >> {0}; printf \"\\nTMA_TITLE=[%s]\\n\" \"${{TMA_TITLE:-<unset>}}\" >> {0}'\n",
+            seen.display(),
+            log.display()
+        ),
+    );
+    let body = std::fs::read_to_string(&seen).unwrap_or_default();
+    assert!(
+        body.contains(&format!(r#""title":"{SECRET_TITLE}""#)),
+        "payload title: {body}"
+    );
+    assert!(
+        body.contains(&format!("TMA_TITLE=[{SECRET_TITLE}]")),
+        "env title: {body}"
+    );
+    let line = std::fs::read_to_string(&log).unwrap_or_default();
+    assert!(line.contains(SECRET_TITLE), "log title: {line}");
 }
 
 /// A notify command that exits non-zero is otherwise silent (its output is discarded), so the fire

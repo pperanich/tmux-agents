@@ -10,8 +10,10 @@ use std::process::Stdio;
 use tma_core::stamp::opt;
 use tma_tmux::tmux::PaneRecord;
 
-use super::{failure, hook_command, notification_for, payload_json, CONTEXT_HIGH_WORD};
-use crate::config::{NotifyCommands, NotifyTrigger};
+use super::{
+    failure, hook_command, notification_for, payload_json, TitlePolicy, CONTEXT_HIGH_WORD,
+};
+use crate::config::{NotifyCommands, NotifySinks, NotifyTrigger};
 
 /// Which trigger a test fire impersonates.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -81,9 +83,19 @@ impl NotifyTest {
 /// stderr (the child's stdout is inherited, so a command that prints is visible). The outcome updates
 /// the same failure marker a real fire does, so a passing test clears a stale report and a failing one
 /// leaves the record `tma doctor` shows.
-pub fn notify_test(commands: &NotifyCommands, trigger: TestTrigger, now: u64) -> NotifyTest {
+///
+/// Takes `sinks` as well as `commands` so the printed payload is byte-for-byte what a real fire
+/// sends under this configuration — including whether `[notify] include_title` let the pane title
+/// out. A test fire that showed a title the real one redacts would be worse than no test at all.
+pub fn notify_test(
+    commands: &NotifyCommands,
+    sinks: &NotifySinks,
+    trigger: TestTrigger,
+    now: u64,
+) -> NotifyTest {
     let n = sample_notification(trigger, now);
-    let payload = payload_json(&n);
+    let title = TitlePolicy::from_include(sinks.include_title);
+    let payload = payload_json(&n, title);
     let Some(cmd) = trigger.command(commands).map(str::to_string) else {
         return NotifyTest {
             command: None,
@@ -94,7 +106,7 @@ pub fn notify_test(commands: &NotifyCommands, trigger: TestTrigger, now: u64) ->
         };
     };
 
-    let mut command = hook_command(&cmd, &n);
+    let mut command = hook_command(&cmd, &n, title);
     command.stdin(Stdio::piped()).stderr(Stdio::piped());
     let mut child = match command.spawn() {
         Ok(child) => child,
@@ -209,7 +221,12 @@ mod tests {
         // A clean fire CLEARS the shared marker, which would delete a sibling test's record.
         let _marker = failure::PrivateMarker::new("clean-fire");
         // The command consumes the payload and exits 0: delivered, no error, exit code 0.
-        let out = notify_test(&commands("cat > /dev/null"), TestTrigger::Blocked, NOW);
+        let out = notify_test(
+            &commands("cat > /dev/null"),
+            &NotifySinks::default(),
+            TestTrigger::Blocked,
+            NOW,
+        );
         assert!(out.delivered(), "error: {:?}", out.error);
         assert_eq!(out.code, Some(0));
         assert!(out.payload.contains(r#""state":"blocked""#));
@@ -221,7 +238,12 @@ mod tests {
     #[test]
     fn a_failing_command_reports_its_code_and_stderr() {
         let _marker = failure::PrivateMarker::new("failing-fire");
-        let out = notify_test(&commands("echo boom >&2; exit 3"), TestTrigger::Done, NOW);
+        let out = notify_test(
+            &commands("echo boom >&2; exit 3"),
+            &NotifySinks::default(),
+            TestTrigger::Done,
+            NOW,
+        );
         assert!(!out.delivered());
         assert_eq!(out.code, Some(3));
         assert_eq!(out.error.as_deref(), Some("exited 3"));
@@ -231,7 +253,12 @@ mod tests {
 
     #[test]
     fn an_unconfigured_trigger_runs_nothing() {
-        let out = notify_test(&NotifyCommands::default(), TestTrigger::ContextHigh, NOW);
+        let out = notify_test(
+            &NotifyCommands::default(),
+            &NotifySinks::default(),
+            TestTrigger::ContextHigh,
+            NOW,
+        );
         assert!(out.command.is_none());
         assert!(!out.delivered());
         assert!(out.error.is_none(), "nothing ran, so nothing failed");

@@ -70,8 +70,41 @@ pub struct Notification {
     /// direct fire lands on its own transition, so it reads 0; the daemon's reads its dispatch
     /// latency.
     pub since_ms: u64,
+    /// The episode this fire belongs to, as an **absolute** epoch-ms stamp: `max(@agent_since,
+    /// @agent_turn_at)`, the same instant `AgentRow::episode_at()` reports and `wait --since`
+    /// compares against. [`Self::since_ms`] is that instant's *age*, and an age cannot be compared
+    /// for equality against a stored stamp, so a sink cannot collapse on it: two fires for one
+    /// episode carry two different `since_ms` and look like two episodes. This is the field a
+    /// collapse key is built from (`apns-collapse-id` and friends); `since_ms` stays for display.
+    pub episode_ms: u64,
     /// The pane's stored context-utilization percent, `None` when the agent reports none.
     pub context_pct: Option<u8>,
+}
+
+/// Whether the pane title may leave the host on this fire. Carried as a named type rather than a
+/// bare `bool` because it is threaded through four writers and a silent argument transposition would
+/// be a privacy leak, not a test failure. Built from `[notify] include_title`, default
+/// [`Redact`](TitlePolicy::Redact).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TitlePolicy {
+    /// Drop the title from every carrier: the payload's `title` key, the audit line and `TMA_TITLE`.
+    Redact,
+    /// The user opted back in with `[notify] include_title = true`.
+    Carry,
+}
+
+impl TitlePolicy {
+    fn from_include(include_title: bool) -> TitlePolicy {
+        if include_title {
+            TitlePolicy::Carry
+        } else {
+            TitlePolicy::Redact
+        }
+    }
+
+    fn carries(self) -> bool {
+        self == TitlePolicy::Carry
+    }
 }
 
 /// Build the notification both fire paths send: the ONE place payload fields are derived from a pane
@@ -104,6 +137,10 @@ pub fn notification_for(
             .unwrap_or_default(),
         branch: repo.map(|r| r.branch).unwrap_or_default(),
         since_ms: now.saturating_sub(since),
+        // The same instant `since_ms` is the age of, kept absolute. Every caller must pass the
+        // episode start the ROW reports (`episode_at()` = `max(@agent_since, @agent_turn_at)`), or
+        // a sink keying on this disagrees with `tma ls --json` for the same episode.
+        episode_ms: since,
         context_pct: rec
             .options
             .get(opt::CONTEXT_PCT)
@@ -144,13 +181,17 @@ pub fn fire(
         tmux.osc_notify(&n.pane, &format!("{} {}", n.agent, n.state));
     }
 
+    // One decision for all three carriers below; `display-message` above already ran with the real
+    // title, because it is host-local and never leaves the machine.
+    let title = TitlePolicy::from_include(sinks.include_title);
+
     // Audit line, written before the command so a hung or missing sink cannot cost the record. Both
     // fire paths pass through here, so the log holds every fired notification either way.
     if let Some(path) = &sinks.log {
-        log::append(path, &log_line(n, crate::now_ms()));
+        log::append(path, &log_line(n, crate::now_ms(), title));
     }
 
-    command.and_then(|cmd| spawn_command(cmd, n))
+    command.and_then(|cmd| spawn_command(cmd, n, title))
 }
 
 /// Spawn the hook command via `sh -c`, delivering the payload two ways (a hook reads whichever): as
@@ -158,8 +199,8 @@ pub fn fire(
 /// payload is far under a pipe buffer), and stdin is dropped to signal EOF. Fire-and-forget; the
 /// caller reaps the child. A command that cannot even be spawned leaves a [`failure`] marker: it
 /// delivers nothing and would otherwise be silent forever.
-fn spawn_command(cmd: &str, n: &Notification) -> Option<Child> {
-    let mut command = hook_command(cmd, n);
+fn spawn_command(cmd: &str, n: &Notification, title: TitlePolicy) -> Option<Child> {
+    let mut command = hook_command(cmd, n, title);
     command
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
@@ -173,7 +214,7 @@ fn spawn_command(cmd: &str, n: &Notification) -> Option<Child> {
     };
     if let Some(mut stdin) = child.stdin.take() {
         use std::io::Write;
-        let _ = stdin.write_all(payload_json(n).as_bytes());
+        let _ = stdin.write_all(payload_json(n, title).as_bytes());
         // `stdin` drops here → EOF for the child's reader.
     }
     Some(child)
@@ -182,7 +223,7 @@ fn spawn_command(cmd: &str, n: &Notification) -> Option<Child> {
 /// The `sh -c` invocation carrying one notification's `TMA_*` env, with stdio left to the caller (the
 /// fire path discards output; `tma debug notify-test` keeps stderr). Shared so a test fire runs the
 /// command in exactly the environment a real one does.
-fn hook_command(cmd: &str, n: &Notification) -> Command {
+fn hook_command(cmd: &str, n: &Notification, title: TitlePolicy) -> Command {
     let mut command = Command::new("sh");
     command
         .arg("-c")
@@ -191,8 +232,15 @@ fn hook_command(cmd: &str, n: &Notification) -> Command {
         .env("TMA_PANE", &n.pane)
         .env("TMA_STATE", &n.state)
         .env("TMA_LOCATOR", &n.locator)
-        .env("TMA_TITLE", &n.title)
-        .env("TMA_SINCE_MS", n.since_ms.to_string());
+        .env("TMA_SINCE_MS", n.since_ms.to_string())
+        .env("TMA_EPISODE_MS", n.episode_ms.to_string());
+    // `TMA_TITLE` is the channel a shell one-liner actually interpolates, so it redacts with the
+    // payload, not after it. Unset (not empty) when redacted, so `${TMA_TITLE:-}` degrades cleanly.
+    if title.carries() {
+        command.env("TMA_TITLE", &n.title);
+    } else {
+        command.env_remove("TMA_TITLE");
+    }
     if let Some(d) = &n.detail {
         command.env("TMA_DETAIL", d);
     }
@@ -213,17 +261,22 @@ fn hook_command(cmd: &str, n: &Notification) -> Command {
     command
 }
 
-/// The `schema` version of the notify hook stdin payload. Additive keys keep it `1`; a breaking
+/// The `schema` version of the notify hook stdin payload. Additive keys keep it; a breaking
 /// rename/removal bumps it (and the pin test with it). Kept the first key so a reader sees it first.
-const NOTIFY_PAYLOAD_SCHEMA: i64 = 1;
+///
+/// `2`: `title` became conditional on `[notify] include_title` (default off) and stopped being sent
+/// to third-party carriers, and the absolute `episode_ms` was added beside the `since_ms` age. The
+/// title removal is the breaking half. The completion payload has its own
+/// [`COMPLETION_PAYLOAD_SCHEMA`] and did not move.
+const NOTIFY_PAYLOAD_SCHEMA: i64 = 2;
 
 /// The JSON stdin payload (correctly escaped via the shared writer): the notification metadata.
 /// The top-level key set is pinned by `payload_json_pins_the_exact_key_set` (a drift guard).
-fn payload_json(n: &Notification) -> String {
+fn payload_json(n: &Notification, title: TitlePolicy) -> String {
     let mut j = JsonWriter::new();
     j.begin_object();
     j.number("schema", NOTIFY_PAYLOAD_SCHEMA);
-    write_payload_fields(&mut j, n);
+    write_payload_fields(&mut j, n, title);
     j.end_object();
     j.finish()
 }
@@ -231,18 +284,21 @@ fn payload_json(n: &Notification) -> String {
 /// One `[notify] log` line: the payload plus the `at` epoch the fire happened at. The extra key is
 /// what makes the file an audit record rather than a pile of undated payloads; every other key is
 /// the payload's, written by the same code, so the two cannot drift.
-fn log_line(n: &Notification, at: u64) -> String {
+fn log_line(n: &Notification, at: u64, title: TitlePolicy) -> String {
     let mut j = JsonWriter::new();
     j.begin_object();
     j.number("schema", NOTIFY_PAYLOAD_SCHEMA);
     j.number("at", at as i64);
-    write_payload_fields(&mut j, n);
+    write_payload_fields(&mut j, n, title);
     j.end_object();
     j.finish()
 }
 
-/// The payload's fields, after `schema`. Shared by the stdin payload and the log line.
-fn write_payload_fields(j: &mut JsonWriter, n: &Notification) {
+/// The payload's fields, after `schema`. Shared by the stdin payload and the log line — which is
+/// why the log redacts with the payload rather than after it. The log is also the file most likely
+/// to be pasted into an issue, so the standing rule is: no field enters this writer that is not safe
+/// world-readable.
+fn write_payload_fields(j: &mut JsonWriter, n: &Notification, title: TitlePolicy) {
     j.string("agent", &n.agent);
     j.string("pane", &n.pane);
     j.string("state", &n.state);
@@ -255,12 +311,18 @@ fn write_payload_fields(j: &mut JsonWriter, n: &Notification) {
         None => j.null("session"),
     }
     j.string("locator", &n.locator);
-    j.string("title", &n.title);
-    // Additive under the schema-1 rule. `repo`/`branch` are empty (never absent) when the pane's cwd
+    // The pane title is the one payload field whose content the pane's own program controls, and it
+    // routinely holds a branch name, a repo path or a prompt fragment. Absent unless the user opted
+    // in, so a reader can tell "redacted" from "this pane has no title" (which writes `""`).
+    if title.carries() {
+        j.string("title", &n.title);
+    }
+    // Additive under the schema rule. `repo`/`branch` are empty (never absent) when the pane's cwd
     // is not a checkout, so a reader's key lookup never depends on the resolve succeeding.
     j.string("repo", &n.repo);
     j.string("branch", &n.branch);
     j.number("since_ms", n.since_ms as i64);
+    j.number("episode_ms", n.episode_ms as i64);
     match n.context_pct {
         Some(pct) => j.number("context_pct", pct as i64),
         None => j.null("context_pct"),
@@ -345,6 +407,17 @@ pub fn evaluate_context_high(
                 // the gauge has to dip below the rearm band before it can ring again.
                 Ok(true) if muted(rec, now) => None,
                 Ok(true) => {
+                    // The episode start the ROW reports: `max(@agent_since, @agent_turn_at)`, the
+                    // same instant `AgentRow::episode_at()` yields and the daemon's dispatch passes.
+                    // Reading `@agent_since` alone disagreed with the row on any pane with a
+                    // recorded turn end, so `episode_ms` named an episode `tma ls --json` did not
+                    // — and a sink keying on it could not collapse the two. Neither stamped ⇒ `now`,
+                    // which is the pre-existing fallback (a zero-age episode).
+                    let episode = num(opt::SINCE)
+                        .into_iter()
+                        .chain(num(opt::TURN_AT))
+                        .max()
+                        .unwrap_or(now);
                     let n = notification_for(
                         rec,
                         rec.options.get(opt::NAME).map(String::as_str).unwrap_or(""),
@@ -354,7 +427,7 @@ pub fn evaluate_context_high(
                             .get(opt::SESSION)
                             .filter(|v| !v.is_empty())
                             .cloned(),
-                        num(opt::SINCE).unwrap_or(now),
+                        episode,
                         now,
                     );
                     fire(tmux, &n, command, sinks)
@@ -546,13 +619,14 @@ mod tests {
             repo: "tmux-agents".to_string(),
             branch: "main".to_string(),
             since_ms: 40,
+            episode_ms: 1_699_999_999_960,
             context_pct: Some(72),
         }
     }
 
     #[test]
     fn payload_json_carries_metadata_only() {
-        let json = payload_json(&notification("vim \"file\""));
+        let json = payload_json(&notification("vim \"file\""), TitlePolicy::Carry);
         assert!(json.contains(r#""agent":"claude""#));
         assert!(json.contains(r#""state":"blocked""#));
         assert!(json.contains(r#""locator":"work:1.0""#));
@@ -569,7 +643,7 @@ mod tests {
         // An unresolved repo is empty rather than null: the key is always a string.
         n.repo = String::new();
         n.branch = String::new();
-        let json = payload_json(&n);
+        let json = payload_json(&n, TitlePolicy::Redact);
         assert!(json.contains(r#""detail":null"#));
         assert!(json.contains(r#""session":null"#));
         assert!(json.contains(r#""context_pct":null"#));
@@ -580,10 +654,109 @@ mod tests {
     fn payload_json_pins_the_exact_key_set() {
         // Drift pin: the notify hook payload is a documented contract, so adding/removing/reordering
         // a key changes this serialization and forces a deliberate `schema` bump + doc update.
+        // Schema 2: no `title` by default, and the absolute `episode_ms` beside the `since_ms` age.
         assert_eq!(
-            payload_json(&notification("vim")),
-            r#"{"schema":1,"agent":"claude","pane":"%3","state":"blocked","detail":"permission","session":"sess-1","locator":"work:1.0","title":"vim","repo":"tmux-agents","branch":"main","since_ms":40,"context_pct":72}"#
+            payload_json(&notification("vim"), TitlePolicy::Redact),
+            r#"{"schema":2,"agent":"claude","pane":"%3","state":"blocked","detail":"permission","session":"sess-1","locator":"work:1.0","repo":"tmux-agents","branch":"main","since_ms":40,"episode_ms":1699999999960,"context_pct":72}"#
         );
+        // `[notify] include_title = true` restores the key, in its historical position.
+        assert_eq!(
+            payload_json(&notification("vim"), TitlePolicy::Carry),
+            r#"{"schema":2,"agent":"claude","pane":"%3","state":"blocked","detail":"permission","session":"sess-1","locator":"work:1.0","title":"vim","repo":"tmux-agents","branch":"main","since_ms":40,"episode_ms":1699999999960,"context_pct":72}"#
+        );
+    }
+
+    /// A-512. The pane title is the one payload field the pane's own program controls, and it
+    /// routinely holds a branch name, a repo path or a prompt fragment. `notify.command` pipes this
+    /// payload to whatever the user configured — ntfy, Pushover, an Apple Shortcut — so before this
+    /// it reached that service's operator on every fire.
+    #[test]
+    fn the_pane_title_never_reaches_a_carrier_by_default() {
+        let n = notification("feat/ACME-1234-rotate-customer-api-keys");
+        let json = payload_json(&n, TitlePolicy::Redact);
+        assert!(
+            !json.contains("ACME-1234"),
+            "the title leaked into the payload: {json}"
+        );
+        assert!(
+            !json.contains(r#""title""#),
+            "the key itself must be absent"
+        );
+        // The opt-in is what restores it, and nothing else.
+        assert!(payload_json(&n, TitlePolicy::Carry).contains("ACME-1234"));
+        // A default-constructed config redacts: the back-compat lever is opt-IN, so an existing
+        // installation stops shipping titles on upgrade rather than waiting for a checkbox.
+        assert_eq!(
+            TitlePolicy::from_include(crate::config::NotifySinks::default().include_title),
+            TitlePolicy::Redact
+        );
+    }
+
+    /// A-514. The payload's writer is also the log's writer, so the audit line redacts WITH the
+    /// payload rather than after it — and the log is the file most likely to be pasted into an issue.
+    /// `TMA_TITLE` is the third carrier: it is the channel a shell one-liner actually interpolates,
+    /// so redacting only the JSON would leave the title in the variable the hook reads.
+    #[test]
+    fn the_log_line_and_tma_title_redact_with_the_payload() {
+        let n = notification("feat/ACME-1234-rotate-customer-api-keys");
+
+        let line = log_line(&n, 1_700_000_000_000, TitlePolicy::Redact);
+        assert!(!line.contains("ACME-1234"), "the title leaked into the log");
+
+        let redacted = hook_command("true", &n, TitlePolicy::Redact);
+        let env: Vec<_> = redacted.get_envs().collect();
+        assert!(
+            !env.iter().any(|(k, v)| *k == "TMA_TITLE" && v.is_some()),
+            "TMA_TITLE must be unset, not empty: {env:?}"
+        );
+        // Every other field still rides, so a hook keeps something to format.
+        let value = |key: &str| {
+            env.iter()
+                .find(|(k, _)| *k == key)
+                .and_then(|(_, v)| *v)
+                .map(|v| v.to_string_lossy().to_string())
+        };
+        assert_eq!(value("TMA_AGENT").as_deref(), Some("claude"));
+        assert_eq!(value("TMA_LOCATOR").as_deref(), Some("work:1.0"));
+
+        // And the opt-in restores all three together.
+        assert!(log_line(&n, 0, TitlePolicy::Carry).contains("ACME-1234"));
+        let carried = hook_command("true", &n, TitlePolicy::Carry);
+        assert!(carried.get_envs().any(|(k, v)| k == "TMA_TITLE"
+            && v.is_some_and(|v| v.to_string_lossy().contains("ACME-1234"))));
+    }
+
+    /// A-515. `episode_ms` is an ABSOLUTE epoch-ms stamp, not an age. `since_ms` is the age and it
+    /// survives; the two must not be confused, because only the absolute one can be compared for
+    /// equality against a stored stamp — which is what a sink's collapse key needs.
+    #[test]
+    fn episode_ms_is_absolute_and_since_ms_survives_beside_it() {
+        let rec = pane_record(None);
+        let episode = 1_700_000_000_000;
+        let now = episode + 250;
+        let n = notification_for(&rec, "claude", "blocked", None, None, episode, now);
+
+        assert_eq!(
+            n.episode_ms, episode,
+            "episode_ms is the stamp, not its age"
+        );
+        assert_eq!(n.since_ms, 250, "since_ms is still the age");
+        assert_ne!(n.episode_ms, n.since_ms as u64);
+
+        let json = payload_json(&n, TitlePolicy::Redact);
+        assert!(json.contains(r#""episode_ms":1700000000000"#), "{json}");
+        assert!(json.contains(r#""since_ms":250"#), "{json}");
+
+        // Two fires inside ONE episode: the ages differ, the episode stamp does not. That is exactly
+        // why an age cannot serve as a collapse key and this field had to be added.
+        let later = notification_for(&rec, "claude", "blocked", None, None, episode, now + 9_000);
+        assert_ne!(later.since_ms, n.since_ms);
+        assert_eq!(later.episode_ms, n.episode_ms);
+
+        // Exported to a shell hook under its own name.
+        let cmd = hook_command("true", &n, TitlePolicy::Redact);
+        assert!(cmd.get_envs().any(|(k, v)| k == "TMA_EPISODE_MS"
+            && v.is_some_and(|v| v.to_string_lossy() == episode.to_string())));
     }
 
     #[test]
@@ -591,14 +764,15 @@ mod tests {
         // The audit line must stay parseable by whatever reads the payload: same keys, same order,
         // with `at` inserted right after `schema` so a reader sees when before what.
         let n = notification("vim");
-        let line = log_line(&n, 1_700_000_000_000);
+        let line = log_line(&n, 1_700_000_000_000, TitlePolicy::Redact);
         assert_eq!(
             line,
-            r#"{"schema":1,"at":1700000000000,"agent":"claude","pane":"%3","state":"blocked","detail":"permission","session":"sess-1","locator":"work:1.0","title":"vim","repo":"tmux-agents","branch":"main","since_ms":40,"context_pct":72}"#
+            r#"{"schema":2,"at":1700000000000,"agent":"claude","pane":"%3","state":"blocked","detail":"permission","session":"sess-1","locator":"work:1.0","repo":"tmux-agents","branch":"main","since_ms":40,"episode_ms":1699999999960,"context_pct":72}"#
         );
-        // Every payload key survives verbatim in the line (the two share one writer).
-        let payload = payload_json(&n);
-        assert!(line.ends_with(payload.trim_start_matches(r#"{"schema":1,"#)));
+        // Every payload key survives verbatim in the line (the two share one writer) — including,
+        // critically, the redaction: the log must not carry what the payload dropped.
+        let payload = payload_json(&n, TitlePolicy::Redact);
+        assert!(line.ends_with(payload.trim_start_matches(r#"{"schema":2,"#)));
     }
 
     /// A pane record carrying a stored gauge, for the shared builder.

@@ -387,7 +387,12 @@ fn execute(
                 // The trigger picks the command, so a `[notify.blocked]`/`[notify.done]` override
                 // routes here exactly as it does in the daemon's dispatch.
                 let command = trigger.and_then(|t| policy.commands.for_trigger(t));
-                // `since` is this event's own `now`: the hook fires on the transition it just wrote.
+                // `since` is this event's own `now`, and that is also the correct ABSOLUTE
+                // `episode_ms`: the hook fires on the transition it just wrote, so the episode it
+                // belongs to starts at `now`. The row settles to the same instant — a state change
+                // writes `@agent_since = now`, and a turn end writes `@agent_turn_at = now` — so
+                // `max(@agent_since, @agent_turn_at)` reads `now` either way. The stale pre-write
+                // `rec`/`stored` values must NOT be used here; they name the previous episode.
                 let n = crate::notify::notification_for(
                     rec,
                     agent,
