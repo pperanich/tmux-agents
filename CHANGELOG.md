@@ -10,6 +10,28 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **`tma act approve` fired `1` into Claude's plan-approval and trust dialogs.** All three of
+  Claude's selection dialogs matched the same blocked rule and stamped `blocked/permission`, so a
+  blind approve on a plan dialog pressed "Yes, and use auto mode" — silently switching the session
+  into auto-approve — and on a trust dialog granted trust to the folder. Two new manifest rules now
+  stamp them `blocked/plan` and `blocked/trust`, and `approve`/`deny` (which gate on
+  `detail = ["permission"]`) refuse both with exit 4. Deny is co-gated: `tma act deny` also stops
+  firing on plan and trust dialogs.
+- **`tma act approve` on Codex confirmed whatever the dialog's cursor was on.** The approve key was
+  `Enter`, which submits the current selection; driven live with the cursor moved, it denied. The
+  key is now `y`, the accelerator Codex itself prints, which approves regardless of position.
+
+### Changed
+
+- **The notification payload no longer carries the pane title** (schema 1 → 2). A pane title is
+  attacker-influenced text, and the payload flows to `[notify] command` sinks, third-party push
+  carriers, and the 0644 notify log. `title` is now empty with `title_redacted: true` beside it;
+  set `[notify] include_title = true` to restore the old behavior. The payload also gains
+  `episode_ms`, the absolute episode instant `tma ls --json` already exports, so consumers can key
+  and collapse notifications per episode instead of deriving it from the `since_ms` age.
+
 ## [0.4.6] - 2026-08-24
 
 ### Fixed
