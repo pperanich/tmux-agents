@@ -42,7 +42,14 @@ fn every_bundled_action_parses_under_its_stem() {
 fn approve_gates_on_blocked_permission() {
     let a = ActionManifest::parse(APPROVE, "approve", "approve.toml").unwrap();
     assert_eq!(a.keys_for("claude"), Some(["1".to_string()].as_slice()));
-    assert_eq!(a.keys_for("codex"), Some(["Enter".to_string()].as_slice()));
+    // A-509. codex's approve option prints its own accelerator (`Yes, proceed (y)`), so `y` is
+    // position-independent. `Enter` is not: it confirms whatever the `›` marker is resting on, which
+    // tma never reads. Measured on codex 0.146.0 — cursor on "No", `y` approved, `Enter` denied.
+    assert_eq!(a.keys_for("codex"), Some(["y".to_string()].as_slice()));
+    assert!(
+        !a.keys_for("codex").unwrap().contains(&"Enter".to_string()),
+        "approve must not deliver a position-dependent confirm"
+    );
 
     let blocked = GateInput {
         detail: Some("permission"),
