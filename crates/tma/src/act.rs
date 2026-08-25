@@ -204,7 +204,9 @@ fn resolve_targets(
         };
     }
 
-    let mut report = match cycle::run_cycle(tmux, manifests, cfg) {
+    // Deferred, never inline: `--state done` is idle + `@agent_attention`, so an inline clear would
+    // retract the mark out of the rows the selector matches on and drop the target it just found.
+    let mut report = match cycle::run_cycle_with(tmux, manifests, cfg, cycle::SeenClear::Deferred) {
         Ok(r) => r,
         Err(tmux::TmuxError::ServerGone) => return Err(cli_support::no_server()),
         Err(err) => {
@@ -222,6 +224,10 @@ fn resolve_targets(
         .filter(|r| opts.selector.matches(r))
         .collect();
     let ids: Vec<String> = matched.iter().map(|r| r.pane_id.clone()).collect();
+    // The cycle's clear, strictly after the selector read and before every early return below.
+    if !report.deferred_seen.is_empty() {
+        tma_runtime::seen::clear_seen(tmux, &report.deferred_seen);
+    }
 
     if opts.all {
         if ids.is_empty() {

@@ -25,6 +25,11 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   with the clear landing before the row diff, the completion produced no `idle` → `done` edge at
   all, rather than merely being followed by its `done` → `idle` retraction. The stream now emits
   from the rows as it read them and clears afterwards, so both edges are reported in order.
+- **`tma act --state done` and `tma mute --state done` could resolve to no target** for the same
+  reason: their target-resolution cycle retracted the marker before the selector matched on it, so
+  the pane you asked for failed with "no agent pane matched" (exit 3), and on `mute` that is the one
+  pane most worth silencing. Both now defer the clear to after the selector has read the rows, so `done` means
+  the same thing on every surface.
 
 ## [0.4.5] - 2026-08-24
 

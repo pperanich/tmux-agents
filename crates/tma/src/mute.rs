@@ -113,7 +113,10 @@ fn resolve_targets(opts: &MuteOpts, tmux: &Tmux) -> Result<Vec<String>, ExitCode
         &opts.config.agent_overrides,
     )?;
     let cfg: FoldConfig = opts.config.fold_config();
-    let mut report = match cycle::run_cycle(tmux, &manifests, &cfg) {
+    // Deferred, never inline: `--state done` is idle + `@agent_attention`, so an inline clear would
+    // retract the mark out of the rows the selector matches on and mute nothing.
+    let mut report = match cycle::run_cycle_with(tmux, &manifests, &cfg, cycle::SeenClear::Deferred)
+    {
         Ok(r) => r,
         Err(tmux::TmuxError::ServerGone) => return Err(cli_support::no_server()),
         Err(err) => {
@@ -131,6 +134,10 @@ fn resolve_targets(opts: &MuteOpts, tmux: &Tmux) -> Result<Vec<String>, ExitCode
         .filter(|r| opts.selector.matches(r))
         .map(|r| r.pane_id.clone())
         .collect();
+    // The cycle's clear, strictly after the selector read and before the no-match return below.
+    if !report.deferred_seen.is_empty() {
+        tma_runtime::seen::clear_seen(tmux, &report.deferred_seen);
+    }
     if ids.is_empty() {
         eprintln!("tma: no agent pane matched the selector (exit 3)");
         return Err(ExitCode::from(3));
