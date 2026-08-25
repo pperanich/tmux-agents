@@ -201,7 +201,7 @@ fn spawn_daemon_inner(
         .env("TMA_NOTIFY_CMD", sink_cmd)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
+        .stderr(s.daemon_log_stdio());
     if let Some(cfg) = config {
         cmd.env("TMA_CONFIG", cfg);
     }
@@ -649,7 +649,7 @@ fn latency_hook_path_under_1s() {
     let start = Instant::now();
     let got = wait_sink_lines(&s, 1, Duration::from_secs(5));
     let elapsed = start.elapsed();
-    assert_eq!(got, 1, "hook blocked notified");
+    assert_eq!(got, 1, "hook blocked notified{}", s.forensics(&[&pane]));
     eprintln!(
         "hook-path daemon-dispatch latency: {} ms",
         elapsed.as_millis()
@@ -658,8 +658,9 @@ fn latency_hook_path_under_1s() {
     // bound is widened only enough that the full-workspace fork-bomb cannot flake it.
     assert!(
         elapsed < Duration::from_secs(2),
-        "hook blocked→notification is in the immediate tier, was {} ms",
-        elapsed.as_millis()
+        "hook blocked→notification is in the immediate tier, was {} ms{}",
+        elapsed.as_millis(),
+        s.forensics(&[&pane])
     );
 }
 
@@ -688,9 +689,12 @@ fn latency_hookless_capture_path_under_5s() {
          region = \"tail_lines(50)\"\nmatch = {{ contains = \"tma-block-marker\" }}\n"
         ),
     );
-    // Default sweep cadence (no --sweep-ms): the notification must come from the near-instant
-    // quiet edge, not a fan-out sweep.
-    let _daemon = spawn_daemon(&s, &sink_cmd(&s, ""), &[]);
+    // The sweep is pinned 10 minutes out so the quiet edge is the ONLY path that can fire this
+    // notification. The `sweeps == 0` check below cannot carry that on its own: a push probe that
+    // times out on a loaded box degrades the cadence to `SWEEP_DEGRADED` = 5 s, which is this
+    // test's whole bound — a sweep landing there would satisfy every assertion while proving
+    // nothing about the quiet edge. Pinning it out makes the measurement mean what it says.
+    let _daemon = spawn_daemon(&s, &sink_cmd(&s, ""), &["--sweep-ms", "600000"]);
     s.expect_status("clients", "1");
     wait_quiescent(&s);
 
@@ -701,14 +705,17 @@ fn latency_hookless_capture_path_under_5s() {
     let got = wait_sink_lines(&s, 1, Duration::from_secs(5));
     let elapsed = start.elapsed();
     assert_eq!(
-        got, 1,
-        "hookless blocked notified via the quiet-edge capture within the 5 s bound"
+        got,
+        1,
+        "hookless blocked notified via the quiet-edge capture within the 5 s bound{}",
+        s.forensics(&[&pane])
     );
     eprintln!("hookless-path latency: {} ms", elapsed.as_millis());
     assert!(
         elapsed < Duration::from_secs(5),
-        "hookless blocked→notification must be < 5 s, was {} ms",
-        elapsed.as_millis()
+        "hookless blocked→notification must be < 5 s, was {} ms{}",
+        elapsed.as_millis(),
+        s.forensics(&[&pane])
     );
     assert_eq!(
         s.status_u64("sweeps"),

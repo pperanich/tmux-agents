@@ -121,6 +121,20 @@ fn process_names_toml(s: &Scratch, pane_name: &str, pid: u32) -> String {
         .join(", ")
 }
 
+/// The `--sweep-ms` every on-demand test here pins: 10 minutes, ~13x [`common::POLL_CEILING`].
+///
+/// These tests assert `sweeps == 0` to prove the capture came from the on-demand tier. Left at the
+/// default the cadence is 45 s — the SAME number as the ceiling they wait out — so the assertion
+/// rests on two unrelated constants happening to be equal; and a push probe that degrades (a real
+/// possibility on a loaded box: `ProbeOutcome::Unavailable` shortens the cadence to `SWEEP_DEGRADED`
+/// = 5 s) puts a sweep well inside the window, where it would silently rescue the pane and green a
+/// run in which the on-demand tier did nothing at all. Pinning the cadence out of reach makes
+/// `sweeps == 0` true by construction, which is what turns the positive assertion into a real one.
+const SWEEP_PINNED_OUT_MS: &str = "600000";
+
+/// The daemon args pinning the sweep out of reach ([`SWEEP_PINNED_OUT_MS`]).
+const PINNED_SWEEP: &[&str] = &["--sweep-ms", SWEEP_PINNED_OUT_MS];
+
 fn write_manifest(s: &Scratch, body: &str) {
     std::fs::write(s.workdir.join("agent.toml"), body).unwrap();
 }
@@ -172,6 +186,8 @@ fn fire(s: &Scratch, agent: &str, kind: &str, pane: &str, payload: &str) {
 
 /// Spawn a foreground daemon (status file + test manifest dir); `extra` adds flags such as
 /// `--sweep-ms`. Suite-specific CLI shape over the shared [`Scratch::command`]; reaped on drop.
+/// stderr goes to the scratch's daemon log, not `/dev/null`, so a timing failure's
+/// [`Scratch::forensics`] block can quote what the daemon said it was doing.
 fn spawn_daemon(s: &Scratch, extra: &[&str]) -> DaemonGuard {
     let status = s.status_path();
     let child = s
@@ -182,7 +198,7 @@ fn spawn_daemon(s: &Scratch, extra: &[&str]) -> DaemonGuard {
         .args(extra)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(s.daemon_log_stdio())
         .spawn()
         .expect("spawn daemon");
     DaemonGuard::new(child)
@@ -240,7 +256,7 @@ fn hookless_quiet_edge_captures_once_and_classifies_blocked() {
 
     // Long default sweep (45 s) ⇒ no reconciliation sweep during this short test, so any
     // capture here is provably the on-demand path, not a fan-out.
-    let _daemon = spawn_daemon(&s, &[]);
+    let _daemon = spawn_daemon(&s, PINNED_SWEEP);
     s.expect_status("clients", "1");
 
     // Let attach-time shell output settle to a quiet baseline (drains any attach-noise edge).
@@ -252,7 +268,8 @@ fn hookless_quiet_edge_captures_once_and_classifies_blocked() {
 
     assert!(
         wait_opt(&s, &pane, "@agent_state", "blocked"),
-        "the quiet edge must capture and classify the hookless pane as blocked"
+        "the quiet edge must capture and classify the hookless pane as blocked{}",
+        s.forensics(&[&pane])
     );
     // The pane stamp lands before the counter does: wait for the capture to be counted, then for
     // the pool to fall quiet again, so a (wrongly) fanned-out second capture has run and counted too.
@@ -307,7 +324,7 @@ fn contradiction_capture_flips_stale_hook_working() {
     s.set_opt(&pane, "@agent_since", &old.to_string());
     s.set_opt(&pane, "@agent_stamped_at", &old.to_string());
 
-    let _daemon = spawn_daemon(&s, &[]);
+    let _daemon = spawn_daemon(&s, PINNED_SWEEP);
     s.expect_status("clients", "1");
     wait_quiescent(&s);
     let baseline = s.status_u64("on_demand_captures");
@@ -318,7 +335,8 @@ fn contradiction_capture_flips_stale_hook_working() {
 
     assert!(
         wait_opt(&s, &pane, "@agent_state", "blocked"),
-        "the contradiction capture must correct the stale hook `working` to `blocked`"
+        "the contradiction capture must correct the stale hook `working` to `blocked`{}",
+        s.forensics(&[&pane])
     );
     assert_eq!(
         s.get(&pane, "#{@agent_source}"),
@@ -452,7 +470,7 @@ fn hook_liveness_demotion_unguards_then_hook_resumes() {
         ),
     );
 
-    let _daemon = spawn_daemon(&s, &[]); // long sweep ⇒ no sweep interference
+    let _daemon = spawn_daemon(&s, PINNED_SWEEP); // long sweep ⇒ no sweep interference
     s.expect_status("clients", "1");
     wait_quiescent(&s);
 
@@ -467,7 +485,8 @@ fn hook_liveness_demotion_unguards_then_hook_resumes() {
     );
     assert!(
         wait_opt(&s, &pane, "@agent_state", "working"),
-        "hook stamps working"
+        "hook stamps working{}",
+        s.forensics(&[&pane])
     );
     assert_eq!(s.get(&pane, "#{@agent_source}"), "hook");
     let demotions0 = s.status_u64("demotions");
@@ -541,7 +560,8 @@ fn hook_liveness_demotion_unguards_then_hook_resumes() {
     );
     assert!(
         wait_opt(&s, &pane, "@agent_source", "hook"),
-        "the resumed hook re-stamps source=hook"
+        "the resumed hook re-stamps source=hook{}",
+        s.forensics(&[&pane])
     );
     s.expect_status("demoted", "0"); // a hook event clears the demotion
                                      // The next edge after the resume is guarded again (the capture cannot override the fresh hook
@@ -598,7 +618,7 @@ fn skip_state_update_freezes_and_does_not_read_blocked() {
     s.set_opt(&pane, "@agent_since", &old.to_string());
     s.set_opt(&pane, "@agent_stamped_at", &old.to_string());
 
-    let _daemon = spawn_daemon(&s, &[]);
+    let _daemon = spawn_daemon(&s, PINNED_SWEEP);
     s.expect_status("clients", "1");
     wait_quiescent(&s);
     let baseline = s.status_u64("on_demand_captures");
@@ -738,15 +758,41 @@ fn real_tmux_path() -> String {
     p
 }
 
+/// Seconds the shim stalls the seed's `list-panes` when [`slow_attach_tmux`] is asked to. Must
+/// exceed the daemon's own 3 s `TMUX_TIMEOUT` so the read comes back as `TmuxError::Timeout` — the
+/// exact outcome a CPU-saturated runner produces, where process spawn alone measures p50 3.8 s.
+const STALL_SEED_READ_SECS: u32 = 5;
+
 /// Write a `tmux` shim that stalls every control-mode attach AFTER the first, and return its path.
 /// The daemon's push probe attaches first and must stay fast (a probe that misses its marker
 /// degrades the daemon to the 5 s sweep, and the sweep — not the quiet edge — would then be what
 /// rescues the pane, which is the opposite of what this test asserts). The pool's attach is the
 /// second, and stalling it is what opens the pre-attach window.
-fn slow_attach_tmux(s: &Scratch) -> PathBuf {
+///
+/// `stall_seed_read` additionally stalls ONE `list-panes` past the daemon's `TMUX_TIMEOUT`: the
+/// first one issued after that attach lands, which is `seed_attached`'s read (the serve loop calls
+/// it before the summary reconcile, and the sweep is pinned out of the way). That single failed
+/// read is the whole slow-runner failure, made deterministic.
+fn slow_attach_tmux(s: &Scratch, stall_seed_read: bool) -> PathBuf {
     use std::os::unix::fs::PermissionsExt;
     let shim = s.workdir.join("slow-attach-tmux");
     let count = s.workdir.join("attach-count");
+    let attached = s.workdir.join("attach-landed");
+    let stalled = s.workdir.join("seed-read-stalled");
+    // The attach arm drops `attach-landed` immediately before exec'ing the real client, so the
+    // list-panes arm can tell "before the attach" (every startup read) from "after" (the seed).
+    let seed_arm = if stall_seed_read {
+        format!(
+            "*\" list-panes \"*)\n\
+             [ -f '{attached}' ] && [ ! -f '{stalled}' ] && \
+             {{ : > '{stalled}'; sleep {secs}; }} ;;\n",
+            attached = attached.display(),
+            stalled = stalled.display(),
+            secs = STALL_SEED_READ_SECS,
+        )
+    } else {
+        String::new()
+    };
     std::fs::write(
         &shim,
         format!(
@@ -754,10 +800,12 @@ fn slow_attach_tmux(s: &Scratch) -> PathBuf {
              case \" $* \" in\n\
              *\" -C attach-session \"*)\n\
              n=$(cat '{count}' 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > '{count}'\n\
-             [ \"$n\" -gt 1 ] && sleep {secs} ;;\n\
+             [ \"$n\" -gt 1 ] && {{ sleep {secs}; : > '{attached}'; }} ;;\n\
+             {seed_arm}\
              esac\n\
              exec '{real}' \"$@\"\n",
             count = count.display(),
+            attached = attached.display(),
             secs = SLOW_ATTACH_SECS,
             real = real_tmux_path(),
         ),
@@ -765,6 +813,61 @@ fn slow_attach_tmux(s: &Scratch) -> PathBuf {
     .unwrap();
     std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
     shim
+}
+
+/// Spawn the slow-attach daemon behind `shim`, burst the blocked marker into the pre-attach window,
+/// and assert the pane still ends up captured as `blocked` by the ON-DEMAND tier. Shared by the two
+/// attach-window tests, which differ only in whether the seed's own `list-panes` read succeeds.
+fn assert_attach_window_pane_is_captured(s: &Scratch, pane: &str, shim: &PathBuf) {
+    let status = s.status_path();
+    let child = s
+        .command()
+        .args(["daemon", "--socket-name", &s.socket])
+        .args(["--manifest-dir", s.workdir.to_str().unwrap()])
+        .args(["--status-file", status.to_str().unwrap()])
+        .args(PINNED_SWEEP)
+        .env("TMA_TMUX_BIN", shim)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(s.daemon_log_stdio())
+        .spawn()
+        .expect("spawn daemon");
+    let _daemon = DaemonGuard::new(child);
+
+    // `clients=1` lands as soon as the `tmux -C` child is SPAWNED — the shim is still sleeping, so
+    // the client has not attached and the session has no `%output` coverage yet. That gap is the
+    // whole test: burst into it.
+    s.expect_status("clients", "1");
+    burst(s, pane, "echo tma-block-marker");
+
+    assert!(
+        wait_opt(s, pane, "@agent_state", "blocked"),
+        "a pane that printed during the attach window must still be captured{}",
+        s.forensics(&[pane])
+    );
+    assert_eq!(s.get(pane, "#{@agent_source}"), "capture");
+    // The sweep is pinned 13x past the poll ceiling (`PINNED_SWEEP`), so this is not a coincidence
+    // of two equal constants: the capture above can only have come from the on-demand tier.
+    assert_eq!(
+        s.status_u64("sweeps"),
+        0,
+        "the post-attach look must come from the on-demand tier, not a reconciliation sweep{}",
+        s.forensics(&[pane])
+    );
+}
+
+/// The manifest both attach-window tests use: one blocked rule keyed on the marker the burst echoes.
+fn write_block_marker_manifest(s: &Scratch, names: &str) {
+    write_manifest(
+        s,
+        &format!(
+            "min_engine_version = \"0.1\"\n\
+         [identity]\nprocess_names = [{names}]\n\
+         [capture]\nvisible = [\"working\", \"idle\", \"blocked\"]\n\
+         [[rules]]\nstate = \"blocked\"\ndetail = \"permission\"\npriority = 100\n\
+         region = \"tail_lines(50)\"\nmatch = {{ contains = \"tma-block-marker\" }}\n",
+        ),
+    );
 }
 
 /// A pane that printed its blocked prompt while the daemon's control client was still attaching is
@@ -783,49 +886,39 @@ fn slow_control_attach_still_captures_the_blocked_pane() {
     }
     let s = Scratch::new_daemon("t26");
     let (pane, pid) = new_shell_session(&s, "s1");
-    let names = process_names_toml(&s, "s1", pid);
-    write_manifest(
-        &s,
-        &format!(
-            "min_engine_version = \"0.1\"\n\
-         [identity]\nprocess_names = [{names}]\n\
-         [capture]\nvisible = [\"working\", \"idle\", \"blocked\"]\n\
-         [[rules]]\nstate = \"blocked\"\ndetail = \"permission\"\npriority = 100\n\
-         region = \"tail_lines(50)\"\nmatch = {{ contains = \"tma-block-marker\" }}\n",
-        ),
-    );
+    write_block_marker_manifest(&s, &process_names_toml(&s, "s1", pid));
+    let shim = slow_attach_tmux(&s, false);
+    assert_attach_window_pane_is_captured(&s, &pane, &shim);
+}
 
-    let shim = slow_attach_tmux(&s);
-    let status = s.status_path();
-    let child = s
-        .command()
-        .args(["daemon", "--socket-name", &s.socket])
-        .args(["--manifest-dir", s.workdir.to_str().unwrap()])
-        .args(["--status-file", status.to_str().unwrap()])
-        .env("TMA_TMUX_BIN", &shim)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .expect("spawn daemon");
-    let _daemon = DaemonGuard::new(child);
-
-    // `clients=1` lands as soon as the `tmux -C` child is SPAWNED — the shim is still sleeping, so
-    // the client has not attached and the session has no `%output` coverage yet. That gap is the
-    // whole test: burst into it.
-    s.expect_status("clients", "1");
-    burst(&s, &pane, "echo tma-block-marker");
-
+/// The same attach window, with the seed's OWN `list-panes` read failing once. That read is a `tmux`
+/// one-shot under the daemon's 3 s `TMUX_TIMEOUT`, and on a CPU-saturated 3-core CI runner — where
+/// process spawn alone measures p50 3.8 s — it times out routinely. The seed must survive it: the
+/// post-attach look is the only thing covering a pane that printed before coverage began, so a
+/// dropped seed spends a whole sweep cadence, which is exactly the latency the seed exists to avoid.
+///
+/// Regression: [`tma_tmux::control::seed_attached`] took its queue BEFORE the read, so one timed-out
+/// `list-panes` discarded the look permanently. That is what turned this suite's attach-window test
+/// into an intermittent CI failure with no evidence attached — it fails only when the read happens
+/// to be the one that times out.
+#[test]
+fn a_seed_whose_list_panes_times_out_is_retried_not_dropped() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("t27");
+    let (pane, pid) = new_shell_session(&s, "s1");
+    write_block_marker_manifest(&s, &process_names_toml(&s, "s1", pid));
+    let shim = slow_attach_tmux(&s, true);
+    assert_attach_window_pane_is_captured(&s, &pane, &shim);
+    // The read really did fail: without this the test could pass because the stall never landed on
+    // the seed's read, and would then assert nothing about the retry.
     assert!(
-        wait_opt(&s, &pane, "@agent_state", "blocked"),
-        "a pane that printed during the attach window must still be captured"
-    );
-    assert_eq!(s.get(&pane, "#{@agent_source}"), "capture");
-    // The 45 s sweep cannot have run inside the poll ceiling: the on-demand tier caught it.
-    assert_eq!(
-        s.status_u64("sweeps"),
-        0,
-        "the post-attach look must come from the on-demand tier, not a reconciliation sweep"
+        s.status_u64("seed_retries") >= 1,
+        "the shim must have made the seed's list-panes time out{}",
+        s.forensics(&[&pane])
     );
 }
 

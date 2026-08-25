@@ -134,19 +134,11 @@ fn spawn_daemon(s: &Scratch) -> DaemonGuard {
     spawn_daemon_args(s, &[])
 }
 
-/// Spawn the foreground daemon with its stderr captured to `log`, so a test can read the daemon's
-/// own diagnostics (`eprintln!` on `Stderr` is unbuffered, so a line is on disk once written).
-fn spawn_daemon_logging(s: &Scratch, log: &Path) -> DaemonGuard {
-    let file = std::fs::File::create(log).expect("create the daemon log");
-    let child = s
-        .command()
-        .args(["daemon", "--socket-name", &s.socket])
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::from(file))
-        .spawn()
-        .expect("spawn daemon");
-    DaemonGuard::new(child)
+/// Spawn the foreground daemon and return its guard plus the log its stderr goes to. Every daemon
+/// in this suite logs (see [`spawn_daemon_args`]); this exists for the tests that ASSERT on a
+/// logged line rather than merely wanting one on a failure.
+fn spawn_daemon_logging(s: &Scratch) -> (DaemonGuard, PathBuf) {
+    (spawn_daemon_args(s, &[]), s.daemon_log_path())
 }
 
 /// Poll `log` until it contains `needle`. Returns false on timeout.
@@ -166,7 +158,9 @@ fn wait_for_log(log: &Path, needle: &str, timeout: Duration) -> bool {
     }
 }
 
-/// Spawn the foreground daemon with extra CLI args appended (e.g. `--manifest-dir`).
+/// Spawn the foreground daemon with extra CLI args appended (e.g. `--manifest-dir`). stderr goes to
+/// the scratch's daemon log rather than `/dev/null`: a timing failure here is otherwise a bare
+/// "condition never held" with the daemon's own account of the run thrown away.
 fn spawn_daemon_args(s: &Scratch, extra: &[&str]) -> DaemonGuard {
     let child = s
         .command()
@@ -174,7 +168,7 @@ fn spawn_daemon_args(s: &Scratch, extra: &[&str]) -> DaemonGuard {
         .args(extra)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(s.daemon_log_stdio())
         .spawn()
         .expect("spawn daemon");
     DaemonGuard::new(child)
@@ -997,8 +991,7 @@ fn tma_reload_signals_running_daemon_which_keeps_serving() {
 
     // Capture the daemon's stderr: the SIGHUP reload announces itself there, which is the only
     // evidence available on this side that the signal actually reached the running daemon.
-    let log = s.workdir.join("daemon.err");
-    let _daemon = spawn_daemon_logging(&s, &log);
+    let (_daemon, log) = spawn_daemon_logging(&s);
     assert!(
         wait_for_socket(&s, common::POLL_CEILING).is_some(),
         "daemon must bind"

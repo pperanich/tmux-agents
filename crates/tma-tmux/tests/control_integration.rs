@@ -58,7 +58,7 @@ fn spawn_daemon(s: &Scratch, extra: &[&str]) -> DaemonGuard {
         .args(extra)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(s.daemon_log_stdio())
         .spawn()
         .expect("spawn daemon");
     DaemonGuard::new(child)
