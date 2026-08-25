@@ -20,6 +20,11 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   withdrawn (exit 3)``. `--json` `reason`, previously `null` on every `vanished` result, now carries
   which target went away: `request-gone` for the API 404, `pane-gone` for tmux's own
   `can't find pane` / `no such pane`.
+- **`@agent_permission_request` outlived the reply that spent it.** After a 2xx from the API lane,
+  the pane kept the answered request id until the OpenCode plugin's next `permission.replied` event,
+  so anything reading the stamp as "a request is pending" read a spent id. The broker now clears it
+  under the same held lock. A 404 still leaves the option alone, since it may already name a newer
+  request.
 
 ## [0.5.0] - 2026-08-25
 

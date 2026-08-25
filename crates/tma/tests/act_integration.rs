@@ -309,6 +309,28 @@ fn api_404_is_request_gone_and_never_blames_the_pane() {
     assert_eq!(s.pane_option(&pane, "@agent_name"), "opencode");
 }
 
+/// A 2xx reply spends the pending request, so tma clears `@agent_permission_request` itself rather
+/// than waiting for the plugin's `permission.replied` event. A 404 leaves the stamp alone.
+#[test]
+fn a_replied_permission_clears_the_request_stamp() {
+    if !have_tmux() {
+        return;
+    }
+    let (endpoint, server) = mock_http("HTTP/1.1 200 OK");
+    let s = Scratch::new("act_api_clear");
+    let pane = s.new_shell_pane();
+    stamp_blocked_opencode(&s, &pane, "per_live", &endpoint);
+
+    let out = act(&s, &["approve", "--pane", &pane, "--json"]);
+    let _ = server.join();
+    assert_eq!(out.status.code(), Some(0), "the reply landed");
+    assert_eq!(
+        s.pane_option(&pane, "@agent_permission_request"),
+        "",
+        "a spent request id must not outlive its reply"
+    );
+}
+
 /// `--all` fans out over every selector-matched pane: both panes get the keystroke, the envelope
 /// carries one result object each, and the batch exits 0 because both acted.
 #[test]

@@ -296,6 +296,10 @@ pub trait BrokerIo {
         reply: ApiReply,
         timeout_ms: u64,
     ) -> HttpOutcome;
+    /// Unset `@agent_permission_request` after a request has been spent. Best-effort and
+    /// infallible by construction: it runs after the answer is already delivered, so a failed
+    /// option write must not turn a successful reply into a reported failure.
+    fn clear_permission_request(&self, pane_id: &str);
     /// Acquire the single-flight lock; the implementation supplies the broker pid and nonce.
     fn acquire(
         &self,
@@ -524,7 +528,16 @@ fn act_under_lock<T: BrokerIo>(
                 let endpoint = facts.api_endpoint.as_deref().unwrap_or_default();
                 let request = facts.permission_request.as_deref().unwrap_or_default();
                 return match io.api_reply(endpoint, request, transport.reply, action.timeout_ms) {
-                    HttpOutcome::Ok => Outcome::Replied,
+                    HttpOutcome::Ok => {
+                        // The id is spent: drop it here rather than waiting for the plugin's
+                        // `permission.replied` event, which runs on its own schedule. Not a
+                        // compare-and-swap — tmux has no conditional option write and the plugin
+                        // does not take this lock — so a request stamped in the gap is erased. That
+                        // fails safe: a missing stamp refuses the next dispatch `requires-unmet`
+                        // instead of firing at a stale id.
+                        io.clear_permission_request(pane_id);
+                        Outcome::Replied
+                    }
                     // The prompt was answered/withdrawn between gate and act: the act's
                     // target disappeared, so `vanished`, exit 3.
                     HttpOutcome::NotFound => Outcome::Vanished(Gone::Request),
@@ -702,6 +715,8 @@ mod tests {
         /// Canned HTTP outcome for the API lane, and a record of the `(endpoint, request, reply)` call.
         api_result: HttpOutcome,
         api_call: RefCell<Option<(String, String, ApiReply)>>,
+        /// The panes whose `@agent_permission_request` the broker asked to unset.
+        request_cleared: RefCell<Vec<String>>,
     }
 
     impl MockIo {
@@ -719,6 +734,7 @@ mod tests {
                 spawned: RefCell::new(None),
                 api_result: HttpOutcome::Ok,
                 api_call: RefCell::new(None),
+                request_cleared: RefCell::new(Vec::new()),
             }
         }
         /// The API lane returns `outcome` instead of the default 2xx.
@@ -781,6 +797,9 @@ mod tests {
             *self.api_call.borrow_mut() =
                 Some((endpoint.to_string(), request_id.to_string(), reply));
             self.api_result.clone()
+        }
+        fn clear_permission_request(&self, pane_id: &str) {
+            self.request_cleared.borrow_mut().push(pane_id.to_string());
         }
         fn acquire(
             &self,
@@ -1088,6 +1107,11 @@ mod tests {
         assert_eq!(call.1, "per_abc123");
         assert_eq!(call.2, ApiReply::Once);
         assert!(*io.cleared.borrow(), "the lock is released after the reply");
+        assert_eq!(
+            *io.request_cleared.borrow(),
+            vec!["%1".to_string()],
+            "a spent request id is unstamped under the same held lock"
+        );
     }
 
     #[test]
@@ -1103,6 +1127,10 @@ mod tests {
             "the request went away, not the pane"
         );
         assert!(*io.cleared.borrow(), "the lock is released on 404");
+        assert!(
+            io.request_cleared.borrow().is_empty(),
+            "a 404 leaves the stamp alone: it may already name a newer request"
+        );
     }
 
     #[test]
