@@ -99,12 +99,15 @@ fn has_state(ev: &Evaluation, state: AgentState) -> bool {
 }
 
 /// Rule index in `claude.toml`, in declaration order — the map the fixture tests use.
+/// New rules are APPENDED, never inserted: these indices are hardcoded across the suite.
 mod rule {
     pub(crate) const BLOCKED_PERMISSION: usize = 0;
     pub(crate) const HISTORY_OVERLAY: usize = 1;
     pub(crate) const WORKING_TITLE: usize = 2;
     pub(crate) const IDLE_TITLE: usize = 3;
     pub(crate) const IDLE_MODE_LINE: usize = 4;
+    pub(crate) const BLOCKED_PLAN: usize = 5;
+    pub(crate) const BLOCKED_TRUST: usize = 6;
 }
 
 fn matched(ev: &Evaluation, index: usize) -> bool {
@@ -119,13 +122,14 @@ fn matched(ev: &Evaluation, index: usize) -> bool {
 // at two pane widths. Free-text question forms are intentionally NOT matched;
 // `no_false_blocked_from_conversation_text` guards that.
 
-/// Assert a blocked fixture is detected as blocked both at the rule level (body chrome)
-/// and at the fold level (verdict blocked/permission even though the title keeps `✳`).
-fn assert_blocked(name: &str) {
+/// Assert a blocked fixture is detected as blocked both at the rule level (body chrome) and at the
+/// fold level, resolving to `detail`. Every blocked dialog still matches the generic `❯ 1. Yes`
+/// rule; `detail` is what the priority contest between it and the variant rules settles on.
+fn assert_blocked_detail(name: &str, detail: &str) {
     let ev = evaluate(name);
     assert!(
         matched(&ev, rule::BLOCKED_PERMISSION),
-        "{name}: blocked rule"
+        "{name}: generic blocked rule still matches the option-1 line"
     );
     let blocked = ev
         .evidence
@@ -134,37 +138,218 @@ fn assert_blocked(name: &str) {
         .unwrap_or_else(|| panic!("{name}: blocked evidence"));
     assert_eq!(blocked.source, Source::ScreenRule, "{name}: body chrome");
     if let Claim::State(s) = &blocked.claim {
-        assert_eq!(s.detail.as_ref().map(|d| d.as_str()), Some("permission"));
+        assert_eq!(
+            s.detail.as_ref().map(|d| d.as_str()),
+            Some(detail),
+            "{name}: evidence detail"
+        );
     }
-    // The fold's verdict must be blocked even though the OSC title keeps `✳`
+    // The fold's verdict must be blocked even though the OSC title can keep `✳`
     // (idle-title evidence coexists; blocker chrome overrides it).
     let v = fold_verdict(name, None);
     assert_eq!(v.state, AgentState::Blocked, "{name}: verdict blocked");
-    assert_eq!(v.detail.as_ref().map(|d| d.as_str()), Some("permission"));
+    assert_eq!(
+        v.detail.as_ref().map(|d| d.as_str()),
+        Some(detail),
+        "{name}: verdict detail"
+    );
 }
 
+/// A-502. The permission dialog is the case the split exists to preserve: it must keep folding to
+/// `permission` at every captured width, including the second, independently-captured Bash-tool
+/// dialog from the gap-fill round (claude 2.1.236).
 #[test]
 fn blocked_permission_detected_at_wide_and_narrow() {
     for name in [
         "claude_blocked_permission_w100.txt",
         "claude_blocked_permission_w60.txt",
+        "claude_blocked_permission_bash_w60.txt",
     ] {
-        assert_blocked(name);
+        assert_blocked_detail(name, "permission");
+        let ev = evaluate(name);
+        assert!(
+            !matched(&ev, rule::BLOCKED_PLAN) && !matched(&ev, rule::BLOCKED_TRUST),
+            "{name}: neither variant rule steals the permission dialog"
+        );
     }
 }
 
+/// A-501. **This test changed with the plan/trust split, and the old assertion was the bug.**
+/// It previously asserted `detail == "permission"` on the first-run trust gate, which is what made
+/// `tma act approve` fire `1` — "Yes, I trust this folder", a whole-folder grant — at it.
+/// Detection still rides the `❯ 1. Yes, I trust this folder` selection chrome, not the question
+/// text (which renders above the tail window and wraps at narrow widths); only the stamped detail
+/// moved.
 #[test]
 fn blocked_trust_dialog_detected_at_wide_and_narrow() {
-    // The first-run "Is this a project you created or one you trust?" gate. Its question
-    // text renders above the tail window (and wraps at narrow widths), so it is the
-    // `❯ 1. Yes, I trust this folder` selection chrome — not the question — that carries
-    // detection here. Same rule, same anchor as the write-permission prompt.
     for name in [
+        "claude_blocked_trust_w200.txt",
         "claude_blocked_trust_w100.txt",
         "claude_blocked_trust_w60.txt",
     ] {
-        assert_blocked(name);
+        assert_blocked_detail(name, "trust");
+        assert!(
+            matched(&evaluate(name), rule::BLOCKED_TRUST),
+            "{name}: trust variant rule matched"
+        );
     }
+}
+
+/// A-500. The plan-approval dialog, whose option 1 is `Yes, and use auto mode` — it does not
+/// approve the action in front of the user, it switches the session into auto-approving everything
+/// that follows. Captured at the narrowest and widest widths in the corpus; the option-1 line is
+/// identical at both, so the match is structural rather than a wrap artefact.
+#[test]
+fn blocked_plan_dialog_detected_at_wide_and_narrow() {
+    for name in [
+        "claude_blocked_plan_w200.txt",
+        "claude_blocked_plan_w60.txt",
+    ] {
+        assert_blocked_detail(name, "plan");
+        assert!(
+            matched(&evaluate(name), rule::BLOCKED_PLAN),
+            "{name}: plan variant rule matched"
+        );
+    }
+}
+
+/// A-503. The variant rules win by PRIORITY, not by declaration order: both they and the generic
+/// permission rule match the same line, and 110 > 100 is the only thing that decides the detail.
+/// Equalise the priorities and the engine falls back to lowest-index-wins, which is the generic
+/// rule — the pre-fix behaviour.
+#[test]
+fn plan_and_trust_outrank_the_generic_permission_rule() {
+    let m = manifest();
+    assert_eq!(
+        m.rules.len(),
+        7,
+        "the rule-index map in `mod rule` is positional; a rule was inserted or removed"
+    );
+    let generic = &m.rules[rule::BLOCKED_PERMISSION];
+    assert_eq!(generic.priority, 100);
+    assert_eq!(
+        generic.detail.as_ref().map(|d| d.as_str()),
+        Some("permission")
+    );
+    for (index, detail) in [(rule::BLOCKED_PLAN, "plan"), (rule::BLOCKED_TRUST, "trust")] {
+        let variant = &m.rules[index];
+        assert_eq!(variant.state, AgentState::Blocked);
+        assert_eq!(variant.detail.as_ref().map(|d| d.as_str()), Some(detail));
+        assert!(
+            variant.priority > generic.priority,
+            "{detail} at {} must outrank permission at {}",
+            variant.priority,
+            generic.priority
+        );
+        // Same region, so the discriminator is always inside the window the generic rule read.
+        assert_eq!(variant.region, generic.region, "{detail}: same region");
+    }
+}
+
+/// The plan dialog carries the same title-coexistence property the permission fixtures pin: a live
+/// claude pane keeps `✳` in its OSC title while a dialog is up, and the fold must still land
+/// `blocked/plan`. The gap-fill corpus recorded capture bodies only, so the title here is authored
+/// onto the real capture rather than replayed from it.
+#[test]
+fn plan_verdict_survives_an_idle_marker_in_the_title() {
+    let fx = Fixture::load(&fixtures_dir().join("claude_blocked_plan_w60.txt")).unwrap();
+    let snap = PaneSnapshot {
+        title: "✳ Add hello to probe.txt".to_string(),
+        ..snapshot(&fx)
+    };
+    let ev = engine().evaluate(&snap);
+    assert!(has_state(&ev, AgentState::Idle), "the ✳ title claims idle");
+    let facts = SnapshotFacts {
+        pid: 1,
+        foreground_is_agent: true,
+        scrolled: false,
+        history_view: ev.history_view,
+    };
+    let v = verdict(
+        None,
+        &facts,
+        &ev.evidence,
+        &manifest(),
+        &FoldConfig::default(),
+        snap.captured_at + 10,
+    );
+    assert_eq!(
+        v.state,
+        AgentState::Blocked,
+        "blocker chrome overrides idle"
+    );
+    assert_eq!(v.detail.as_ref().map(|d| d.as_str()), Some("plan"));
+}
+
+/// A-504 / A-505 end to end, at the only level that proves the fix: a **real capture** is folded to
+/// a verdict and that verdict is fed to the shipped `approve` gate. This is the whole chain the bug
+/// travelled down — screen → rule → fold → gate → `send-keys "1"` — with only the final tmux write
+/// stubbed out.
+///
+/// `approve_refuses_at_the_plan_and_trust_dialogs` in `bundled_actions.rs` asserts the gate half
+/// with a hand-written `detail`, so it stays green even if the manifest regresses. This one does
+/// not: revert the two variant rules and the plan capture folds to `permission` again and the gate
+/// returns `Fireable`.
+#[test]
+fn approve_and_deny_refuse_at_a_real_plan_or_trust_capture() {
+    use tma_core::action::{ContextKeys, GateInput, GateOutcome, RefusalReason};
+    use tma_core::ActionManifest;
+
+    let approve = ActionManifest::parse(
+        include_str!("../actions/approve.toml"),
+        "approve",
+        "approve.toml",
+    )
+    .unwrap();
+    let deny =
+        ActionManifest::parse(include_str!("../actions/deny.toml"), "deny", "deny.toml").unwrap();
+
+    for name in [
+        "claude_blocked_plan_w60.txt",
+        "claude_blocked_plan_w200.txt",
+        "claude_blocked_trust_w60.txt",
+        "claude_blocked_trust_w200.txt",
+    ] {
+        let v = fold_verdict(name, None);
+        assert_eq!(v.state, AgentState::Blocked, "{name}: folds to blocked");
+        let detail = v.detail.as_ref().map(|d| d.as_str());
+        let input = GateInput {
+            agent: "claude",
+            state: v.state,
+            detail,
+            context_pct: None,
+            context_covered: false,
+            context_keys: ContextKeys::default(),
+        };
+        assert_eq!(
+            approve.evaluate_gate(&input),
+            GateOutcome::Refused(RefusalReason::Gated),
+            "{name}: approve resolved at detail {detail:?} — it would send `1`"
+        );
+        // `deny.toml` is gated identically, so its Escape stops firing here too. On the trust gate
+        // that Escape was a correct, safe cancel: a deliberate, documented regression in
+        // convenience, with per-detail deny rules scheduled separately.
+        assert_eq!(
+            deny.evaluate_gate(&input),
+            GateOutcome::Refused(RefusalReason::Gated),
+            "{name}: deny is gated identically to approve"
+        );
+    }
+
+    // The control: the dialog approve exists for still resolves, from a real capture.
+    let v = fold_verdict("claude_blocked_permission_bash_w60.txt", None);
+    assert_eq!(
+        approve.evaluate_gate(&GateInput {
+            agent: "claude",
+            state: v.state,
+            detail: v.detail.as_ref().map(|d| d.as_str()),
+            context_pct: None,
+            context_covered: false,
+            context_keys: ContextKeys::default(),
+        }),
+        GateOutcome::Fireable,
+        "the permission dialog must still be approvable"
+    );
 }
 
 // ---- rule #1: history overlay (skip_state_update) ----------------------------------

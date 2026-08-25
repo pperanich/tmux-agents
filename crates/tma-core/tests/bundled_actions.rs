@@ -64,6 +64,82 @@ fn approve_gates_on_blocked_permission() {
     );
 }
 
+/// A-504 / A-505, at the gate. **The user-visible fix.** `approve` fires `1` on claude, and on the
+/// plan dialog `1` is "Yes, and use auto mode" (auto-approve everything that follows) while on the
+/// trust gate it is "Yes, I trust this folder" (a whole-folder grant). Before the manifest split
+/// both dialogs were stamped `blocked/permission` and this gate returned `Fireable`.
+///
+/// Nothing in `approve.toml` changed to make this pass — re-typing the dialog is sufficient, because
+/// the gate matches `detail` by exact string.
+#[test]
+fn approve_refuses_at_the_plan_and_trust_dialogs() {
+    let a = ActionManifest::parse(APPROVE, "approve", "approve.toml").unwrap();
+    for detail in ["plan", "trust"] {
+        assert_eq!(
+            a.evaluate_gate(&GateInput {
+                detail: Some(detail),
+                ..row("claude", AgentState::Blocked)
+            }),
+            GateOutcome::Refused(RefusalReason::Gated),
+            "approve must not fire `1` at a blocked/{detail} pane"
+        );
+    }
+    // The dialog it exists for still works.
+    assert_eq!(
+        a.evaluate_gate(&GateInput {
+            detail: Some("permission"),
+            ..row("claude", AgentState::Blocked)
+        }),
+        GateOutcome::Fireable
+    );
+}
+
+/// A-506. The resolved action table for a claude pane, asserted as data across the whole blocked
+/// detail vocabulary. The split's entire intended effect is the two `plan`/`trust` rows: approve and
+/// deny stop resolving there, and nothing else moves.
+#[test]
+fn the_claude_action_table_gains_exactly_two_refusing_rows() {
+    let actions = [
+        ("approve", APPROVE),
+        ("deny", DENY),
+        ("interrupt", INTERRUPT),
+    ]
+    .map(|(stem, src)| {
+        (
+            stem,
+            ActionManifest::parse(src, stem, &format!("{stem}.toml")).unwrap(),
+        )
+    });
+
+    // (blocked detail, the actions that resolve at it).
+    let table: Vec<(&str, Vec<&str>)> = ["permission", "plan", "trust"]
+        .iter()
+        .map(|detail| {
+            let fireable = actions
+                .iter()
+                .filter(|(_, a)| {
+                    a.evaluate_gate(&GateInput {
+                        detail: Some(detail),
+                        ..row("claude", AgentState::Blocked)
+                    }) == GateOutcome::Fireable
+                })
+                .map(|(stem, _)| *stem)
+                .collect();
+            (*detail, fireable)
+        })
+        .collect();
+
+    assert_eq!(
+        table,
+        vec![
+            ("permission", vec!["approve", "deny"]),
+            ("plan", vec![]),
+            ("trust", vec![]),
+        ],
+        "plan and trust must orphan approve and deny, and nothing else"
+    );
+}
+
 #[test]
 fn interrupt_gates_on_working() {
     let a = ActionManifest::parse(INTERRUPT, "interrupt", "interrupt.toml").unwrap();

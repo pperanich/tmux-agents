@@ -61,6 +61,11 @@ pub struct Detail(String);
 
 impl Detail {
     pub const PERMISSION: &'static str = "permission";
+    /// A plan-approval dialog. Distinct from `permission` because its affirmative option grants
+    /// every following action, not the one in front of the user.
+    pub const PLAN: &'static str = "plan";
+    /// A workspace-trust gate. Its affirmative option grants the whole folder, not one action.
+    pub const TRUST: &'static str = "trust";
     pub const QUESTION: &'static str = "question";
     pub const ERROR: &'static str = "error";
     pub const RATE_LIMIT: &'static str = "rate_limit";

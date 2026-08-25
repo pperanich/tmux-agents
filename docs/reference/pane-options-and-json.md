@@ -9,9 +9,24 @@ for both: the pane-option schema and the JSON schemas.
 ## The stamp grammar
 
 Option values are machine tokens, never glyphs. State is one of the closed
-vocabulary `idle`, `working`, `blocked`, `unknown`; `@agent_detail` is a
-lowercase machine token (`permission`, `rate_limit`). Glyph and color rendering
+vocabulary `idle`, `working`, `blocked`, `unknown`. Glyph and color rendering
 happens only in the surfaces, and is configurable.
+
+`@agent_detail` is a lowercase machine token (`[a-z0-9_-]`) qualifying *why* the
+pane is in that state. **Unlike `state`, this vocabulary is open and unstable
+until 1.0**: an agent manifest may emit a token this engine has never heard of,
+and it round-trips intact rather than erroring. Read it defensively — match the
+tokens you know and degrade gracefully on the rest. What the bundled manifests
+emit today:
+
+| token | state | meaning |
+|---|---|---|
+| `permission` | `blocked` | a tool-use permission prompt: approving grants the one action in front of the user |
+| `plan` | `blocked` | a plan-approval dialog. Its affirmative option grants **every following action**, so `tma act approve` deliberately does not resolve here |
+| `trust` | `blocked` | a workspace-trust gate. Its affirmative option grants the **whole folder**, so neither `approve` nor `deny` resolves here |
+
+`tma-core` additionally declares `question`, `error`, `rate_limit`,
+`background` and `compacting` as constants; no bundled manifest emits them yet.
 
 Every `@agent_*_at` value is epoch **milliseconds** (13 digits today), not
 seconds. Millisecond resolution is what keeps two episodes opening in the same
@@ -90,7 +105,7 @@ A versioned, additive-only document. The top level is `{ "schema": 1, "agents":
 | `pane` | string | tmux pane id (e.g. `%5`) |
 | `agent` | string | agent name |
 | `state` | string | `idle` / `working` / `blocked` / `unknown` |
-| `detail` | string or null | detail token, `null` when none |
+| `detail` | string or null | detail token, `null` when none. [Open vocabulary](#the-stamp-grammar) — read defensively |
 | `since` | number | epoch **ms** of the last state transition (original unsuffixed key, kept for compatibility) |
 | `since_ms` | number | the same value as `since`; names the unit, preferred in new consumers |
 | `episode_ms` | number | epoch **ms** of the instant `wait --since` compares against: the later of `since_ms` and `@agent_turn_at`. Equal to `since_ms` until a second completion lands on a pane that never left `idle`, and the value a supervisor loop feeds back as its next `--since` (see [Drive a supervisor loop](../how-to/block-a-script-on-agent-state.md#drive-a-supervisor-loop)) |
