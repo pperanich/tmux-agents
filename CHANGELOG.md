@@ -10,6 +10,22 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **`tma wait --until done` could retract the very mark it was waiting for and then block to its
+  timeout.** `done` is idle plus `@agent_attention`, and the ordered-input clear (the pass that
+  retires a marker on a pane you are sitting at and typing into) ran *inside* the poll cycle, before
+  the goal was evaluated against its rows. So a completion raised by some earlier cycle — the
+  daemon's sweep, a status-line `tma status` — that you had typed past was taken down by the
+  waiter's own first cycle and never seen. `wait` now defers the clear and applies it after
+  evaluating the goal, the ordering the daemon already used around its notification dispatch. The
+  clear still happens, so a marker on a pane its owner is typing into is retired even on a box where
+  a long `wait` is the only thing running cycles.
+- **`tma subscribe --events` could swallow a `done` edge entirely** for the same reason, and worse:
+  with the clear landing before the row diff, the completion produced no `idle` → `done` edge at
+  all, rather than merely being followed by its `done` → `idle` retraction. The stream now emits
+  from the rows as it read them and clears afterwards, so both edges are reported in order.
+
 ## [0.4.5] - 2026-08-24
 
 ### Added

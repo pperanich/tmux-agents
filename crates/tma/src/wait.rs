@@ -417,7 +417,16 @@ pub(crate) fn run(opts: WaitOpts) -> ExitCode {
         ) {
             eprintln!("{msg}");
         }
-        let report = match cycle::run_cycle(&tmux, &manifests, &config.fold_config()) {
+        // Deferred, never inline: `done` is idle + `@agent_attention`, so an ordered-input clear
+        // running inside the cycle would retract the mark out of the rows the goal is evaluated
+        // against and block this waiter on a completion that was standing when it looked. The clear
+        // still happens — just after the read, exactly as the daemon orders it around its dispatch.
+        let report = match cycle::run_cycle_with(
+            &tmux,
+            &manifests,
+            &config.fold_config(),
+            cycle::SeenClear::Deferred,
+        ) {
             Ok(mut r) => {
                 // A repo/branch selector needs the labels the cycle deliberately leaves unresolved.
                 // Only then: the resolver memoizes, but an unfiltered wait must stay spawn-free.
@@ -444,7 +453,15 @@ pub(crate) fn run(opts: WaitOpts) -> ExitCode {
 
         // Skip evaluation on a transient timeout; the deadline check and wait below still run.
         if let Some(report) = report {
-            match evaluate(&target, &report.rows, &selector, &goal, &mut latches, &tmux) {
+            let step = evaluate(&target, &report.rows, &selector, &goal, &mut latches, &tmux);
+            // The cycle's deferred clear, STRICTLY after the goal has read the rows. `wait` still
+            // does it rather than leaving it to whatever else happens to be polling: on a box with
+            // no daemon and no tma status line, a long `wait` is the only thing running cycles, and
+            // dropping the clear would leave a marker standing on a pane its owner is typing into.
+            if !report.deferred_seen.is_empty() {
+                tma_runtime::seen::clear_seen(&tmux, &report.deferred_seen);
+            }
+            match step {
                 Step::Matched(matched) => {
                     // Resolve the matched rows' repo/branch/worktree only here, at emit — never in
                     // the poll loop, where a git spawn per tick per row would defeat the bounded memo.

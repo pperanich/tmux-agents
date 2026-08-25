@@ -9,7 +9,7 @@
 //!
 //! The PTY attach needs `python3`; absent it these skip rather than fail (per the jump suite).
 
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use tma_core::FoldConfig;
 use tma_runtime::capture::CaptureState;
@@ -76,22 +76,6 @@ fn mark_done(s: &Scratch, pane: &str, since_ms: u64) {
     s.set_opt(pane, ATTENTION, "1");
 }
 
-/// The pane the (single) attached client is displaying, per `list-clients`.
-fn displayed_pane(s: &Scratch) -> String {
-    String::from_utf8_lossy(&s.tmux(&["list-clients", "-F", "#{pane_id}"]).stdout)
-        .trim()
-        .to_string()
-}
-
-/// The attached client's `#{client_activity}` — epoch SECONDS — scaled to ms.
-fn client_activity_ms(s: &Scratch) -> u64 {
-    String::from_utf8_lossy(&s.tmux(&["list-clients", "-F", "#{client_activity}"]).stdout)
-        .trim()
-        .parse::<u64>()
-        .map(|secs| secs * 1000)
-        .unwrap_or(0)
-}
-
 /// Attach a PTY client to `home`, or report why not.
 fn attach(s: &mut Scratch) -> bool {
     match s.attach_client("home") {
@@ -104,22 +88,6 @@ fn attach(s: &mut Scratch) -> bool {
             panic!("PTY client failed to attach after python3 ran (regression, not env)")
         }
     }
-}
-
-/// Type at the client's real terminal until its activity clock reads strictly past `since_ms`.
-/// Repeated because `client_activity` has one-second resolution: a keystroke inside the raise's own
-/// second is deliberately not "later than" it, so the loop keeps typing into the next second.
-fn type_past(s: &Scratch, since_ms: u64) {
-    let deadline = Instant::now() + common::POLL_CEILING;
-    while Instant::now() < deadline {
-        // `q` reaches a pane running `sleep`, which discards it.
-        s.send_client_keys("q");
-        std::thread::sleep(Duration::from_millis(200));
-        if client_activity_ms(s) > since_ms {
-            return;
-        }
-    }
-    panic!("the PTY client's input never registered past the raise");
 }
 
 /// A raise the user has since typed past, on the pane they are looking at, comes down — and only
@@ -137,7 +105,7 @@ fn input_after_the_raise_clears_the_pane_you_are_watching() {
         return;
     }
     assert_eq!(
-        displayed_pane(&s),
+        s.displayed_pane(),
         watched,
         "the attached client must be displaying the watched pane"
     );
@@ -147,7 +115,7 @@ fn input_after_the_raise_clears_the_pane_you_are_watching() {
     let raised = now_ms() - 60_000;
     mark_done(&s, &watched, raised);
     mark_done(&s, &witness, raised);
-    type_past(&s, raised);
+    s.type_client_input_past(raised);
 
     let report = cycle::run_cycle(&client(&s), &[], &cfg()).expect("cycle");
     assert_eq!(
@@ -199,11 +167,11 @@ fn a_marker_raised_after_your_last_input_survives() {
     // as soon as the clock passes the (zero) floor, which the attach itself already satisfies, so a
     // `q` may still be in flight. A late landing then moves the deadline instead of slipping in
     // behind the raise and quietly turning this into the case below.
-    type_past(&s, 0);
+    s.type_client_input_past(0);
     common::poll_until("the client's last input second to elapse", || {
-        now_ms() > client_activity_ms(&s) + 1_000
+        now_ms() > s.client_activity_ms() + 1_000
     });
-    let last_input = client_activity_ms(&s);
+    let last_input = s.client_activity_ms();
     let raised = now_ms();
     mark_done(&s, &watched, raised);
 
@@ -263,7 +231,7 @@ fn the_sweep_defers_its_clear_to_the_caller() {
     }
     let raised = now_ms() - 60_000;
     mark_done(&s, &watched, raised);
-    type_past(&s, raised);
+    s.type_client_input_past(raised);
 
     let tmux = client(&s);
     let mut capture = CaptureState::new(cfg(), 3);

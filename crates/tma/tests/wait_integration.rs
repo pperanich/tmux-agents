@@ -10,11 +10,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tma_test_support::{
-    empty_config_path, wait_capture_contains, wait_status_eq, DaemonTestGuard, Scratch,
-    POLL_CEILING,
+    empty_config_path, wait_capture_contains, wait_status_eq, AttachOutcome, DaemonTestGuard,
+    Scratch, POLL_CEILING,
 };
 
 fn have_tmux() -> bool {
@@ -287,6 +287,14 @@ fn settle_agent_state(s: &Scratch, sess: &str, want: &str, timeout: Duration) ->
         }
         std::thread::sleep(Duration::from_millis(150));
     }
+}
+
+/// Epoch milliseconds, the unit every stamp instant is written in.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// (a) An already-blocked pane returns immediately: exit 0 with the row on stdout. The stamps are
@@ -965,6 +973,75 @@ fn a_fed_back_episode_floor_blocks_the_next_lap() {
         out.status.code(),
         Some(0),
         "feeding since_ms back re-satisfies immediately, which is why the recipe reads episode_ms"
+    );
+}
+
+/// (m) The ordered-input clear must never run before the goal it feeds. A human is parked on the
+/// pane, an earlier cycle (the daemon's sweep, a status-line `tma status`) raised the completion
+/// marker, and they have typed since — so the clear is armed, and `wait --until done` runs the very
+/// cycle that fires it. `done` is `idle + @agent_attention`, so a clear landing inside the cycle
+/// retracts the mark out of the rows the goal is then evaluated against and the waiter blocks to its
+/// own timeout on a completion that was standing when it looked.
+///
+/// A real PTY client is the whole point: `client_activity` moves only for an attached terminal and
+/// only on genuine input, never on `send-keys` and never on tma's own command clients.
+#[test]
+fn a_waiter_does_not_retract_the_done_mark_it_is_waiting_for() {
+    if !have_tmux() {
+        return;
+    }
+    let mut s = Scratch::new("wait-seen");
+    let pane = static_agent(&s, "work", "READY\\n", "READY");
+    assert!(
+        settle_agent_state(&s, "work", "idle", POLL_CEILING),
+        "the pane must settle to idle before the marker goes up"
+    );
+    match s.attach_client("work") {
+        AttachOutcome::Attached => {}
+        AttachOutcome::NoPython => {
+            eprintln!("skipping: python3 unavailable for the PTY attach");
+            return;
+        }
+        AttachOutcome::Failed => {
+            panic!("PTY client failed to attach after python3 ran (regression, not env)")
+        }
+    }
+    assert_eq!(
+        s.displayed_pane(),
+        pane,
+        "the attached client must be displaying the agent pane"
+    );
+
+    // The completion goes up AFTER the attach, so nothing the attach itself did to
+    // `client_activity` can arm the clear — only the keystroke below can. `@agent_since` is
+    // write-once per state run, so the idle run the pane is already in keeps this instant.
+    let raised = now_ms();
+    s.set_opt(&pane, "@agent_since", &raised.to_string());
+    s.set_opt(&pane, "@agent_attention", "1");
+    // The keystroke after it: this, and only this, is what arms the clear against this pane.
+    s.type_client_input_past(raised);
+
+    let mut child = spawn_wait(&s, &["--pane", &pane, "--until", "done", "--timeout", "8"]);
+    let code = await_exit(&mut child, POLL_CEILING);
+    let row = read_stdout(&mut child);
+    let err = read_stderr(&mut child);
+    assert_eq!(
+        code,
+        Some(0),
+        "the waiter must return on the mark that was standing when its cycle read it, \
+         not retract it and block: {err:?}"
+    );
+    assert!(
+        row.contains(&pane),
+        "the satisfied row names the waited-on pane: {row:?}"
+    );
+    // Ordered, not skipped: the waiter still applies the clear, it just does it after the read. If
+    // this ever reads `1` the deferral has quietly turned `wait` into a non-clearer, and a marker on
+    // a pane its owner is typing into would stand until something else happens to poll.
+    assert_eq!(
+        s.pane_option(&pane, "@agent_attention"),
+        "",
+        "the cycle that satisfied the wait still retires the marker it read"
     );
 }
 

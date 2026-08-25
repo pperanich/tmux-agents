@@ -324,7 +324,7 @@ Other options:
 
 | option | meaning |
 |---|---|
-| `--until <STATES>` | Required. The state(s) to wait for, comma-separated: `idle`, `working`, `blocked`, `unknown`, and `done` (idle plus attention, the finished-and-unreviewed surface). `wait` returns as soon as a cycle observes the target in any of them. `done` is by definition unreviewed: if you sit at the pane and type once the agent has finished, the mark clears and the wait carries on. Wait on `idle` when a human is at the keyboard. |
+| `--until <STATES>` | Required. The state(s) to wait for, comma-separated: `idle`, `working`, `blocked`, `unknown`, and `done` (idle plus attention, the finished-and-unreviewed surface). `wait` returns as soon as a cycle observes the target in any of them. `done` is by definition unreviewed: once you have the pane on screen and type at it, the mark comes down and does not come back for that episode, so a wait STARTED after that never satisfies. A wait already running is not robbed by its own poll — its cycle evaluates the goal before applying that clear — but wait on `idle` when a human is at the keyboard and may review the pane before your script gets there. |
 | `--since <EPOCH_MS>` | Only a state that BEGAN after this epoch-ms timestamp satisfies (the row's `episode_ms` must be strictly greater). Works with every target. A `done` target also satisfies on a fresh completion of a pane that never left `idle`: a second turn end moves `@agent_turn_at` while `since_ms` stays pinned to the start of the idle run, and `episode_ms` is the later of the two. Feed the row's own `episode_ms` back as the next floor, not `since_ms`: `since_ms` is a floor the row already clears, so the wait would re-satisfy on every lap. |
 | [selector flags](#selector-flags) | Scope `--agent`/`--any`/`--all`/`--count`. `--agent` is both the scope and the by-name target, so the flag that names an agent is the flag that selects it. Rejected alongside `--pane`, whose id is already unique (exit 2). |
 | `--timeout <SECS>` | Give up after this many seconds and exit 124 (the `timeout(1)` convention). Absent waits forever; compose with `timeout(1)` for an external belt. |
@@ -560,7 +560,9 @@ The states are the **disjoint** reading: a finished-but-unreviewed pane is `done
 not `idle`, so setting the attention flag on an idle pane is a real `idle` →
 `done` edge, and anything that clears attention is `done` → `idle`: jumping to the
 pane, navigating off it, or typing at it while it is on your screen. Read that
-edge as "the user saw it".
+edge as "the user saw it". The stream emits the `idle` → `done` edge before
+applying its own clear, so a completion is always reported at least once, even
+when the keystroke that retires it landed before the stream first saw the mark.
 
 Two edges have an open end, spelled as the empty string:
 

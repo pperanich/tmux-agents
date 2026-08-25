@@ -13,11 +13,11 @@ use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tma_test_support::{
-    empty_config_path, poll_until, wait_capture_contains, wait_status_eq, DaemonTestGuard, Scratch,
-    POLL_CEILING,
+    empty_config_path, poll_until, wait_capture_contains, wait_status_eq, AttachOutcome,
+    DaemonTestGuard, Scratch, POLL_CEILING,
 };
 
 fn have_tmux() -> bool {
@@ -118,6 +118,14 @@ fn static_agent(s: &Scratch, sess: &str) -> String {
         "agent pane chrome (READY) did not render"
     );
     s.display(sess, "#{pane_id}")
+}
+
+/// Epoch milliseconds, the unit every stamp instant is written in.
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
 }
 
 /// A long-running `tma subscribe` child: its stdout lines (timestamped) and stderr lines are read on
@@ -548,6 +556,94 @@ fn events_emit_one_edge_per_transition_after_a_silent_baseline() {
     assert!(
         !line.contains("\"agents\":"),
         "an edge is not a snapshot document: {line}"
+    );
+    assert!(sub.errors().is_empty(), "{:?}", sub.errors());
+}
+
+/// (g) The same read-then-clear ordering as `tma wait`, on the stream. `done` is idle +
+/// `@agent_attention`, so `diff_rows` only ever sees the completion if the rows the renderer diffs
+/// still carry the flag. With a real client parked on the pane and a keystroke already behind the
+/// raise, the ordered-input clear is armed the instant the marker exists — and an inline clear
+/// retires it inside the very cycle that would have reported it, so the `done` edge is never
+/// emitted at all (not merely followed by its retraction). Both edges are asserted, in order.
+#[test]
+fn the_stream_reports_the_done_edge_before_retiring_it() {
+    if !have_tmux() {
+        return;
+    }
+    let mut s = Scratch::new("sub-seen");
+    let pane = static_agent(&s, "work");
+    write_manifest(&s, &pane_process_names(&s, "work"));
+    assert!(s.tma(&["ls"]).status.success());
+    assert_eq!(s.display("work", "#{@agent_state}"), "idle");
+
+    match s.attach_client("work") {
+        AttachOutcome::Attached => {}
+        AttachOutcome::NoPython => {
+            eprintln!("skipping: python3 unavailable for the PTY attach");
+            return;
+        }
+        AttachOutcome::Failed => {
+            panic!("PTY client failed to attach after python3 ran (regression, not env)")
+        }
+    }
+    assert_eq!(
+        s.displayed_pane(),
+        pane,
+        "the attached client must be displaying the agent pane"
+    );
+
+    // Type FIRST, then raise the marker behind that keystroke. Staged this way there is no window
+    // in which the stream could see the flag before the clear is armed, so a pass cannot be the
+    // stream merely winning a race with the user's typing.
+    s.type_client_input_past(0);
+    poll_until("the client's last input second to elapse", || {
+        now_ms() > s.client_activity_ms() + 1_000
+    });
+    let last_input = s.client_activity_ms();
+
+    let sub = SubscribeChild::spawn_with(&s, 1, &["--events"]);
+    // Two poll intervals of silence: the baseline cycle and its successors have run, so the diff's
+    // left side is the settled idle row and the next edge emitted is the one under test.
+    std::thread::sleep(Duration::from_millis(2500));
+    assert_eq!(
+        sub.line_count(),
+        0,
+        "no synthetic edges for the initial snapshot: {:?}",
+        sub.snapshot().iter().map(|(_, l)| l).collect::<Vec<_>>()
+    );
+
+    // The completion, raised behind the keystroke above. `@agent_since` is write-once per state run,
+    // so the idle run the pane is already in keeps this instant.
+    s.set_opt(&pane, "@agent_since", &(last_input - 1_000).to_string());
+    s.set_opt(&pane, "@agent_attention", "1");
+
+    let (_, done) = sub
+        .wait_for_line(|l| l.contains("\"to\":\"done\""), POLL_CEILING)
+        .unwrap_or_else(|| {
+            panic!(
+                "the completion was retired inside the cycle that should have reported it: {:?}",
+                sub.snapshot().iter().map(|(_, l)| l).collect::<Vec<_>>()
+            )
+        });
+    assert!(done.contains("\"from\":\"idle\""), "{done}");
+    assert!(done.contains(&format!("\"pane\":\"{pane}\"")), "{done}");
+
+    // Ordered, not skipped: the stream still applies the clear, one cycle later, and reports the
+    // retraction as its own edge.
+    assert!(
+        sub.wait_for_line(
+            |l| l.contains("\"from\":\"done\"") && l.contains("\"to\":\"idle\""),
+            POLL_CEILING
+        )
+        .is_some(),
+        "the stream still retires the marker after reporting it: {:?}",
+        sub.snapshot().iter().map(|(_, l)| l).collect::<Vec<_>>()
+    );
+    assert_eq!(
+        s.pane_option(&pane, "@agent_attention"),
+        "",
+        "and the clear actually landed on the pane"
     );
     assert!(sub.errors().is_empty(), "{:?}", sub.errors());
 }

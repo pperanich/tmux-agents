@@ -52,15 +52,23 @@ pub struct CycleReport {
 }
 
 /// When a cycle runs the ordered-input clear ([`crate::seen`]).
+///
+/// The split is renderer vs detector, and it turns on one question: does the caller merely DISPLAY
+/// the rows, or does it DECIDE something from them? A renderer wants the clear inline, so the frame
+/// it paints shows the result of its own clear instead of a ✓ it has already retired. A detector —
+/// the daemon's notification dispatch, `tma wait`'s goal, `tma subscribe`'s edge diff — reads
+/// `@agent_attention` to decide whether a completion happened, and an inline clear retracts the mark
+/// out from under that read: the completion is not announced late, it is never announced at all.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum SeenClear {
-    /// Inside the cycle, before it returns: the rows already reflect it. Every one-shot surface.
+    /// Inside the cycle, before it returns: the rows already reflect it. The rendering surfaces —
+    /// `ls`, `status`, the picker, `jump`.
     #[default]
     Inline,
     /// Not at all — the panes are reported in [`CycleReport::deferred_seen`] and the caller clears
-    /// them when it is ready. The daemon defers, because its notification dispatch reads the same
-    /// persisted flag: a clear landing first would eat the desktop notification for a completion
-    /// that had not been announced yet.
+    /// them once it has read the flag. The daemon defers around its notification dispatch, `wait`
+    /// around its goal evaluation, `subscribe` around its emission; each would otherwise eat the
+    /// very completion it exists to report.
     Deferred,
 }
 
@@ -87,8 +95,9 @@ pub fn run_cycle(
     run_cycle_with(tmux, manifests, cfg, SeenClear::Inline)
 }
 
-/// [`run_cycle`] with an explicit ordered-input-clear policy. Only the daemon passes
-/// [`SeenClear::Deferred`]; everything else wants the clear inside the cycle that reports the rows.
+/// [`run_cycle`] with an explicit ordered-input-clear policy. Anything that READS
+/// `@agent_attention` to decide something passes [`SeenClear::Deferred`] and clears after that read
+/// (the daemon, `wait`, `subscribe`); a surface that only renders the rows wants it inline.
 pub fn run_cycle_with(
     tmux: &Tmux,
     manifests: &[LoadedManifest],

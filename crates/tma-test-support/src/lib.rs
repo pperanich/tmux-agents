@@ -826,6 +826,45 @@ impl Scratch {
         std::fs::rename(&tmp, &path).unwrap();
     }
 
+    /// The pane the (single) attached PTY client is displaying, per `list-clients` — which is the
+    /// question the ordered-input clear asks, and not the same as which pane tmux calls active.
+    pub fn displayed_pane(&self) -> String {
+        String::from_utf8_lossy(&self.tmux(&["list-clients", "-F", "#{pane_id}"]).stdout)
+            .trim()
+            .to_string()
+    }
+
+    /// The attached client's `#{client_activity}` — epoch SECONDS — scaled to ms. Moves only on
+    /// real terminal input, never on `send-keys` and never on tma's own command clients.
+    pub fn client_activity_ms(&self) -> u64 {
+        String::from_utf8_lossy(
+            &self
+                .tmux(&["list-clients", "-F", "#{client_activity}"])
+                .stdout,
+        )
+        .trim()
+        .parse::<u64>()
+        .map(|secs| secs * 1000)
+        .unwrap_or(0)
+    }
+
+    /// Type at the attached client's real terminal until its activity clock reads strictly past
+    /// `since_ms`, so the "user has typed since the raise" half of an ordering test is a fact rather
+    /// than a hope. Repeated because `client_activity` has one-second resolution: a keystroke inside
+    /// the raise's own second is deliberately not "later than" it, so the loop keeps typing into the
+    /// next second. `q` reaching a pane running `sleep` is discarded.
+    pub fn type_client_input_past(&self, since_ms: u64) {
+        let deadline = Instant::now() + POLL_CEILING;
+        while Instant::now() < deadline {
+            self.send_client_keys("q");
+            std::thread::sleep(Duration::from_millis(200));
+            if self.client_activity_ms() > since_ms {
+                return;
+            }
+        }
+        panic!("the PTY client's input never registered past {since_ms}");
+    }
+
     /// Attach a real PTY client to `session` via a small Python helper (`pty.fork` + `tmux attach`);
     /// the child is stored in `attach`, reaped on drop. Returns a three-state [`AttachOutcome`] so a
     /// caller never folds a genuine environment gap (python3 absent) with a real attach regression.

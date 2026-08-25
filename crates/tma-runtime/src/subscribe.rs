@@ -113,12 +113,24 @@ pub fn run_stream(
         ) {
             eprintln!("{msg}");
         }
-        match cycle::run_cycle(tmux, &manifests, &config.fold_config()) {
+        // Deferred, never inline: `done` is idle + `@agent_attention`, and an ordered-input clear
+        // running inside the cycle retracts the flag before the renderer sees the rows — so the
+        // completion is not merely followed by its retraction, it is never reported at all. The
+        // clear still happens, after the emission, exactly as the daemon orders it around dispatch.
+        match cycle::run_cycle_with(
+            tmux,
+            &manifests,
+            &config.fold_config(),
+            cycle::SeenClear::Deferred,
+        ) {
             Ok(report) => {
                 for line in render(&report, tick) {
                     if emit(&line).is_err() {
                         return StreamEnd::StdoutClosed;
                     }
+                }
+                if !report.deferred_seen.is_empty() {
+                    crate::seen::clear_seen(tmux, &report.deferred_seen);
                 }
             }
             // A transient tmux stall (a socket blip) is ridden out as a skipped emission, never an
