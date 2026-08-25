@@ -1,2 +1,5 @@
 /target
 /book
+
+# nix build output symlink
+/result
