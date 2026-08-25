@@ -348,6 +348,12 @@ pub(super) fn serve(
         // moment, so seed its panes active. Each then emits one quiet edge on the NEXT iteration's
         // drain, which keeps the demotion ordering (fold before apply) intact.
         control::seed_attached(&mut pool, tmux, Instant::now());
+        // A seed still pending after that call means its `list-panes` failed and it will be retried
+        // on the next (deliberately short) wake. Flush status so the retry is visible rather than
+        // showing up only as unexplained latency.
+        if pool.pending_seed() {
+            status_dirty = true;
+        }
 
         // A pane/window lifecycle event ⇒ recompute the window and session summaries so a closed
         // agent pane's rollups clear promptly, even with no `SessionEnd`. Server-gone ends the loop.

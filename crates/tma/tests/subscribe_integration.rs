@@ -251,7 +251,7 @@ fn spawn_daemon(s: &Scratch, status: &std::path::Path) -> DaemonChild {
         .env("TMA_CONFIG", empty_config_path())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(s.daemon_log_stdio())
         .spawn()
         .expect("spawn tma daemon");
     DaemonChild(child)

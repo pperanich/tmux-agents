@@ -77,6 +77,13 @@ pub struct CaptureState {
     /// Edges whose pane died between `list-panes` and its capture/stamp (`TmuxError::Failed`):
     /// skipped so the batch's surviving sibling edges still fire. Monotone.
     skipped_dead_edges: u64,
+    /// Activity edges the on-demand tier abandoned because a batch-wide `tmux` read failed — the
+    /// `list-panes` at the top of [`CaptureState::handle_edges`] or the lazy `ps`. Each one is a
+    /// capture trigger the daemon will not retry, so those panes wait for the next reconciliation
+    /// sweep instead of the ~1 s quiet edge. Nonzero means the box was slow enough to trip the 3 s
+    /// `TMUX_TIMEOUT`, which is the signature to look for when a capture-latency test fails on CI
+    /// and nothing else in the counters looks wrong. Monotone.
+    dropped_edges: u64,
     /// Panes demoted over the daemon's life (monotone).
     demotions: u64,
     /// Reconciliation sweeps run (monotone).
@@ -102,6 +109,7 @@ impl CaptureState {
             quiet_captures: 0,
             contradiction_captures: 0,
             skipped_dead_edges: 0,
+            dropped_edges: 0,
             demotions: 0,
             sweeps: 0,
             sweep_captures: 0,
@@ -139,11 +147,22 @@ impl CaptureState {
         if edges.is_empty() {
             return Ok(());
         }
-        let panes = tmux.list_panes()?; // one read for the whole batch (not a per-edge fan-out)
+        // One read for the whole batch (not a per-edge fan-out). It is a `tmux` one-shot under the
+        // 3 s `TMUX_TIMEOUT`, so on a saturated box it can fail; the batch is then abandoned and
+        // those panes wait for the sweep. Counted rather than silently lost — see `dropped_edges`.
+        let panes = match tmux.list_panes() {
+            Ok(panes) => panes,
+            Err(e) => {
+                self.dropped_edges += edges.len() as u64;
+                return Err(e);
+            }
+        };
         let now = crate::now_ms();
         let mut procs = None; // parsed once, lazily, only if an edge reaches an agent pane
 
+        let mut remaining = edges.len() as u64;
         for edge in edges {
+            remaining -= 1;
             let Some(rec) = panes.iter().find(|r| r.pane_id == edge.pane) else {
                 // The pane is gone; drop its hook-liveness memory (the sweep clears any residue).
                 self.hooks.remove(&edge.pane);
@@ -177,7 +196,15 @@ impl CaptureState {
             let procs_ref = match &procs {
                 Some(p) => p,
                 None => {
-                    procs = Some(tma_tmux::tmux::ps_all()?);
+                    // The batch's other lazy read. Failing here abandons this edge and every one
+                    // after it, so count them all before propagating.
+                    match tma_tmux::tmux::ps_all() {
+                        Ok(p) => procs = Some(p),
+                        Err(e) => {
+                            self.dropped_edges += remaining + 1;
+                            return Err(e);
+                        }
+                    }
                     procs.as_ref().unwrap()
                 }
             };
@@ -239,7 +266,10 @@ impl CaptureState {
                     self.skipped_dead_edges += 1;
                     continue;
                 }
-                Err(e) => return Err(e),
+                Err(e) => {
+                    self.dropped_edges += remaining + 1;
+                    return Err(e);
+                }
             }
             // Persist the flicker anchor for a title-narrowed match (parity with the poll cycle), so
             // an unregistered cursor pane holds identity through the flicker. Registered panes carry none.
@@ -366,12 +396,13 @@ impl CaptureState {
     pub fn status_lines(&self) -> String {
         format!(
             "on_demand_captures={}\nquiet_captures={}\ncontradiction_captures={}\n\
-             skipped_dead_edges={}\ndemoted={}\ndemotions={}\nsweeps={}\nsweep_captures={}\n\
-             sweep_agents={}\nlast_sweep_wall_ms={}\n",
+             skipped_dead_edges={}\ndropped_edges={}\ndemoted={}\ndemotions={}\nsweeps={}\n\
+             sweep_captures={}\nsweep_agents={}\nlast_sweep_wall_ms={}\n",
             self.on_demand_captures,
             self.quiet_captures,
             self.contradiction_captures,
             self.skipped_dead_edges,
+            self.dropped_edges,
             self.demoted_now(),
             self.demotions,
             self.sweeps,
@@ -596,6 +627,7 @@ mod tests {
         for key in [
             "on_demand_captures=",
             "contradiction_captures=",
+            "dropped_edges=",
             "demoted=",
             "sweeps=",
             "sweep_captures=",
