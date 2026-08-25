@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.5.3] - 2026-08-25
+
 ### Fixed
 
 - **One slow `list-panes` could cost a blocked pane a full sweep of latency.** The post-attach look
@@ -590,7 +592,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.2...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.3...HEAD
+[0.5.3]: https://github.com/pperanich/tmux-agents/compare/v0.5.2...v0.5.3
 [0.5.2]: https://github.com/pperanich/tmux-agents/compare/v0.5.1...v0.5.2
 [0.5.1]: https://github.com/pperanich/tmux-agents/compare/v0.5.0...v0.5.1
 [0.5.0]: https://github.com/pperanich/tmux-agents/compare/v0.4.6...v0.5.0
