@@ -741,7 +741,7 @@ mod tests {
             "episode_ms is the stamp, not its age"
         );
         assert_eq!(n.since_ms, 250, "since_ms is still the age");
-        assert_ne!(n.episode_ms, n.since_ms as u64);
+        assert_ne!(n.episode_ms, n.since_ms);
 
         let json = payload_json(&n, TitlePolicy::Redact);
         assert!(json.contains(r#""episode_ms":1700000000000"#), "{json}");
