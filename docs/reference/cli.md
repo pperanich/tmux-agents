@@ -413,7 +413,7 @@ never a shortcut around the guards. One target's refusal does not abort the rest
 | `124` | A synchronous exec child was killed at `timeout_ms`. |
 | `4` | The gate refused: state did not satisfy `when`, `requires` was unmet (including an API `permission-reply` op with no pending request id or no resolvable endpoint), the action does not apply to this agent, or the gated metric has no coverage. The refusing fact goes to stderr. |
 | `5` | The pane action lock is held by another invocation. |
-| `3` | The act's target disappeared mid-act: tmux reports the pane gone (`can't find pane` / `no such pane`), or an API permission was answered/withdrawn between the gate and the act (a 404). |
+| `3` | The act's target disappeared mid-act: tmux reports the pane gone (`can't find pane` / `no such pane`), `reason` `pane-gone`; or an API permission was answered/withdrawn between the gate and the act (a 404), `reason` `request-gone` — the pane itself is still there. |
 | `2` | Usage error (bad flag combination, selector flags alongside `--pane`, or `--all` whose selector matched no pane). |
 | `1` | A runtime failure (no tmux server, a broker error, or an ambiguous selection without `--all`). A tmux command the server refused lands here, with tmux's own stderr in the message — only a pane tmux reports as gone is exit `3`. |
 

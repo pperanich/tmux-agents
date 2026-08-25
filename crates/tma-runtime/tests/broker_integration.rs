@@ -261,8 +261,77 @@ fn api_action_404_is_vanished() {
         broker::FireArgs::default(),
     );
     let _ = server.join();
-    assert_eq!(r.outcome, Outcome::Vanished, "a 404 is the target vanished");
+    assert_eq!(
+        r.outcome.token(),
+        "vanished",
+        "a 404 is the target vanished"
+    );
     assert_eq!(r.exit_code(), 3);
+    assert_eq!(
+        r.reason(),
+        Some("request-gone"),
+        "the request went away; the pane is still here"
+    );
+    assert_eq!(
+        s.pane_option(&pane, "@agent_permission_request"),
+        "per_gone",
+        "a 404 leaves the stamp alone: it may already be a NEWER request"
+    );
+}
+
+/// A 2xx reply spends the request, so the broker clears `@agent_permission_request` under the same
+/// held lock. Until it did, the stamp outlived its request until the plugin's next
+/// `permission.replied` event, and anything reading the stamp as "a request is pending" read a
+/// spent id.
+#[test]
+fn a_replied_permission_clears_the_request_stamp() {
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let (endpoint, server) = mock_http("HTTP/1.1 200 OK");
+    let s = Scratch::new("broker_api_clear");
+    let pane = s.new_shell_pane();
+    stamp_blocked_opencode(&s, &pane, "per_spent", &endpoint);
+
+    let tmux = adapter(&s);
+    let manifests = tma_runtime::manifests::load(None, &[])
+        .expect("load manifests")
+        .manifests;
+    let cfg = FoldConfig::default();
+    let fire = |action: &ActionManifest| {
+        broker::fire(
+            &tmux,
+            &manifests,
+            &cfg,
+            &ApiSection::default(),
+            broker::DetachCtx::default(),
+            action,
+            &pane,
+            broker::FireArgs::default(),
+        )
+    };
+
+    let r = fire(&approve());
+    let _ = server.join();
+    assert_eq!(r.outcome, Outcome::Replied);
+    assert_eq!(
+        s.pane_option(&pane, "@agent_permission_request"),
+        "",
+        "the spent request id must not outlive its reply"
+    );
+    assert_eq!(
+        s.pane_option(&pane, "@agent_api_endpoint"),
+        endpoint,
+        "only the request id is cleared; the endpoint is not the broker's to unstamp"
+    );
+
+    // The binder's reading of the same fact: with the stamp gone, a second dispatch is refused
+    // before the lock rather than fired at an id the server has already spent. No server is
+    // listening now, so a fire that got past the gate would surface as an `error`, not a refusal.
+    let again = fire(&approve());
+    assert_eq!(again.reason(), Some("requires-unmet"));
+    assert_eq!(again.exit_code(), 4);
 }
 
 #[test]

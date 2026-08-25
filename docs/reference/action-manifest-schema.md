@@ -95,10 +95,14 @@ falling back to `[api.opencode] api_base` in `config.toml` for the endpoint. An
 empty request id or no resolvable endpoint refuses `requires-unmet` before the
 lock. The POST is bounded by `timeout_ms` (connect and total, no retry): a 2xx is
 the `replied` outcome, a 404 (the prompt was answered or withdrawn first) is
-`vanished` (exit 3), and an unreachable or otherwise-failing server is `error`
-(exit 1). The API path never degrades to keystrokes — firing a stale key sequence
-into a pane whose prompt state just proved unknowable is exactly what the guard
-exists to prevent.
+`vanished` with `reason` `request-gone` (exit 3), and an unreachable or
+otherwise-failing server is `error` (exit 1). A 2xx also clears
+`@agent_permission_request`: the id is spent, and leaving it stamped until the
+plugin's next `permission.replied` event lets a later reader mistake it for a
+pending request. A 404 leaves the option alone, since it may already name a newer
+request the plugin stamped. The API path never degrades to keystrokes — firing a
+stale key sequence into a pane whose prompt state just proved unknowable is
+exactly what the guard exists to prevent.
 
 ## `requires` and the context env
 

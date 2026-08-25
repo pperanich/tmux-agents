@@ -80,8 +80,8 @@ pub enum Outcome {
     Timeout,
     /// A gate or the single-flight lock refused before any effect; carries which.
     Refused(Refusal),
-    /// The pane disappeared mid-act.
-    Vanished,
+    /// The act's target disappeared mid-act; carries which target ([`Gone`]).
+    Vanished(Gone),
     /// A broker runtime failure (a tmux error, a spawn failure, or a not-yet-supported path).
     Error(String),
 }
@@ -96,8 +96,29 @@ impl Outcome {
             Outcome::Spawned => "spawned",
             Outcome::Timeout => "timeout",
             Outcome::Refused(_) => "refused",
-            Outcome::Vanished => "vanished",
+            Outcome::Vanished(_) => "vanished",
             Outcome::Error(_) => "error",
+        }
+    }
+}
+
+/// Which of an act's two targets went away. `vanished` is one outcome token for two very different
+/// events, and only this distinguishes them: an API 404 means the permission request was spent, on
+/// a pane that is still perfectly alive.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Gone {
+    /// tmux reports the pane no longer exists.
+    Pane,
+    /// The API server answered `404`: the permission request was already answered or withdrawn.
+    Request,
+}
+
+impl Gone {
+    /// The `reason` token, in the same closed vocabulary as [`Refusal::token`].
+    pub const fn token(self) -> &'static str {
+        match self {
+            Gone::Pane => "pane-gone",
+            Gone::Request => "request-gone",
         }
     }
 }
@@ -133,7 +154,7 @@ impl ActResult {
             Outcome::Timeout => 124,
             Outcome::Refused(Refusal::Gate(_)) => 4,
             Outcome::Refused(Refusal::Locked) => 5,
-            Outcome::Vanished => 3,
+            Outcome::Vanished(_) => 3,
             Outcome::Error(_) => 1,
         }
     }
@@ -147,17 +168,19 @@ impl ActResult {
             Outcome::Sent | Outcome::Replied | Outcome::Spawned | Outcome::Exited(0) => 0,
             Outcome::Refused(Refusal::Locked) => 1,
             Outcome::Refused(Refusal::Gate(_)) => 2,
-            Outcome::Vanished => 3,
+            Outcome::Vanished(_) => 3,
             Outcome::Timeout => 4,
             Outcome::Exited(_) => 5,
             Outcome::Error(_) => 6,
         }
     }
 
-    /// The refusal reason token, `None` unless the outcome is a refusal.
+    /// The `reason` token: which gate refused, or which target vanished. `None` for every other
+    /// outcome, whose `outcome` token already says everything there is to say.
     pub const fn reason(&self) -> Option<&'static str> {
         match &self.outcome {
             Outcome::Refused(r) => Some(r.token()),
+            Outcome::Vanished(g) => Some(g.token()),
             _ => None,
         }
     }
@@ -273,6 +296,10 @@ pub trait BrokerIo {
         reply: ApiReply,
         timeout_ms: u64,
     ) -> HttpOutcome;
+    /// Unset `@agent_permission_request` after a request has been spent. Best-effort and
+    /// infallible by construction: it runs after the answer is already delivered, so a failed
+    /// option write must not turn a successful reply into a reported failure.
+    fn clear_permission_request(&self, pane_id: &str);
     /// Acquire the single-flight lock; the implementation supplies the broker pid and nonce.
     fn acquire(
         &self,
@@ -366,7 +393,7 @@ pub fn act<T: BrokerIo>(
     // 1. identity + initial facts.
     let facts = match io.read_pane(pane_id) {
         Ok(Some(f)) => f,
-        Ok(None) => return result(Outcome::Vanished),
+        Ok(None) => return result(Outcome::Vanished(Gone::Pane)),
         Err(e) => return result(io_error(e)),
     };
     let Some(agent) = facts.agent.clone().filter(|a| action.applies_to(a)) else {
@@ -382,7 +409,7 @@ pub fn act<T: BrokerIo>(
         }
         match io.read_pane(pane_id) {
             Ok(Some(f)) => f,
-            Ok(None) => return result(Outcome::Vanished),
+            Ok(None) => return result(Outcome::Vanished(Gone::Pane)),
             Err(e) => return result(io_error(e)),
         }
     } else {
@@ -438,7 +465,7 @@ fn spawn_detached_under_lock<T: BrokerIo>(
     let FireArgs { force, args } = fire_args;
     let facts = match io.read_pane(pane_id) {
         Ok(Some(f)) => f,
-        Ok(None) => return Outcome::Vanished,
+        Ok(None) => return Outcome::Vanished(Gone::Pane),
         Err(e) => return io_error(e),
     };
     if facts.agent.as_deref() != Some(agent) || !action.applies_to(agent) {
@@ -480,7 +507,7 @@ fn act_under_lock<T: BrokerIo>(
     // only identity + requires.
     let facts = match io.read_pane(pane_id) {
         Ok(Some(f)) => f,
-        Ok(None) => return Outcome::Vanished,
+        Ok(None) => return Outcome::Vanished(Gone::Pane),
         Err(e) => return io_error(e),
     };
     if facts.agent.as_deref() != Some(agent) || !action.applies_to(agent) {
@@ -501,10 +528,19 @@ fn act_under_lock<T: BrokerIo>(
                 let endpoint = facts.api_endpoint.as_deref().unwrap_or_default();
                 let request = facts.permission_request.as_deref().unwrap_or_default();
                 return match io.api_reply(endpoint, request, transport.reply, action.timeout_ms) {
-                    HttpOutcome::Ok => Outcome::Replied,
+                    HttpOutcome::Ok => {
+                        // The id is spent: drop it here rather than waiting for the plugin's
+                        // `permission.replied` event, which runs on its own schedule. Not a
+                        // compare-and-swap — tmux has no conditional option write and the plugin
+                        // does not take this lock — so a request stamped in the gap is erased. That
+                        // fails safe: a missing stamp refuses the next dispatch `requires-unmet`
+                        // instead of firing at a stale id.
+                        io.clear_permission_request(pane_id);
+                        Outcome::Replied
+                    }
                     // The prompt was answered/withdrawn between gate and act: the act's
                     // target disappeared, so `vanished`, exit 3.
-                    HttpOutcome::NotFound => Outcome::Vanished,
+                    HttpOutcome::NotFound => Outcome::Vanished(Gone::Request),
                     HttpOutcome::Error(msg) => Outcome::Error(msg),
                 };
             }
@@ -583,7 +619,7 @@ fn is_stale(now: u64, stamped_at: u64) -> bool {
 /// threw the reason away with it.
 fn io_error(e: TmuxError) -> Outcome {
     match &e {
-        TmuxError::Failed { stderr, .. } if pane_gone(stderr) => Outcome::Vanished,
+        TmuxError::Failed { stderr, .. } if pane_gone(stderr) => Outcome::Vanished(Gone::Pane),
         _ => Outcome::Error(e.to_string()),
     }
 }
@@ -679,6 +715,8 @@ mod tests {
         /// Canned HTTP outcome for the API lane, and a record of the `(endpoint, request, reply)` call.
         api_result: HttpOutcome,
         api_call: RefCell<Option<(String, String, ApiReply)>>,
+        /// The panes whose `@agent_permission_request` the broker asked to unset.
+        request_cleared: RefCell<Vec<String>>,
     }
 
     impl MockIo {
@@ -696,6 +734,7 @@ mod tests {
                 spawned: RefCell::new(None),
                 api_result: HttpOutcome::Ok,
                 api_call: RefCell::new(None),
+                request_cleared: RefCell::new(Vec::new()),
             }
         }
         /// The API lane returns `outcome` instead of the default 2xx.
@@ -759,6 +798,9 @@ mod tests {
                 Some((endpoint.to_string(), request_id.to_string(), reply));
             self.api_result.clone()
         }
+        fn clear_permission_request(&self, pane_id: &str) {
+            self.request_cleared.borrow_mut().push(pane_id.to_string());
+        }
         fn acquire(
             &self,
             _pane: &str,
@@ -786,7 +828,7 @@ mod tests {
         let io = MockIo::new(vec![None], acquired());
         let action = keys_action("", "claude = [\"1\"]");
         let r = act(&io, &action, "%9", FireArgs::default());
-        assert_eq!(r.outcome, Outcome::Vanished);
+        assert_eq!(r.outcome, Outcome::Vanished(Gone::Pane));
         assert_eq!(r.exit_code(), 3);
         assert!(!*io.cleared.borrow(), "no lock taken, nothing to clear");
     }
@@ -1065,6 +1107,11 @@ mod tests {
         assert_eq!(call.1, "per_abc123");
         assert_eq!(call.2, ApiReply::Once);
         assert!(*io.cleared.borrow(), "the lock is released after the reply");
+        assert_eq!(
+            *io.request_cleared.borrow(),
+            vec!["%1".to_string()],
+            "a spent request id is unstamped under the same held lock"
+        );
     }
 
     #[test]
@@ -1072,9 +1119,18 @@ mod tests {
         let io = MockIo::new(vec![Some(blocked_opencode(1_000_000))], acquired())
             .with_api_result(HttpOutcome::NotFound);
         let r = act(&io, &api_action(), "%1", FireArgs::default());
-        assert_eq!(r.outcome, Outcome::Vanished);
+        assert_eq!(r.outcome.token(), "vanished");
         assert_eq!(r.exit_code(), 3, "a 404 is the target vanished (exit 3)");
+        assert_eq!(
+            r.reason(),
+            Some("request-gone"),
+            "the request went away, not the pane"
+        );
         assert!(*io.cleared.borrow(), "the lock is released on 404");
+        assert!(
+            io.request_cleared.borrow().is_empty(),
+            "a 404 leaves the stamp alone: it may already name a newer request"
+        );
     }
 
     #[test]
@@ -1181,7 +1237,7 @@ mod tests {
         assert_eq!(Outcome::Spawned.token(), "spawned");
         assert_eq!(Outcome::Timeout.token(), "timeout");
         assert_eq!(Outcome::Refused(Refusal::Locked).token(), "refused");
-        assert_eq!(Outcome::Vanished.token(), "vanished");
+        assert_eq!(Outcome::Vanished(Gone::Pane).token(), "vanished");
         assert_eq!(Outcome::Error(String::new()).token(), "error");
     }
 
@@ -1264,9 +1320,23 @@ mod tests {
             code: 1,
             stderr: stderr.to_string(),
         };
-        // tmux 3.6a's two pane-lookup wordings, verified against a live server.
-        assert_eq!(io_error(failed("can't find pane: %999")), Outcome::Vanished);
-        assert_eq!(io_error(failed("no such pane: %999")), Outcome::Vanished);
+        // tmux 3.6a's two pane-lookup wordings, verified against a live server, plus the third
+        // spelling `pane_gone` covers. All three are the PANE, which the reason token has to say:
+        // the API 404 arm produces the same `vanished` outcome for a pane that is still there.
+        for spelling in [
+            "can't find pane: %999",
+            "no such pane: %999",
+            "pane not found: %999",
+        ] {
+            let r = ActResult {
+                action: "approve".to_string(),
+                pane: "%999".to_string(),
+                outcome: io_error(failed(spelling)),
+            };
+            assert_eq!(r.outcome.token(), "vanished", "{spelling}");
+            assert_eq!(r.reason(), Some("pane-gone"), "{spelling}");
+            assert_eq!(r.exit_code(), 3, "{spelling}");
+        }
 
         let rejected = io_error(failed("command send-keys: unknown flag -Z"));
         match rejected {
@@ -1304,7 +1374,7 @@ mod tests {
             rank(Outcome::Sent),
             rank(Outcome::Refused(Refusal::Locked)),
             rank(Outcome::Refused(Refusal::Gate(RefusalReason::Gated))),
-            rank(Outcome::Vanished),
+            rank(Outcome::Vanished(Gone::Pane)),
             rank(Outcome::Timeout),
             rank(Outcome::Exited(2)),
             rank(Outcome::Error(String::new())),

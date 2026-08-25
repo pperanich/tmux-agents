@@ -1,3 +1,4 @@
+use tma_core::render;
 use tma_core::stamp::opt;
 use tma_core::{AgentState, ApiReply, FoldConfig, ReadResult, StampedState};
 
@@ -101,6 +102,14 @@ impl BrokerIo for TmuxBroker<'_> {
             &body,
             std::time::Duration::from_millis(timeout_ms),
         )
+    }
+
+    fn clear_permission_request(&self, pane_id: &str) {
+        // Discarded like the event path's own clear (`event::permission`): a pane that went away
+        // between the reply and this write has nothing left to unset.
+        let _ = self
+            .tmux
+            .apply(&[render::unset_pane_option(pane_id, opt::PERMISSION_REQUEST)]);
     }
 
     fn acquire(

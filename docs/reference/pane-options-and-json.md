@@ -74,7 +74,7 @@ options carry rollups and hints.
 | `@agent_tokens_at` | pane | epoch **ms** of the evidence behind `@agent_tokens`, set and cleared with it under the same guard. It equals `@agent_context_at` whenever a count is present — one observation stamps both — and exists so a reader that wants only the count can age it without reading the gauge's marker |
 | `@agent_context_notified_at` | pane | the `context_high` notify marker: a present/absent **armed flag** (absent = armed, present = already fired), never the state lane's `@agent_notified_at`; its value is an epoch **ms** for debuggability only, not a comparison basis. Written only by the context-high notifier, guarded set-from-absent so concurrent firers resolve to one bell; cleared (rearmed) when the gauge dips below `threshold - 10` |
 | `@agent_model` | pane | best-effort model-name label the file-tail context intake reads from the rollout window; never load-bearing for a gauge, it only feeds `tma doctor`'s recognized-model line (a model no `[telemetry.windows]` entry names). Plain-set, cleared on deregister, absent when no model record sat in the tail |
-| `@agent_permission_request` | pane | the pending OpenCode permission request id, stamped by the event intake from a `permission.asked` edge (ownership-filtered against `@agent_session`) and cleared on the edges that end the prompt (a working/idle transition, or a `permission.replied`); the action broker reads it to answer an `[api]` `permission-reply` op, and an empty value refuses that op `requires-unmet` |
+| `@agent_permission_request` | pane | the pending OpenCode permission request id, stamped by the event intake from a `permission.asked` edge (ownership-filtered against `@agent_session`) and cleared on the edges that end the prompt (a working/idle transition, or a `permission.replied`); the action broker reads it to answer an `[api]` `permission-reply` op, and an empty value refuses that op `requires-unmet`. The broker also clears it itself on a 2xx reply, so a spent id does not read as a pending request until the plugin's next event; it leaves the option alone on a 404, which may already name a newer request |
 | `@agent_api_endpoint` | pane | the OpenCode server base URL, stamped at registration by the plugin from its serving address; the broker's `permission-reply` endpoint, with a `[api.opencode] api_base` config fallback (neither present refuses `requires-unmet`) |
 | `@agent_ignore` | pane | **you set this one.** Any non-empty value takes the pane out of detection: no identity, no capture, no row, and a stamp left from before it was set is cleared on the next cycle. `tmux set-option -p @agent_ignore 1` in the pane (add `-t <pane>` from elsewhere), `tmux set-option -pu @agent_ignore` to undo. tma never writes or clears it; `tma doctor` lists every pane carrying it |
 | `@agent_mute_until` | pane | notification mute deadline in epoch **ms**: while it is ahead of the clock the pane fires no notification of any kind (state triggers and `context_high` alike), and every other lane is untouched — it is still detected, stamped, and counted. `tma mute --for 30m` writes now + the window, a bare `tma mute` writes the far-future sentinel `99999999999999` (indefinite), and `tma mute --clear` unsets it. Living in the store is what makes a mute survive a tma or daemon restart |
@@ -242,7 +242,7 @@ The result of firing one action, a schema-1 object with this exact key set. See
 | `pane` | string | the target pane id |
 | `outcome` | string | the closed outcome token (below) |
 | `exit_code` | number | the process exit code this outcome maps to; for an `exited` outcome it is the exec child's own code |
-| `reason` | string or null | the refusal reason token when `outcome` is `refused`, `null` otherwise |
+| `reason` | string or null | the refusal reason token when `outcome` is `refused`, which target went away when `outcome` is `vanished`, `null` otherwise |
 
 `tma act --all --json` wraps those same objects: `{ "schema": 1, "results":
 [ ... ] }`, one element per resolved target in the order they were fired, each
@@ -257,11 +257,14 @@ API-channel answer delivered over HTTP, a 2xx), `exited` (a synchronous exec
 child finished; `exit_code` is its code), `spawned` (a detached supervisor
 launched), `timeout` (a synchronous child killed at `timeout_ms`), `refused`
 (`reason` carries which gate), `vanished` (tmux reports the pane gone, or an
-API target answered/withdrawn between gate and act — a 404), `error` (broker
-runtime failure: an unreachable API server, or a tmux command the server refused,
-whose stderr rides in the message). `reason` is one of `gated`,
-`requires-unmet`, `wrong-agent`, `no-coverage` (all exit `4`), or `locked` (exit
-`5`).
+API target answered/withdrawn between gate and act — a 404; `reason` carries
+which), `error` (broker runtime failure: an unreachable API server, or a tmux
+command the server refused, whose stderr rides in the message). `reason` is one
+of `gated`, `requires-unmet`, `wrong-agent`, `no-coverage` (all exit `4`),
+`locked` (exit `5`), or — on a `vanished` outcome, both exit `3` — `pane-gone`
+(tmux says the pane is gone) and `request-gone` (the API server answered `404`:
+the permission request was already answered or withdrawn, on a pane that is
+still there).
 
 ## `tma act` list document
 
