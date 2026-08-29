@@ -54,7 +54,8 @@ captured evidence (see D10, X3).
 
 - **F7** MUST detect state from these evidence sources: live-viewport text
   (`capture-pane -p -e`), pane title (`#{pane_title}`, carries agent OSC titles —
-  verified: Claude Code publishes `✳ <task>` idle / `⠐ <task>` braille-spinner working),
+  verified: Claude Code published `✳ <task>` idle / `⠐ <task>` braille-spinner working up to
+  ~2.1.24x, and `✳ <task>` in every state after; see the note under F7's evidence below),
   `#{window_activity}`, and pane flags (`#{alternate_on}`, `#{scroll_position}`).
   The viewport content-hash delta between cycles is a **capture-scheduling input**, not a
   detection source: an unchanged hash lets a cycle reuse the stored stamp, but a changed one
@@ -482,8 +483,18 @@ Live checks against a running fleet of 7 Claude Code panes:
 - `#{pane_title}` carries agent-published OSC titles including state and task summary:
   `✳ Update resume with …` (idle), `⠐ Understand coding agents state detection`
   (working — braille spinner, U+2800 block).
+  **The braille frame is version-dependent and is gone at Claude 2.1.246**: the title reads
+  `✳ <task>` while working too, so the title alone cannot separate the two. Verified 2026-08-29
+  by polling `#{pane_title}` 25× across two panes mid-turn. Working detection on capture tier
+  therefore rides the body spinner (below); the title rule is retained for older builds.
 - `capture-pane -p` against a background, alt-screen agent pane returns the live
   viewport: prompt marker `❯` inside a bordered prompt box, horizontal-rule separators,
   status chrome line (`⏵⏵ bypass permissions on (shift+tab to cycle)`), completion line
   (`✻ Sautéed for 5m 34s`). Chrome text wraps at narrow widths (drives D4).
+- The body spinner sits at column 0 above the prompt box, cycling the frames `· ✢ ✳ ✶ ✻ ✽`:
+  `· Actioning… (4m 16s · ↓ 16.8k tokens)` while working, or a wait line with no gerund
+  (`✻ Waiting for 1 background agent to finish`, `… 1 dynamic workflow to finish`). A finished
+  turn reuses the same glyphs without the ellipsis (`✻ Cogitated for 4m 23s · done 11:34 AM`),
+  which is the only thing separating the two. A background-agent tree renders *below* the status
+  chrome line and pushes the spinner up, so the read window cannot be the mode line's six lines.
 - Pane user options round-trip: `set-option -p @x v` / `#{@x}` / `-u` all work.
