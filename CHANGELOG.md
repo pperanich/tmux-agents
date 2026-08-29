@@ -10,6 +10,18 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **A working Claude pane read `idle` whenever its hooks went quiet.** Claude Code animated a
+  braille spinner in its OSC title, and that was the only working evidence the bundled manifest
+  could see on capture tier. At 2.1.246 the title is a static `✳ <task>` in every state, so that
+  rule went permanently silent while the `✳` idle rule kept matching — and a pane thinking for four
+  minutes without a tool call, which fires no hook, showed as idle for the whole stretch. Working is
+  now read from the body spinner instead (`· Actioning… (4m 16s · ↓ 16.8k tokens)`, and the
+  gerund-less `✻ Waiting for 1 background agent to finish`). The completion line reuses the same
+  glyphs, so the ellipsis is what separates them, tested per line because a pane routinely shows a
+  finished line above a live spinner. The title rule is kept for older Claude builds.
+
 ## [0.5.3] - 2026-08-25
 
 ### Fixed
