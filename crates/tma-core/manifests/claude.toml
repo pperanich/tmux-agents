@@ -91,6 +91,9 @@ match = { any = [
 ] }
 
 # --- working: braille spinner in the OSC title (U+2800..U+28FF) ---
+# Claude Code stopped emitting this at 2.1.246 — the title is a static `✳ <topic>` in every
+# state there. Kept for the older versions that still animate it; the body-spinner rules at the
+# bottom of this file are what carry working detection on current builds.
 [[rules]]
 state = "working"
 priority = 60
@@ -145,3 +148,39 @@ detail = "trust"
 priority = 110
 region = "tail_lines(30)"
 match = { line_regex = '^\s*❯ 1\. Yes, I trust this folder' }
+
+# --- working: the live spinner line above the composer --------------------------------------------
+# Appended, like the two rules above, because `tests/claude_manifest.rs` maps rule indices by
+# declaration order.
+#
+# Claude 2.1.246 no longer animates the OSC title, so the only on-screen evidence a working pane
+# leaves is the spinner line: a frame glyph at column 0, the gerund, and its ellipsis —
+# `· Actioning… (4m 16s · ↓ 16.8k tokens)`. Frames captured live: · ✢ ✳ ✶ ✻ ✽.
+#
+# A finished turn reuses the same glyphs (`✻ Cogitated for 4m 23s · done 11:34 AM`, and on
+# pre-2.1.2xx builds a bare `✻ Cooked for 5s`) but never the ellipsis, so `…` is the whole
+# discriminator. It has to be tested per line, not per region: a pane routinely shows a finished
+# line in scrollback above a live spinner, so a region-wide `not` would suppress the match.
+#
+# Column 0 is load-bearing. Claude indents assistant prose and tool output by two spaces, and tool
+# output truncates with this same `…` — `claude_working_spinner_w149` carries such a line, so the
+# anchor is under test.
+#
+# tail_lines(30) rather than the mode line's 6: a background-agent tree renders BELOW the mode line
+# and pushes the spinner up (10 lines in `claude_working_background_agent_w149`), and a multi-line
+# composer pushes it further.
+[[rules]]
+state = "working"
+priority = 70
+region = "tail_lines(30)"
+match = { line_regex = '^[·✢✳✶✻✽] \S.*…' }
+
+# The main thread parked on backgrounded work. Same glyph set, but no gerund and no ellipsis, so
+# the rule above cannot see it. Observed live: `Waiting for 1 background agent to finish` and
+# `Waiting for 1 dynamic workflow to finish`, so the noun is left open — the count and the
+# `to finish` tail are what make it a wait rather than the completion line's `<verb> for <duration>`.
+[[rules]]
+state = "working"
+priority = 70
+region = "tail_lines(30)"
+match = { line_regex = '^[·✢✳✶✻✽] Waiting for \d+ [a-z][a-z ]* to finish' }

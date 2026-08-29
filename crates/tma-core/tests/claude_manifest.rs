@@ -86,6 +86,22 @@ fn snapshot(fx: &Fixture) -> PaneSnapshot {
     }
 }
 
+/// An empty pane for the handful of tests that author a tail rather than replay one. Written as
+/// post-strip text, since styling is irrelevant to the anchors under test.
+fn synthetic_snapshot() -> PaneSnapshot {
+    PaneSnapshot {
+        pane_id: "%0".to_string(),
+        pid_tree: vec![],
+        title: "✳ Compare retry-helper approaches".to_string(),
+        tail_text: String::new(),
+        tail_hash: 0,
+        alternate_on: true,
+        scroll_position: None,
+        visible_height: None,
+        captured_at: 2_000_000,
+    }
+}
+
 fn evaluate(name: &str) -> Evaluation {
     let fx = Fixture::load(&fixtures_dir().join(name))
         .unwrap_or_else(|e| panic!("load fixture {name}: {e}"));
@@ -108,6 +124,8 @@ mod rule {
     pub(crate) const IDLE_MODE_LINE: usize = 4;
     pub(crate) const BLOCKED_PLAN: usize = 5;
     pub(crate) const BLOCKED_TRUST: usize = 6;
+    pub(crate) const WORKING_SPINNER: usize = 7;
+    pub(crate) const WORKING_BACKGROUND_AGENT: usize = 8;
 }
 
 fn matched(ev: &Evaluation, index: usize) -> bool {
@@ -222,7 +240,7 @@ fn plan_and_trust_outrank_the_generic_permission_rule() {
     let m = manifest();
     assert_eq!(
         m.rules.len(),
-        7,
+        9,
         "the rule-index map in `mod rule` is positional; a rule was inserted or removed"
     );
     let generic = &m.rules[rule::BLOCKED_PERMISSION];
@@ -400,12 +418,154 @@ fn working_detected_from_braille_title() {
         matched(&ev, rule::WORKING_TITLE),
         "working title rule matched"
     );
+    assert!(has_state(&ev, AgentState::Working), "working evidence");
+}
+
+/// The braille title carries a working claim on its own, on the builds that still animate it. The
+/// fixture above cannot show this: it was captured mid-spinner, so its body claims working too and
+/// the higher-priority body rule owns the published evidence. Strip the spinner line and the title
+/// is the only thing left standing.
+#[test]
+fn braille_title_claims_working_without_a_body_spinner() {
+    let fx = Fixture::load(&fixtures_dir().join("claude_working_title.txt")).unwrap();
+    let tail: String = fx
+        .capture
+        .lines()
+        .filter(|l| !tma_core::engine::strip_ansi(l).starts_with("· Flambéing"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let snap = PaneSnapshot {
+        tail_text: tail,
+        ..snapshot(&fx)
+    };
+    let ev = engine().evaluate(&snap);
+    assert!(!matched(&ev, rule::WORKING_SPINNER), "spinner line removed");
     let working = ev
         .evidence
         .iter()
         .find(|e| matches!(&e.claim, Claim::State(s) if s.state == AgentState::Working))
         .expect("working evidence");
     assert_eq!(working.source, Source::Title);
+}
+
+// ---- rules #7 + #8: working (body spinner) -----------------------------------------
+//
+// The regression these cover: Claude 2.1.246 stopped animating the OSC title, so rule #2 went
+// permanently silent and rule #3's `✳` marker — which the title keeps in every state — stamped
+// every working pane idle whenever the hooks went quiet. A pane thinking for four minutes without
+// a tool call emits no hook, falls back to capture, and read `idle` the whole time.
+
+/// The ordinary spinner: glyph, gerund, ellipsis. Captured live from a pane mid-turn at 2.1.246,
+/// title `✳ tmux-agents state detection` — the marker that used to win.
+#[test]
+fn working_detected_from_body_spinner_despite_an_idle_title() {
+    let name = "claude_working_spinner_w149.txt";
+    let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
+    assert!(
+        fx.title.contains('✳'),
+        "{name}: the title carries the idle marker — that is the point"
+    );
+    let ev = evaluate(name);
+    assert!(matched(&ev, rule::WORKING_SPINNER), "{name}: spinner rule");
+    assert!(
+        !matched(&ev, rule::WORKING_TITLE),
+        "{name}: 2.1.246 emits no braille title"
+    );
+    assert!(
+        matched(&ev, rule::IDLE_TITLE),
+        "{name}: `✳` still claims idle"
+    );
+    let working = ev
+        .evidence
+        .iter()
+        .find(|e| matches!(&e.claim, Claim::State(s) if s.state == AgentState::Working))
+        .expect("working evidence");
+    assert_eq!(working.source, Source::ScreenRule);
+    // The fold is where it has to land: idle and working evidence coexist, working wins.
+    assert_eq!(fold_verdict(name, None).state, AgentState::Working);
+}
+
+/// The main thread parked on a backgrounded subagent — no gerund, no ellipsis, and the subagent
+/// tree renders below the mode line, which is what forces the wider region.
+#[test]
+fn working_detected_while_waiting_on_a_background_agent() {
+    let name = "claude_working_background_agent_w149.txt";
+    let ev = evaluate(name);
+    assert!(
+        matched(&ev, rule::WORKING_BACKGROUND_AGENT),
+        "{name}: background-agent rule"
+    );
+    assert!(
+        !matched(&ev, rule::WORKING_SPINNER),
+        "{name}: no ellipsis, so the gerund rule cannot see it"
+    );
+    assert_eq!(fold_verdict(name, None).state, AgentState::Working);
+}
+
+/// The noun in the wait line varies. `dynamic workflow` was observed live on the pane this bug was
+/// reported from but never sat still long enough to capture, so it is authored from the observed
+/// string; `background agent` above is the replayed capture. The completion line is the negative
+/// that keeps the open noun honest — it is also `<glyph> … for …`, and must stay out.
+#[test]
+fn the_wait_line_matches_any_backgrounded_noun() {
+    for tail in [
+        "✻ Waiting for 1 dynamic workflow to finish\n",
+        "✻ Waiting for 3 background agents to finish\n",
+    ] {
+        let snap = PaneSnapshot {
+            tail_text: tail.to_string(),
+            ..synthetic_snapshot()
+        };
+        let ev = engine().evaluate(&snap);
+        assert!(
+            matched(&ev, rule::WORKING_BACKGROUND_AGENT),
+            "{tail:?}: wait rule"
+        );
+    }
+    let snap = PaneSnapshot {
+        tail_text: "✻ Cogitated for 4m 23s · done 11:34 AM\n".to_string(),
+        ..synthetic_snapshot()
+    };
+    assert!(
+        !has_state(&engine().evaluate(&snap), AgentState::Working),
+        "a completion line is not a wait"
+    );
+}
+
+/// The other half of the same screen grammar: a finished turn reuses the spinner glyphs
+/// (`✻ Cogitated for 4m 23s · done 11:34 AM`) and must stay idle. Captured from the pane that
+/// produced the bug report, moments after it finished.
+#[test]
+fn completed_turn_with_a_spinner_glyph_stays_idle() {
+    let name = "claude_idle_done_w149.txt";
+    let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
+    assert!(
+        fx.capture.contains("· done "),
+        "{name}: fixture carries the completion line"
+    );
+    let ev = evaluate(name);
+    assert!(
+        !has_state(&ev, AgentState::Working),
+        "{name}: a completion line is not a spinner"
+    );
+    assert_eq!(fold_verdict(name, None).state, AgentState::Idle);
+}
+
+/// Column 0 is the anchor, and it is doing real work: the spinner fixture also contains an
+/// indented tool-output line truncated with the same `…`. Indent it and the rule must go silent.
+#[test]
+fn indented_ellipsis_is_not_a_spinner() {
+    let snap = PaneSnapshot {
+        tail_text: "  ✻ Actioning… (4m 16s · ↓ 16.8k tokens)\n\
+                    ⏵⏵ bypass permissions on (shift+tab to cycle)\n"
+            .to_string(),
+        ..synthetic_snapshot()
+    };
+    let ev = engine().evaluate(&snap);
+    assert!(
+        !matched(&ev, rule::WORKING_SPINNER),
+        "an indented line is transcript content, not the spinner"
+    );
 }
 
 // ---- rules #3 + #4: idle (title marker + mode-line fallback) ------------------------
@@ -453,8 +613,9 @@ fn idle_detected_from_bypass_mode_line() {
 #[test]
 fn past_tense_completion_line_is_not_a_working_spinner() {
     // The idle fixture carries `✻ Cooked for 5s` / `✻ Churned for 3m 30s` completion
-    // lines. ta's false-positive graveyard: these are NOT spinners. Detection is
-    // title-braille only, so no working claim may appear.
+    // lines. tma's false-positive graveyard: these are NOT spinners. They sit at column 0
+    // under the same glyphs the body-spinner rule reads, and only the missing `…` keeps
+    // them out, so no working claim may appear.
     let fx = Fixture::load(&fixtures_dir().join("claude_idle_completion.txt")).unwrap();
     assert!(
         fx.capture.contains("Cooked for") || fx.capture.contains("Churned for"),
