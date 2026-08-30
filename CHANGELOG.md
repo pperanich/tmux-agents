@@ -10,6 +10,17 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **The tmux-required CI job could hang until GitHub's six-hour job timeout.** Integration tests
+  outside the `tma` package located its binary by running `cargo build -p tma` from inside the
+  active `cargo test`. If the outer Cargo invocation still held the target directory lock, the
+  nested Cargo waited for its parent while three identity tests waited behind a shared `OnceLock`.
+  The test support crate now uses the binary the workspace build already produced and fails fast
+  when a single-package test has not built it. The daemon-test gate also has a ten-minute deadline,
+  and both tmux-required CI steps have a 20-minute timeout so a future harness hang cannot occupy a
+  runner for six hours.
+
 ## [0.5.5] - 2026-08-30
 
 ### Fixed

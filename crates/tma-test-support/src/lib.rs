@@ -24,9 +24,14 @@ pub struct DaemonTestGuard {
     _file: File,
 }
 
+/// A stuck holder must fail the suite before CI's 20-minute step timeout. Healthy macOS runs finish
+/// the whole workspace in under ten minutes, including every waiter serialized through this gate.
+const DAEMON_GATE_TIMEOUT: Duration = Duration::from_secs(10 * 60);
+
 impl DaemonTestGuard {
-    /// Acquire the global daemon-test gate, blocking until no other daemon-spawning test holds it.
-    /// Call this as the FIRST line of every test that spawns a `tma daemon`; hold it for the test.
+    /// Acquire the global daemon-test gate. Call this as the FIRST line of every test that spawns a
+    /// `tma daemon`; hold it for the test. A holder that survives ten minutes is a harness failure,
+    /// not an instruction to leave Cargo blocked forever.
     pub fn acquire() -> DaemonTestGuard {
         let path = std::env::temp_dir().join("tma-test-daemon.lock");
         // The file is only a handle to flock; its bytes are never read or written, so keep any
@@ -37,12 +42,30 @@ impl DaemonTestGuard {
             .truncate(false)
             .open(&path)
             .unwrap_or_else(|e| panic!("open daemon-test lock {}: {e}", path.display()));
-        // Block on an exclusive advisory lock. flock can return EINTR when a signal interrupts
-        // the wait, so retry rather than mistaking a spurious wakeup for a real error.
+        let flags = rustix::io::fcntl_getfd(&file)
+            .unwrap_or_else(|e| panic!("read daemon-test lock fd flags: {e}"));
+        assert!(
+            flags.contains(rustix::io::FdFlags::CLOEXEC),
+            "daemon-test lock fd is inheritable across exec: {}",
+            path.display()
+        );
+
+        // Poll a nonblocking lock so a leaked holder has a deadline. flock can return EINTR when a
+        // signal interrupts the attempt, so retry rather than mistaking it for a real error.
+        let deadline = Instant::now() + DAEMON_GATE_TIMEOUT;
         loop {
-            match rustix::fs::flock(&file, rustix::fs::FlockOperation::LockExclusive) {
+            match rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive) {
                 Ok(()) => break,
                 Err(rustix::io::Errno::INTR) => continue,
+                Err(rustix::io::Errno::AGAIN) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                Err(rustix::io::Errno::AGAIN) => panic!(
+                    "timed out after {DAEMON_GATE_TIMEOUT:?} waiting for daemon-test lock {}; \
+                     inspect its holder with `lsof {}`",
+                    path.display(),
+                    path.display()
+                ),
                 Err(e) => panic!("flock daemon-test lock: {e}"),
             }
         }
@@ -76,14 +99,18 @@ fn short_hash(s: &str) -> String {
 }
 
 /// Absolute path to the compiled `tma` binary for tests OUTSIDE the `tma` package (no
-/// `CARGO_BIN_EXE_tma`); it sits at the workspace's shared `<target>/<profile>/tma`. A single-crate
-/// run does not build it, so build on demand via `cargo build -p tma` (cargo owns staleness, no deadlock).
+/// `CARGO_BIN_EXE_tma`); it sits at the workspace's shared `<target>/<profile>/tma`.
+///
+/// Never run Cargo from here. This function executes inside `cargo test`, where the outer Cargo may
+/// still own `<target>/<profile>/.cargo-lock`; a nested `cargo build` can then wait on its parent
+/// forever. `cargo test --workspace` builds the `tma` package before running tests. A single-package
+/// test must build it explicitly once.
 pub fn tma_bin() -> String {
     static PATH: OnceLock<String> = OnceLock::new();
-    PATH.get_or_init(build_tma_bin).clone()
+    PATH.get_or_init(find_tma_bin).clone()
 }
 
-fn build_tma_bin() -> String {
+fn find_tma_bin() -> String {
     let mut p = std::env::current_exe().expect("current test exe path");
     p.pop(); // drop the test-runner filename → .../deps
     p.pop(); // drop `deps` → .../<profile>
@@ -95,34 +122,14 @@ fn build_tma_bin() -> String {
     p.push("tma");
     let bin = p.to_string_lossy().into_owned();
 
-    // `cargo test` sets CARGO to the cargo that launched us; standalone use falls back to PATH.
-    let cargo = std::env::var_os("CARGO").unwrap_or_else(|| "cargo".into());
-    let mut cmd = Command::new(&cargo);
-    cmd.arg("build").arg("-p").arg("tma");
-    if release {
-        cmd.arg("--release");
+    if !Path::new(&bin).is_file() {
+        let profile = if release { " --release" } else { "" };
+        panic!(
+            "tma integration-test binary is missing at {bin}.\n\
+             Build it first: `cargo build -p tma{profile}`, or run `cargo test --workspace`."
+        );
     }
-    // Capture output so the normal green path stays quiet; surface it only when the build fails.
-    match cmd.output() {
-        Ok(out) if out.status.success() => bin, // cargo guarantees the bin is now current
-        Ok(out) => panic!(
-            "`cargo build -p tma` failed ({}) while preparing the integration-test binary.\n\
-             Fix the build, then re-run. cargo stderr:\n{}",
-            out.status,
-            String::from_utf8_lossy(&out.stderr),
-        ),
-        Err(e) => {
-            // Could not even spawn cargo (no cargo on PATH). Fail loud on an absent binary;
-            // otherwise use the one already on disk (freshness unverifiable without cargo).
-            if !Path::new(&bin).exists() {
-                panic!(
-                    "could not run `cargo build -p tma` ({e}) and no tma binary exists at {bin}.\n\
-                     Build it first: `cargo build -p tma` (or run `cargo test --workspace`)."
-                );
-            }
-            bin
-        }
-    }
+    bin
 }
 
 /// The fail-closed gate: `TMA_REQUIRE_TMUX=1` flips a missing tmux/python3 from a green skip into a
@@ -767,7 +774,7 @@ impl Scratch {
         }
     }
 
-    /// The `tma` binary path (built on demand, [`tma_bin`]).
+    /// The `tma` binary path ([`tma_bin`]).
     pub fn bin(&self) -> String {
         tma_bin()
     }
@@ -1140,6 +1147,15 @@ impl Drop for Scratch {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The daemon-test gate cannot cross the `Command::spawn` exec boundary. This pins the property
+    /// H1 depends on instead of relying on an undocumented assumption about `OpenOptions`.
+    #[test]
+    fn daemon_test_gate_is_close_on_exec() {
+        let guard = DaemonTestGuard::acquire();
+        let flags = rustix::io::fcntl_getfd(&guard._file).expect("read daemon-test lock fd flags");
+        assert!(flags.contains(rustix::io::FdFlags::CLOEXEC));
+    }
 
     /// The process sweep reads `-L <socket>`, which is what both a scratch server (macOS keeps the
     /// creating argv) and a leaked control client carry. Everything else on the machine is ignored:
