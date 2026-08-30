@@ -36,6 +36,7 @@ jobs:
       # --all-features matches `mise run test`: the manifest-fixture suites are behind tma-core's
       # default-off `fixtures` feature, so without it 49 detection tests never run.
       - name: Test (tmux required)
+        timeout-minutes: 20
         run: TMA_REQUIRE_TMUX=1 cargo test --workspace --all-features
 
   test-macos:
@@ -68,4 +69,5 @@ jobs:
           echo "$HOME/tmux-bin/bin" >> "$GITHUB_PATH"
           "$HOME/tmux-bin/bin/tmux" -V
       - name: Test (tmux required)
+        timeout-minutes: 20
         run: TMA_REQUIRE_TMUX=1 cargo test --workspace --all-features
