@@ -10,6 +10,19 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **A freshly started Codex pane sat at `?` until its first turn finished.** Codex draws inline
+  rather than on the alternate screen, so a session that has not yet run a turn renders its welcome
+  box and composer at the top of the pane and leaves the rest empty — on a 149x35 pane, 16 blank
+  rows below a composer sitting 19 rows up. The idle rule read the last six rows of the capture, so
+  it read six blanks and matched nothing; no other rule matched either, and with no evidence at all
+  the pane held `unknown` until the first turn scrolled the composer to the bottom. Manifests can
+  now scope a rule with `bottom_non_empty_lines(N)`, which drops trailing blank rows before taking
+  its window, and the Codex idle rule uses it. The window is still six rows — the size is what keeps
+  the transcript echoes and the approval dialog's `› 1. Yes, proceed` rows out — it just ends on the
+  last row with content now.
+
 ## [0.5.4] - 2026-08-29
 
 ### Fixed

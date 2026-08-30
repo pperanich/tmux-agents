@@ -712,10 +712,10 @@ visible = ["working", "idle", "blocked"]  # states screen rules reliably detect 
                                           # evidence-backed per D10, not derived from
                                           # rule presence
 [[rules]]                             # screen rules, herdr-idea reimplementation
-state = "blocked"  priority = 100  region = "tail_lines(5)"   # v1 accepts tail_lines(N)
-                                          # and title only (unknown regions are hard-
-                                          # rejected); richer regions (e.g.
-                                          # bottom_non_empty_lines) grow from evidence later
+state = "blocked"  priority = 100  region = "tail_lines(5)"   # v1 accepts tail_lines(N),
+                                          # bottom_non_empty_lines(N), visible, and title
+                                          # (unknown regions are hard-rejected); further
+                                          # regions grow from evidence later
 match = { any = [ ... ] }             # contains/regex/line_regex + any/all/not
 [details]                             # token spelling/aliases only — state routing is
                                       # normative in AD1 and NOT manifest-overridable
