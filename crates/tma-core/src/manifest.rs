@@ -158,7 +158,7 @@ pub struct Rule {
     /// Higher wins when multiple rules match.
     #[serde(default)]
     pub priority: i64,
-    /// Where to look (v1: `tail_lines(N)`, `visible`, or `title`).
+    /// Where to look (v1: `tail_lines(N)`, `bottom_non_empty_lines(N)`, `visible`, or `title`).
     pub region: Region,
     #[serde(rename = "match")]
     pub match_: Matcher,
@@ -182,6 +182,12 @@ pub enum Region {
     /// Match against the last `N` lines of the captured tail. Bottom-anchored agents (claude/codex)
     /// use a small window whose chrome fits the visible screen, so this never reads scrollback for them.
     TailLines(usize),
+    /// Same window as [`TailLines`], but trailing blank lines are discarded first, so the window
+    /// is anchored on the last line that actually carries content. An agent that renders inline
+    /// (codex) and has not yet filled the screen leaves the bottom of the pane blank — a fresh
+    /// codex session measured 16 trailing blanks with the composer 19 rows up — and those blanks
+    /// would consume a small `tail_lines(N)` window whole, so the rule never sees the chrome.
+    BottomNonEmptyLines(usize),
     /// Match against the VISIBLE SCREEN ONLY — the last
     /// [`visible_height`](crate::snapshot::PaneSnapshot::visible_height) lines of the tail.
     /// `capture-pane -S -50` can reach 50 lines into scrollback, so whole-screen rules on floating
@@ -211,8 +217,19 @@ impl FromStr for Region {
             })?;
             return Ok(Region::TailLines(n));
         }
+        if let Some(inner) = s
+            .strip_prefix("bottom_non_empty_lines(")
+            .and_then(|r| r.strip_suffix(')'))
+        {
+            let n: usize = inner.trim().parse().map_err(|_| {
+                format!(
+                    "region bottom_non_empty_lines(N) needs a non-negative integer, got {inner:?}"
+                )
+            })?;
+            return Ok(Region::BottomNonEmptyLines(n));
+        }
         Err(format!(
-            "unknown region {s:?} (v1 supports tail_lines(N), visible, and title)"
+            "unknown region {s:?} (v1 supports tail_lines(N), bottom_non_empty_lines(N), visible, and title)"
         ))
     }
 }
@@ -826,6 +843,21 @@ rate_limit = { aliases = ["ratelimited"] }
     }
 
     #[test]
+    fn region_spellings_round_trip() {
+        assert_eq!("tail_lines(6)".parse(), Ok(Region::TailLines(6)));
+        assert_eq!(
+            "bottom_non_empty_lines(6)".parse(),
+            Ok(Region::BottomNonEmptyLines(6))
+        );
+        assert_eq!("visible".parse(), Ok(Region::Visible));
+        assert_eq!("title".parse(), Ok(Region::Title));
+        assert!("bottom_non_empty_lines(x)"
+            .parse::<Region>()
+            .unwrap_err()
+            .contains("bottom_non_empty_lines(N) needs a non-negative integer"));
+    }
+
+    #[test]
     fn rejects_unknown_region() {
         let src = r#"
 min_engine_version = "0.1"
@@ -835,7 +867,7 @@ process_names = ["x"]
 visible = []
 [[rules]]
 state = "blocked"
-region = "bottom_non_empty_lines(5)"
+region = "head_lines(5)"
 match = { contains = "?" }
 "#;
         let err = Manifest::parse(src, "region.toml").unwrap_err();
