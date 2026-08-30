@@ -345,6 +345,44 @@ fn blocked_screen_raises_no_idle_claim() {
     }
 }
 
+// ---- a fresh session, whose screen the agent has not filled yet --------------------
+
+#[test]
+fn fresh_session_idle_is_read_despite_trailing_blank_rows() {
+    // Codex renders inline, so a session that has not yet run a turn draws at the TOP of the pane
+    // and leaves the bottom empty. This capture is one: the composer is 19 rows up and the last 16
+    // rows are blank, so the old `tail_lines(6)` window saw six blanks, matched nothing, and left
+    // the pane at `?` forever. `bottom_non_empty_lines(6)` anchors on the composer instead.
+    let name = "codex_idle_fresh_session_w149.txt";
+    let fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
+    assert_eq!(fx.agent, "codex");
+
+    let raw: Vec<&str> = fx.capture.lines().collect();
+    let tail6 = &raw[raw.len() - 6..];
+    assert!(
+        tail6
+            .iter()
+            .all(|l| tma_core::engine::strip_ansi(l).trim().is_empty()),
+        "the defect this covers: the last six raw rows are blank, so a tail_lines(6) rule reads \
+         nothing at all here"
+    );
+
+    let ev = evaluate(name);
+    assert!(
+        has_state(&ev, AgentState::Idle),
+        "{name}: the composer must raise an idle claim above the trailing blanks"
+    );
+    assert!(
+        !has_state(&ev, AgentState::Working),
+        "{name}: a session that has run no turn is not working"
+    );
+    assert!(
+        !has_state(&ev, AgentState::Blocked),
+        "{name}: nothing on a welcome screen is an approval prompt"
+    );
+    assert_eq!(fold_verdict(name, None).state, AgentState::Idle);
+}
+
 // ---- the pinned-`working` trap: a finished turn now lands --------------------------
 
 #[test]

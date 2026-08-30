@@ -1,0 +1,92 @@
+# agent: codex
+# state: unknown
+# title: liftosaur
+# command: codex
+# pid: 88010
+# captured_at: 1788098572954
+---
+[2m│ [0;1m[38;5;6m✨ Update available![0m [1m0.146.0 -> 0.151.0[0;2m         │[0m
+[2m│ [0mRun [38;5;6mbrew upgrade --cask codex[39m to update.[2m        │[0m
+[2m│                                                 │[0m
+[2m│ [0mSee full release notes:[2m                         │[0m
+[2m│ [0;4m[38;5;6m]8;;https:[path]xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\https:[path]xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx[0;2m]8;;\ │[0m
+[2m╰─────────────────────────────────────────────────╯[0m
+
+[2m╭───────────────────────────────────────────────────╮[0m
+[2m│ >_ [0;1mOpenAI Codex[0;2m (v0.146.0)                        │[0m
+[2m│                                                   │[0m
+[2m│ model:     [0mgpt-5.4-mini medium[2m   [0m[38;5;6m/model[2m[39m to change │[0m
+[2m│ directory: [0m~/Documents/repos/oss/liftosaur[2m        │[0m
+[2m╰───────────────────────────────────────────────────╯[0m
+
+  [1mTip:[0m [3mNew[0m Use [1m/fast[0m to enable our fastest inference with increased plan usage.
+ [38;5;31m  [1m[38;5;39m~[0m[38;5;31m/Documents/repos/oss/[1m[38;5;39mliftosaur[0m[38;5;31m [38;5;76m   master ❯[39m [32mcodex[39m                                                                          [38;5;101m  11s[38;5;66m   09:33:41[39m
+  Welcome to [1mCodex[0m, OpenAI's command-line coding agent
+
+  Finish signing in via your browser
+
+  If the link doesn't open automatically, open the following link to authenticate:
+
+  [4m[38;5;6m]8;;https:[path]xxxxxxxxxxxxxxxxxxxxxxxxxxx?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth%2Fcallback&scope=openid%20profile%20email%20offline_access%20api.connectors.read%20api.connectors.invoke&code_challenge=KIqNGSyCUJmN6FGhJUIITiTIMRx3_uMTt3etrbafMIQ&code_challenge_method=S256&id_token_add_organizations=true&codex_cli_simplified_flow=true&state=JWW7RF6Xr3PLSfzV9ZT4HfaIcOBSTpBGBgtYt-pmGQ0&originator=codex-tui\https:[path]xxxxxxxxxxxxxxxxxxxxxxxxxxx?response_type=code&client_id=app_EMoamEEZ73f0CkXaXp7hrann&redirect_uri=http%3A%2F%2Flocalhost%3A1455%2Fauth]8;;\
+%2Fcallback&scope=openid%20profile%20email%20offline_access%20api.connectors.read%20api.connectors.invoke&code_challenge=KIqNGSyCUJmN6FGhJUIITiTIMRx3
+_uMTt3etrbafMIQ&code_challenge_method=S256&id_token_add_organizations=true&codex_cli_simplified_flow=true&state=JWW7RF6Xr3PLSfzV9ZT4HfaIcOBSTpBGBgtYt
+-pmGQ0&originator=codex-tui[0m
+
+  On a remote or headless machine? Press [2mesc[0m and choose [38;5;6mSign in with Device Code[39m.
+
+[2m  Press esc to cancel[0m
+
+[48;2;57;57;71m
+  [1mHooks need review[0m[48;2;57;57;71m
+  [38;5;3m9 hooks are new or changed.[39m
+  [2mHooks can run outside the sandbox after you trust them.[0m[48;2;57;57;71m
+
+[1m[38;5;6m› 1. Review hooks[0m[48;2;57;57;71m
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+
+[49m  [2mPress enter to confirm or esc to go back
+[0m
+
+
+
+
+
+
+[2m╭─────────────────────────────────────────────────╮[0m
+[2m│ [0;1m[38;5;6m✨ Update available![0m [1m0.146.0 -> 0.151.0[0;2m         │[0m
+[2m│ [0mRun [38;5;6mbrew upgrade --cask codex[39m to update.[2m        │[0m
+[2m│                                                 │[0m
+[2m│ [0mSee full release notes:[2m                         │[0m
+[2m│ [0;4m[38;5;6m]8;;https:[path]xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\https:[path]xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx[0;2m]8;;\ │[0m
+[2m╰─────────────────────────────────────────────────╯[0m
+
+[2m╭───────────────────────────────────────────────────╮[0m
+[2m│ >_ [0;1mOpenAI Codex[0;2m (v0.146.0)                        │[0m
+[2m│                                                   │[0m
+[2m│ model:     [0mgpt-5.4-mini medium[2m   [0m[38;5;6m/model[2m[39m to change │[0m
+[2m│ directory: [0m~/Documents/repos/oss/liftosaur[2m        │[0m
+[2m╰───────────────────────────────────────────────────╯[0m
+
+  [1mTip:[0m [3mNew[0m Use [1m/fast[0m to enable our fastest inference with increased plan usage.
+
+[48;2;57;57;71m
+[1m›[0m[48;2;57;57;71m [2mImplement {feature}[0m[48;2;57;57;71m
+
+[49m  [38;2;246;226;183mgpt-5.4-mini medium[2m[39m · [0m[38;2;171;223;167m~/Documents/repos/oss/liftosaur[39m
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
