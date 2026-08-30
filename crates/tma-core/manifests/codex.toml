@@ -197,7 +197,7 @@ match = { contains = "esc to interrupt" }
 #
 # Two things share that arrow and both are excluded deliberately:
 #   - the transcript echo of each user message (`› Run the shell command: …`), kept out by the
-#     `tail_lines(6)` window. Measured distance from the last captured row to the nearest echo:
+#     six-row window. Measured distance from the last captured row to the nearest echo:
 #     10 (codex_working_w100), 14 (codex_working_w60), 20 (codex_blocked_w100),
 #     21 (codex_blocked_w60), against a live composer sitting at exactly 3 in all four
 #     idle/working captures. Ten rows is the floor, not fourteen;
@@ -208,11 +208,25 @@ match = { contains = "esc to interrupt" }
 #     begins `1. ` renders as `› 1. …`, is excluded with the option rows, and leaves that pane
 #     holding `working` until a hook or a blocker moves it. Only the `<digits>. ` shape is hit
 #     (`› 3 apples` is fine); the case is uncovered rather than covered.
-# Backed by codex_idle_w{100,60}.txt and negatively by codex_blocked_w{100,60}.txt.
+#
+# The six-row floor above is unchanged and still does all the excluding; what changed is where the
+# window is anchored. Codex renders inline, so a session that has not yet run a turn draws its UI
+# at the TOP of the pane and leaves the bottom empty: on a real 149x35 fresh session the capture
+# ends in 16 blank rows with the composer 19 rows up, and `tail_lines(6)` read six blanks, matched
+# nothing, and left the pane at `?` until a turn scrolled the composer down.
+# `bottom_non_empty_lines(6)` drops the trailing blanks first and then takes the same six rows, so
+# the window ends on the composer in both shapes — identical on the four bottom-filled captures
+# (composer at 3, no trailing blanks) and correct on the fresh one. Blankness is judged after ANSI
+# stripping, which matters here: codex paints its composer background onto empty rows, so those
+# rows carry SGR bytes and would otherwise count as content. `min_engine_version` stays at "0.1"
+# — a user override copied onto a tma too old to know the region is rejected per-file with an
+# unknown-region error and the bundled manifest still loads, which is the documented fallback.
+# Backed by codex_idle_w{100,60}.txt, codex_idle_fresh_session_w149.txt, and negatively by
+# codex_blocked_w{100,60}.txt.
 [[rules]]
 state = "idle"
 priority = 40
-region = "tail_lines(6)"
+region = "bottom_non_empty_lines(6)"
 match = { all = [
   { line_regex = '^›' },
   { not = { line_regex = '^› \d+\. ' } },

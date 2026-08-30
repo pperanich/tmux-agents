@@ -138,6 +138,7 @@ One screen rule. Higher `priority` wins when multiple rules match.
 | value | meaning |
 |---|---|
 | `tail_lines(N)` | Match against the last `N` lines of the captured tail. Bottom-anchored agents use a small window that always fits the visible screen, so this never reads scrollback for them. |
+| `bottom_non_empty_lines(N)` | Match against the last `N` lines that end at the last line with content: trailing blank lines (blank after ANSI stripping) are discarded before the window is taken. Use this instead of `tail_lines(N)` for an agent that renders inline, where a session that has not yet filled the screen leaves blank rows below its chrome that would consume the whole window. |
 | `visible` | Match against the visible screen only: the last `#{pane_height}` lines of the captured tail, before any further scoping. This removes scrollback lines for agents whose chrome floats in the transcript, so a whole-screen rule cannot match a prior turn's chrome out of scrollback on a short pane. When the height is unknown it degrades to the whole captured tail. |
 | `title` | Match against the pane title. |
 

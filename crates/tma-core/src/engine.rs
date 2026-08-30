@@ -193,7 +193,9 @@ impl RuleEngine {
                 let rule = &self.rules[index];
                 let source = match rule.region {
                     Region::Title => Source::Title,
-                    Region::TailLines(_) | Region::Visible => Source::ScreenRule,
+                    Region::TailLines(_) | Region::BottomNonEmptyLines(_) | Region::Visible => {
+                        Source::ScreenRule
+                    }
                 };
                 Evidence {
                     source,
@@ -225,6 +227,7 @@ pub fn region_label(region: Region) -> String {
         Region::Title => "title".to_string(),
         Region::Visible => "visible".to_string(),
         Region::TailLines(n) => format!("tail_lines({n})"),
+        Region::BottomNonEmptyLines(n) => format!("bottom_non_empty_lines({n})"),
     }
 }
 
@@ -238,6 +241,18 @@ fn extract_region(region: Region, snap: &PaneSnapshot) -> String {
             let lines: Vec<&str> = snap.tail_text.lines().collect();
             let start = lines.len().saturating_sub(n);
             strip_ansi(&lines[start..].join("\n"))
+        }
+        // The same window as `TailLines`, re-anchored on the last line with content. Blankness is
+        // tested PER LINE after stripping, because a visually empty row still carries its SGR
+        // sequences (codex's composer background paints `ESC[48;2;…m` onto otherwise empty rows) —
+        // testing the raw text would count those as content and defeat the whole region.
+        Region::BottomNonEmptyLines(n) => {
+            let lines: Vec<&str> = snap.tail_text.lines().collect();
+            let Some(end) = lines.iter().rposition(|l| !strip_ansi(l).trim().is_empty()) else {
+                return String::new();
+            };
+            let start = (end + 1).saturating_sub(n);
+            strip_ansi(&lines[start..=end].join("\n"))
         }
         // The visible screen only — the last `visible_height` lines, clamping out the scrollback
         // that `capture-pane -S -50` reaches into. `None` height (synthetic) degrades to the whole tail.
@@ -386,6 +401,83 @@ mod tests {
         );
         let eng = RuleEngine::build(&m).unwrap();
         let ev = eng.evaluate(&snap("t", "target\nb\nc\nd\n"));
+        assert!(ev.evidence.is_empty());
+        assert!(!ev.reports[0].matched);
+    }
+
+    #[test]
+    fn bottom_non_empty_lines_skips_trailing_blanks() {
+        // The codex fresh-session shape: the composer sits above a screen the agent has not
+        // filled. `tail_lines(2)` reads two of the blanks and misses it; the re-anchored window
+        // does not.
+        let tail = "composer\n\n\n\n";
+        let missed = manifest(
+            "[[rules]]\nstate=\"idle\"\nregion=\"tail_lines(2)\"\nmatch={ contains=\"composer\" }\n",
+        );
+        let found = manifest(
+            "[[rules]]\nstate=\"idle\"\nregion=\"bottom_non_empty_lines(2)\"\nmatch={ contains=\"composer\" }\n",
+        );
+        assert!(RuleEngine::build(&missed)
+            .unwrap()
+            .evaluate(&snap("t", tail))
+            .evidence
+            .is_empty());
+        assert_eq!(
+            RuleEngine::build(&found)
+                .unwrap()
+                .evaluate(&snap("t", tail))
+                .evidence
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn bottom_non_empty_lines_treats_an_ansi_only_line_as_blank() {
+        // Codex paints its composer background onto empty rows, so a row that shows nothing still
+        // carries SGR bytes. If blankness were tested before stripping, that row would count as
+        // content and eat one of the two slots the anchor line needs.
+        let m = manifest(
+            "[[rules]]\nstate=\"idle\"\nregion=\"bottom_non_empty_lines(2)\"\nmatch={ contains=\"composer\" }\n",
+        );
+        let eng = RuleEngine::build(&m).unwrap();
+        let tail = "composer\n\u{1b}[38;5;246m\u{1b}[39m\n\u{1b}[48;2;57;57;71m\n";
+        assert_eq!(eng.evaluate(&snap("t", tail)).evidence.len(), 1);
+    }
+
+    #[test]
+    fn bottom_non_empty_lines_handles_all_blank_and_oversized_windows() {
+        let m = manifest(
+            "[[rules]]\nstate=\"idle\"\nregion=\"bottom_non_empty_lines(50)\"\nmatch={ contains=\"composer\" }\n",
+        );
+        let eng = RuleEngine::build(&m).unwrap();
+        // Nothing but blanks: an empty region, not a panic and not a match.
+        assert!(eng
+            .evaluate(&snap("t", "\n   \n\u{1b}[0m\n"))
+            .evidence
+            .is_empty());
+        // A window wider than the capture clamps to the whole capture.
+        assert_eq!(eng.evaluate(&snap("t", "composer\n\n")).evidence.len(), 1);
+        // A zero window is empty, as `tail_lines(0)` is.
+        let zero = manifest(
+            "[[rules]]\nstate=\"idle\"\nregion=\"bottom_non_empty_lines(0)\"\nmatch={ contains=\"composer\" }\n",
+        );
+        assert!(RuleEngine::build(&zero)
+            .unwrap()
+            .evaluate(&snap("t", "composer\n\n"))
+            .evidence
+            .is_empty());
+    }
+
+    #[test]
+    fn bottom_non_empty_lines_window_ends_at_the_last_content_line() {
+        // The window is re-anchored, not widened: content further up than `n` lines above the
+        // anchor is still out of scope, which is what keeps the codex transcript echoes excluded.
+        let m = manifest(
+            "[[rules]]\nstate=\"idle\"\nregion=\"bottom_non_empty_lines(2)\"\nmatch={ contains=\"echo\" }\n",
+        );
+        let eng = RuleEngine::build(&m).unwrap();
+        let ev = eng.evaluate(&snap("t", "echo\nfiller\ncomposer\n\n\n"));
         assert!(ev.evidence.is_empty());
         assert!(!ev.reports[0].matched);
     }
