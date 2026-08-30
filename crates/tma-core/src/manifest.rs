@@ -182,7 +182,7 @@ pub enum Region {
     /// Match against the last `N` lines of the captured tail. Bottom-anchored agents (claude/codex)
     /// use a small window whose chrome fits the visible screen, so this never reads scrollback for them.
     TailLines(usize),
-    /// Same window as [`TailLines`], but trailing blank lines are discarded first, so the window
+    /// Same window as [`Region::TailLines`], but trailing blank lines are discarded first, so the window
     /// is anchored on the last line that actually carries content. An agent that renders inline
     /// (codex) and has not yet filled the screen leaves the bottom of the pane blank — a fresh
     /// codex session measured 16 trailing blanks with the composer 19 rows up — and those blanks
