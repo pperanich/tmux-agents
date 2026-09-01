@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.5.7] - 2026-09-01
+
 ### Changed
 
 - **`prefix G` no longer leaves a TMA window behind after a jump.** The managed binding now opens
@@ -642,7 +644,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.6...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.7...HEAD
+[0.5.7]: https://github.com/pperanich/tmux-agents/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/pperanich/tmux-agents/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/pperanich/tmux-agents/compare/v0.5.4...v0.5.5
 [0.5.4]: https://github.com/pperanich/tmux-agents/compare/v0.5.3...v0.5.4
