@@ -1185,10 +1185,11 @@ fn bare_reference_ok(wrapper: &Wrapper) -> bool {
     let dir = wrapper.write_path().parent().unwrap_or(Path::new("."));
     if !wrapper.resolves() {
         eprintln!(
-            "tma: `{WRAPPER_NAME}` is not on $PATH, and [install] wrapper_ref = \"bare\" writes \
-             that bare name into every agent config.\n      A wrapper an agent cannot find fails \
-             silently, so nothing was wired. Put {} on your $PATH, or drop wrapper_ref to wire the \
-             absolute path.",
+            "tma: `{WRAPPER_NAME}` is not on $PATH, and wrapper_ref = \"bare\" (the default) \
+             writes that bare name into every agent config.\n      A wrapper an agent cannot find \
+             fails silently, so nothing was wired. Put {} on your $PATH, or wire the absolute path \
+             instead\n      with `--wrapper-ref absolute` (or [install] wrapper_ref = \"absolute\" \
+             in your config).",
             dir.display()
         );
         return false;
@@ -1196,8 +1197,15 @@ fn bare_reference_ok(wrapper: &Wrapper) -> bool {
     // Resolvable, but by someone else's copy: still functional (any tma-hook wrapper runs), yet the
     // binary it finds may not be the one just installed, so say which copy actually answers.
     if let Some(other) = wrapper.shadowed_by() {
+        // Whether the two copies differ is the whole question the warning raises, and it costs one
+        // read to answer, so answer it rather than leaving the user to diff them.
+        let verdict = match (std::fs::read(&other), std::fs::read(wrapper.write_path())) {
+            (Ok(a), Ok(b)) if a == b => " (the two files are identical, so nothing changes)",
+            (Ok(_), Ok(_)) => " (the two files differ)",
+            _ => "",
+        };
         eprintln!(
-            "tma: warning: $PATH answers `{WRAPPER_NAME}` with {}, not the copy written to {}",
+            "tma: warning: $PATH answers `{WRAPPER_NAME}` with {}, not the copy written to {}{verdict}",
             other.display(),
             dir.display()
         );

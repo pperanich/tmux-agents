@@ -97,15 +97,19 @@ tma install-hooks codex --uninstall
 Caveat: the installer prints a trust step, and it is load-bearing:
 
 ```
-tma: codex trust gate: the hooks.json entries stay INERT until you open codex, run /hooks, and trust the tma-hook entries (codex silently skips untrusted hooks). The notify signal works without this step.
+tma: codex trust gate: the hooks.json entries stay INERT until you open codex, run /hooks, and trust the tma-hook entries (codex silently skips untrusted hooks). Codex pins that trust to the exact command string, so an install that CHANGES it (an [install] wrapper_ref switch, a moved wrapper) has to be trusted again. The notify signal works without this step.
 tma: installed hooks for codex
 ```
 
 Codex silently skips any untrusted hook, so after installing you must open codex,
 run `/hooks`, and trust the tma entries before the `hooks.json` events fire. Trust
-is recorded against the hook's exact definition, so if you later move the wrapper
-you must re-trust. The `notify` channel is a plain config value and is not
-trust-gated, so idle detection works immediately.
+is recorded against the hook's exact definition (a `trusted_hash` per entry in
+`~/.codex/config.toml`), so any change to the command string means re-trusting:
+moving the wrapper, and also switching `[install] wrapper_ref` between `bare` and
+`absolute`. That is the one real cost of migrating an old absolute install to the
+`bare` default, and it applies to codex's `hooks.json` only. The `notify` channel
+is a plain config value and is not trust-gated, so idle detection works
+immediately.
 
 ## Gemini CLI
 
@@ -341,31 +345,38 @@ and leaves your config alone.
 
 ## Sharing one agent config between machines
 
-By default every wiring names the wrapper by its absolute path:
+By default every wiring names the wrapper by its bare name:
+
+```json
+"command": "tma-hook claude Stop"
+```
+
+Every machine resolves that off its own `$PATH`, so a `~/.claude/settings.json`
+synced between a Mac and a Linux box works on both. Nothing to configure.
+
+If your configs were written by a tma older than 0.6 they carry absolute paths
+instead:
 
 ```json
 "command": "/Users/you/.local/bin/tma-hook claude Stop"
 ```
 
-That path is correct on the machine that wrote it and wrong on any other, so a
-`~/.claude/settings.json` you sync between a Mac and a Linux box points at a home
-directory that does not exist on one of them. Switch to the portable form:
-
-```toml
-# ~/.config/tma/config.toml
-[install]
-wrapper_ref = "bare"
-```
-
-Then repoint everything already wired in one command:
+That path is correct on the machine that wrote it and wrong on any other. It keeps
+working where it was written, and `--check` does not report it as drift as long as
+it resolves to the wrapper, so there is no hurry. Repoint everything already wired
+when you want the portable form:
 
 ```
 tma install-hooks --all
 ```
 
-The entries become `tma-hook claude Stop`, which every machine resolves off its
-own `$PATH`. `--wrapper-ref bare` does the same for a single run without touching
-config.
+`--wrapper-ref absolute` writes paths again for a single run, and `[install]
+wrapper_ref = "absolute"` makes that the standing choice.
+
+One caveat if you use codex: it pins its `hooks.json` trust to the exact command
+string, so entries rewritten by `--all` are inert until you open codex, run
+`/hooks`, and trust them again. Codex's `notify` channel and every other agent are
+unaffected.
 
 `--all` covers the agents that already carry tma wiring, which is a different set
 from the one `tma init` wires: init only touches agents whose launcher it finds on
@@ -378,18 +389,18 @@ call `spawn()` directly, so `$HOME/.local/bin/tma-hook` would be taken as a
 literal filename with a dollar sign in it. A bare name works everywhere because
 `execvp` searches `$PATH` the same way a shell does.
 
-What you give up is the guarantee that the wrapper is findable. A GUI-launched
-editor often inherits a narrower `$PATH` than your shell, and a wrapper an agent
-cannot find fails silently by design. Two things guard that: `install-hooks`
-refuses to wire anything when `tma-hook` is not on the `$PATH` it can see, and
-`tma doctor` reports the reference rather than the file:
+What a bare name gives up is the guarantee that the wrapper is findable. A
+GUI-launched editor often inherits a narrower `$PATH` than your shell, and a
+wrapper an agent cannot find fails silently by design. Two things guard that:
+`install-hooks` refuses to wire anything when `tma-hook` is not on the `$PATH` it
+can see, and `tma doctor` reports the reference rather than the file:
 
 ```
 wrapper: tma-hook ✓ on $PATH (/home/you/.local/bin/tma-hook)
 ```
 
 A `✗ not on $PATH` there means the wiring is intact and inert. Put the wrapper's
-directory on the agent's `$PATH`, or switch back to `wrapper_ref = "absolute"` and
+directory on the agent's `$PATH`, or set `wrapper_ref = "absolute"` and
 re-install.
 
 ## Agents that run in a container

@@ -23,6 +23,20 @@ fn wrapper(s: &Scratch) -> PathBuf {
     s.workdir.join("bin/tma-hook")
 }
 
+/// The inherited `PATH` with the scratch wrapper's own directory in front. `[install] wrapper_ref`
+/// defaults to `bare`, so install refuses (and doctor would report an unresolvable reference)
+/// unless `tma-hook` is findable; pinning the scratch copy in front makes the suite say the same
+/// thing on a machine that has a real tma installed and on one that does not.
+fn path_with_wrapper_dir(s: &Scratch) -> String {
+    let dir = wrapper(s).parent().expect("wrapper dir").to_path_buf();
+    let inherited = std::env::var_os("PATH").unwrap_or_default();
+    let dirs = std::iter::once(dir).chain(std::env::split_paths(&inherited));
+    std::env::join_paths(dirs)
+        .expect("rejoin PATH")
+        .to_string_lossy()
+        .into_owned()
+}
+
 /// First `name` on PATH. Hardcoding `/bin/sleep` would work on macOS and a stock runner, but the nix
 /// Linux build sandbox only mounts `/bin/sh`.
 fn which(name: &str) -> Option<PathBuf> {
@@ -45,6 +59,7 @@ fn tma_cmd(s: &Scratch, args: &[&str]) -> Command {
         .arg(&s.socket)
         .arg("--manifest-dir")
         .arg(&s.workdir)
+        .env("PATH", path_with_wrapper_dir(s))
         .env("TMA_CONFIG", common::empty_config_path())
         .env("TMA_BIN", env!("CARGO_BIN_EXE_tma"))
         .env("TMA_CLAUDE_SETTINGS", settings(s))

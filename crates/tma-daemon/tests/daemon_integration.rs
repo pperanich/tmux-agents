@@ -184,7 +184,7 @@ fn run_ensure(s: &Scratch) -> bool {
         .success()
 }
 
-/// Run `tma daemon --ensure` against an explicit config file (the `restart_on_upgrade` opt-in).
+/// Run `tma daemon --ensure` against an explicit config file (the `restart_on_upgrade` opt-out).
 fn run_ensure_with(s: &Scratch, config: &Path) -> bool {
     s.command()
         .args(["daemon", "--ensure", "--socket-name", &s.socket])
@@ -193,6 +193,25 @@ fn run_ensure_with(s: &Scratch, config: &Path) -> bool {
         .expect("run --ensure")
         .status
         .success()
+}
+
+/// Run a plain user surface (`tma status`) against the scratch server. The surface itself is
+/// incidental: what it exercises is the dispatch step that runs the upgrade check before it.
+fn run_status(s: &Scratch) -> std::process::Output {
+    s.command()
+        .args(["status", "--socket-name", &s.socket])
+        .output()
+        .expect("run status")
+}
+
+/// The `*.restart` cooldown stamp, written only when an automatic restart is attempted. Its absence
+/// is how a test says "nothing fired" without racing a restart that has not landed yet.
+fn restart_stamp(s: &Scratch) -> Option<PathBuf> {
+    std::fs::read_dir(tma_dir(s))
+        .ok()?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.extension().map(|x| x == "restart").unwrap_or(false))
 }
 
 /// Run `tma daemon --stop` and return its whole output (same reason as `run_restart`: the exit
@@ -1209,6 +1228,9 @@ fn the_daemon_mode_flags_are_pairwise_exclusive() {
 /// session and drop every control client at that cadence. The rule that makes it impossible is
 /// `ipc::restart_decision`'s strict "newer evicts older" — proved anti-symmetric by property test;
 /// this is the same rule observed against real processes.
+///
+/// Both sides of the knob are here: the opt-out (`restart_on_upgrade = false`) leaves the older
+/// daemon serving, and the shipped default (no `[daemon]` section at all) replaces it.
 #[test]
 fn an_upgrade_restart_fires_once_and_then_leaves_the_daemon_alone() {
     let _gate = common::DaemonTestGuard::acquire();
@@ -1218,26 +1240,26 @@ fn an_upgrade_restart_fires_once_and_then_leaves_the_daemon_alone() {
     }
     let s = Scratch::new_daemon("daemon");
     let _pane = new_pane(&s, "s1");
-    let cfg = s.workdir.join("restart-on-upgrade.toml");
-    std::fs::write(&cfg, "[daemon]\nrestart_on_upgrade = true\n").unwrap();
+    let opted_out = s.workdir.join("no-restart-on-upgrade.toml");
+    std::fs::write(&opted_out, "[daemon]\nrestart_on_upgrade = false\n").unwrap();
 
     let mut old = spawn_daemon_args(&s, &["--fake-version", "0.0.1"]);
     assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
     let old_pid = daemon_pid(&s, common::POLL_CEILING).expect("the old daemon records its pid");
     assert!(wait_lock_version(&s, "0.0.1", common::POLL_CEILING));
 
-    // Control: the automatic restart is opt-in, so a plain `--ensure` leaves the old build serving.
-    assert!(run_ensure(&s));
+    // Control: opted out, so `--ensure` leaves the old build serving.
+    assert!(run_ensure_with(&s, &opted_out));
     std::thread::sleep(Duration::from_millis(300));
     assert_eq!(
         daemon_pid(&s, Duration::from_secs(1)),
         Some(old_pid),
-        "without `restart_on_upgrade` a skewed daemon is never replaced under you"
+        "`restart_on_upgrade = false` means a skewed daemon is never replaced under you"
     );
     assert_eq!(lock_version(&s).as_deref(), Some("0.0.1"));
 
-    // Opted in: one restart.
-    assert!(run_ensure_with(&s, &cfg));
+    // The shipped default (the harness pins an EMPTY config, so this is defaults): one restart.
+    assert!(run_ensure(&s));
     assert!(
         wait_lock_version(&s, VERSION, common::POLL_CEILING),
         "the newer build replaced the older daemon"
@@ -1251,7 +1273,7 @@ fn an_upgrade_restart_fires_once_and_then_leaves_the_daemon_alone() {
 
     // Quiescence: the versions now match, so nothing further happens however often it is checked.
     for lap in 0..6 {
-        assert!(run_ensure_with(&s, &cfg), "lap {lap}");
+        assert!(run_ensure(&s), "lap {lap}");
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(
             daemon_pid(&s, Duration::from_secs(1)),
@@ -1275,9 +1297,6 @@ fn an_older_build_never_evicts_a_newer_daemon() {
     }
     let s = Scratch::new_daemon("daemon");
     let _pane = new_pane(&s, "s1");
-    let cfg = s.workdir.join("restart-on-upgrade.toml");
-    std::fs::write(&cfg, "[daemon]\nrestart_on_upgrade = true\n").unwrap();
-
     // A daemon from a build far newer than the one running this test.
     let _newer = spawn_daemon_args(&s, &["--fake-version", "9.9.9"]);
     assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
@@ -1285,7 +1304,7 @@ fn an_older_build_never_evicts_a_newer_daemon() {
     assert!(wait_lock_version(&s, "9.9.9", common::POLL_CEILING));
 
     for lap in 0..4 {
-        assert!(run_ensure_with(&s, &cfg), "lap {lap}");
+        assert!(run_ensure(&s), "lap {lap}");
         std::thread::sleep(Duration::from_millis(50));
         assert_eq!(
             daemon_pid(&s, Duration::from_secs(1)),
@@ -1308,9 +1327,6 @@ fn a_dead_daemons_stale_lock_is_replaced_rather_than_acted_on() {
     }
     let s = Scratch::new_daemon("daemon");
     let _pane = new_pane(&s, "s1");
-    let cfg = s.workdir.join("restart-on-upgrade.toml");
-    std::fs::write(&cfg, "[daemon]\nrestart_on_upgrade = true\n").unwrap();
-
     let mut old = spawn_daemon_args(&s, &["--fake-version", "0.0.1"]);
     assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
     let old_pid = daemon_pid(&s, common::POLL_CEILING).expect("the old daemon records its pid");
@@ -1329,12 +1345,218 @@ fn a_dead_daemons_stale_lock_is_replaced_rather_than_acted_on() {
 
     // The flock is free, so this is an ordinary start, not an eviction. What matters is the result:
     // the new daemon owns the lock and the stale body is gone, replaced by its own.
-    assert!(run_ensure_with(&s, &cfg));
+    assert!(run_ensure(&s));
     assert!(
         wait_lock_version(&s, VERSION, common::POLL_CEILING),
         "the started daemon stamps its own build over the dead one's"
     );
     let new_pid = daemon_pid(&s, common::POLL_CEILING).expect("the new daemon records its pid");
+    assert_ne!(new_pid, old_pid);
+    terminate(new_pid);
+}
+
+/// The upgrade check does not need `--ensure`, and does not need `autostart`: an ordinary surface
+/// runs it. This is what makes an upgrade land on the next command instead of at the next tmux
+/// server restart, which is the whole point of the knob defaulting on.
+///
+/// The negative half is in the same test on purpose: against a daemon of THIS build the surface
+/// must leave everything alone, so the cost of the default is one lock read on every command and
+/// nothing else. An absent cooldown stamp is the proof, since it is written before the signal.
+#[test]
+fn a_user_surface_replaces_an_older_daemon_without_autostart() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+
+    // Same build: nothing to do, and the surface must prove it did nothing.
+    let same = spawn_daemon(&s);
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    let same_pid = daemon_pid(&s, common::POLL_CEILING).expect("the daemon records its pid");
+    assert!(wait_lock_version(&s, VERSION, common::POLL_CEILING));
+    assert!(run_status(&s).status.success());
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        daemon_pid(&s, Duration::from_secs(1)),
+        Some(same_pid),
+        "equal versions never restart"
+    );
+    assert!(
+        restart_stamp(&s).is_none(),
+        "no restart was even attempted, so no cooldown stamp exists"
+    );
+    drop(same);
+    assert!(run_stop(&s).status.success());
+
+    // Older build: the surface replaces it, with `autostart` untouched (still off).
+    let mut old = spawn_daemon_args(&s, &["--fake-version", "0.0.1"]);
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    let old_pid = daemon_pid(&s, common::POLL_CEILING).expect("the old daemon records its pid");
+    assert!(wait_lock_version(&s, "0.0.1", common::POLL_CEILING));
+
+    assert!(run_status(&s).status.success());
+    assert!(
+        wait_lock_version(&s, VERSION, common::POLL_CEILING),
+        "a plain `tma status` picked up the upgrade"
+    );
+    assert!(
+        old.wait_exit(common::POLL_CEILING),
+        "the older daemon exited rather than lingering"
+    );
+    let new_pid = daemon_pid(&s, common::POLL_CEILING).expect("the replacement records its pid");
+    assert_ne!(new_pid, old_pid);
+    assert!(
+        wait_for_socket(&s, common::POLL_CEILING).is_some(),
+        "and the replacement is actually serving"
+    );
+    terminate(new_pid);
+}
+
+/// Replace-only: with no daemon running, a surface must not start one. Bringing a daemon up unasked
+/// is `[daemon] autostart`'s job and it is still off by default, so a user who never opted in sees
+/// no daemon appear no matter how often they run `tma`.
+#[test]
+fn a_user_surface_never_starts_a_daemon_that_was_not_running() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let _pane = new_pane(&s, "s1");
+
+    for lap in 0..3 {
+        assert!(run_status(&s).status.success(), "lap {lap}");
+    }
+    std::thread::sleep(Duration::from_millis(300));
+    assert!(
+        socket_file(&s).is_none(),
+        "no daemon may appear from a surface alone"
+    );
+    assert_eq!(daemon_pid(&s, Duration::from_millis(100)), None);
+}
+
+/// THE HOOK-PATH BUDGET. `tma event` fires on every tool call an agent makes, so the upgrade check
+/// must not cost it a second `tmux display-message` round trip: the check and the event's own
+/// daemon delivery key on the SAME `#{socket_path}`, and the bin resolves it once and hands it to
+/// both.
+///
+/// Measured rather than asserted from the code shape, because the regression is invisible in a
+/// diff: `tma` is pointed at a shim that logs every argv it is handed before exec'ing the real
+/// tmux, and the `#{socket_path}` reads are counted.
+#[test]
+fn a_hook_event_resolves_the_socket_path_exactly_once() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let pane = new_pane(&s, "s1");
+    let _daemon = spawn_daemon(&s);
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    assert!(wait_lock_version(&s, VERSION, common::POLL_CEILING));
+
+    let (shim, log) = tmux_logging_shim(&s);
+    let out = s
+        .command()
+        .args(["event", "--agent", "claude", "--kind", "Stop"])
+        .args(["--socket-name", &s.socket])
+        .env("TMA_TMUX_BIN", &shim)
+        .env("TMUX_PANE", &pane)
+        .env("TMA_NOTIFY_FROM_EVENT", "0")
+        .output()
+        .expect("run tma event");
+    assert!(out.status.success());
+
+    let calls = std::fs::read_to_string(&log).unwrap_or_default();
+    let resolutions = calls
+        .lines()
+        .filter(|line| line.contains("#{socket_path}"))
+        .count();
+    assert_eq!(
+        resolutions, 1,
+        "one `#{{socket_path}}` read per hook event, not one per consumer. Full tmux log:\n{calls}"
+    );
+}
+
+/// A `tmux` stand-in that appends its whole argv to a log file and then execs the real binary, so a
+/// test can count what `tma` asked tmux for. Returned as `(shim path, log path)`; `TMA_TMUX_BIN`
+/// points `tma` at it and nothing else in the suite is affected.
+fn tmux_logging_shim(s: &Scratch) -> (PathBuf, PathBuf) {
+    let shim = s.workdir.join("tmux-shim");
+    let log = s.workdir.join("tmux-calls.log");
+    let real = which_tmux().expect("tmux on PATH");
+    std::fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$*\" >> {log}\nexec {real} \"$@\"\n",
+            log = log.display(),
+            real = real.display()
+        ),
+    )
+    .expect("write shim");
+    let mut perms = std::fs::metadata(&shim).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perms, 0o755);
+    std::fs::set_permissions(&shim, perms).expect("chmod shim");
+    (shim, log)
+}
+
+/// The first `tmux` on this process's `PATH`, for the shim to exec.
+fn which_tmux() -> Option<PathBuf> {
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|dir| dir.join("tmux"))
+        .find(|p| p.is_file())
+}
+
+/// The hook path. `tma event` runs the same check, which is what covers a machine where nobody
+/// types `tma` at all: the agent's own hooks notice the stale daemon.
+///
+/// It has to be invisible while doing it. A hook's stderr can surface inside the agent's UI, so the
+/// contract is exit 0 with nothing on either stream, upgrade or no upgrade.
+#[test]
+fn a_hook_event_replaces_an_older_daemon_silently() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("daemon");
+    let pane = new_pane(&s, "s1");
+
+    let mut old = spawn_daemon_args(&s, &["--fake-version", "0.0.1"]);
+    assert!(wait_for_socket(&s, common::POLL_CEILING).is_some());
+    let old_pid = daemon_pid(&s, common::POLL_CEILING).expect("the old daemon records its pid");
+    assert!(wait_lock_version(&s, "0.0.1", common::POLL_CEILING));
+
+    let out = s
+        .command()
+        .args(["event", "--agent", "claude", "--kind", "Stop"])
+        .args(["--socket-name", &s.socket])
+        .env("TMUX_PANE", &pane)
+        .env("TMA_NOTIFY_FROM_EVENT", "0")
+        .output()
+        .expect("run tma event");
+    assert!(out.status.success(), "a hook event always exits 0");
+    assert_eq!(
+        String::from_utf8_lossy(&out.stderr),
+        "",
+        "nothing may reach a hook's stderr: the agent may render it"
+    );
+    assert_eq!(String::from_utf8_lossy(&out.stdout), "");
+
+    assert!(
+        wait_lock_version(&s, VERSION, common::POLL_CEILING),
+        "the hook picked up the upgrade"
+    );
+    assert!(
+        old.wait_exit(common::POLL_CEILING),
+        "the older daemon exited rather than lingering"
+    );
+    let new_pid = daemon_pid(&s, common::POLL_CEILING).expect("the replacement records its pid");
     assert_ne!(new_pid, old_pid);
     terminate(new_pid);
 }
@@ -1365,6 +1587,10 @@ fn install_hooks_offers_to_replace_a_resident_daemon_of_another_build() {
             "install-hooks",
             "claude",
             "--yes",
+            // Pinned: this suite's wrapper dir is not on `$PATH`, and the shipped `bare` default
+            // would refuse the install for a reason that has nothing to do with the skew offer.
+            "--wrapper-ref",
+            "absolute",
             "--socket-name",
             &s.socket,
         ])
@@ -1413,6 +1639,9 @@ fn install_hooks_leaves_a_matching_daemon_alone_and_silent() {
             "install-hooks",
             "claude",
             "--yes",
+            // Same pin as the skew test above, and for the same reason.
+            "--wrapper-ref",
+            "absolute",
             "--socket-name",
             &s.socket,
         ])

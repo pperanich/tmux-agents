@@ -228,11 +228,17 @@ pub struct DaemonSection {
     /// dispatch, and a failed spawn never fails or delays the caller.
     #[serde(default)]
     pub autostart: bool,
-    /// Opt-in automatic upgrade restart: when `true`, `tma daemon --ensure` replaces a resident
-    /// daemon whose recorded build is STRICTLY OLDER than the binary running the check. Default
-    /// `false`. Equal never restarts and older never evicts newer, so two installs sharing a server
-    /// cannot take turns; see [`crate::ipc::restart_decision`].
-    #[serde(default)]
+    /// Automatic upgrade restart, on by DEFAULT: a resident daemon whose recorded build is STRICTLY
+    /// OLDER than the binary running the check is replaced by this build. The check runs from
+    /// `tma daemon --ensure`, from every user-invoked surface, and from `tma event`, so an upgrade
+    /// is picked up on the next command rather than at the next tmux server restart.
+    ///
+    /// Opt OUT with `restart_on_upgrade = false`. The default is safe because every input is a veto:
+    /// strictly newer only (equal never restarts, older never evicts newer, so two installs sharing
+    /// a server cannot take turns), a version on both sides that parses, a recorded pid that is
+    /// still alive, and a 60 s cooldown between automatic restarts of the same server. See
+    /// [`crate::ipc::restart_decision`].
+    #[serde(default = "default_restart_on_upgrade")]
     pub restart_on_upgrade: bool,
 }
 
@@ -248,6 +254,9 @@ fn default_zero_member_recheck_secs() -> u64 {
 fn default_demote_edges() -> u32 {
     crate::capture::DEMOTE_EDGES
 }
+fn default_restart_on_upgrade() -> bool {
+    true
+}
 
 impl Default for DaemonSection {
     fn default() -> Self {
@@ -257,7 +266,7 @@ impl Default for DaemonSection {
             zero_member_recheck_secs: default_zero_member_recheck_secs(),
             demote_edges: default_demote_edges(),
             autostart: false,
-            restart_on_upgrade: false,
+            restart_on_upgrade: default_restart_on_upgrade(),
         }
     }
 }
@@ -527,13 +536,16 @@ pub struct FocusSection {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum WrapperRef {
-    /// The wrapper's absolute path. Found whatever `$PATH` the agent inherits, which is why it is
-    /// the default; machine-specific, so a synced config points at another machine's home.
-    #[default]
+    /// The wrapper's absolute path. Choose it when the agent is launched with a `$PATH` narrower
+    /// than your shell's and you cannot widen it: a GUI-launched agent (Cursor started from the
+    /// dock, say) inherits the desktop session's `$PATH`, not your login shell's.
     Absolute,
-    /// The bare name `tma-hook`, resolved off `$PATH` when the hook fires. One string on every
-    /// machine, at the cost of needing the wrapper's directory on the `$PATH` each agent inherits
-    /// (a GUI-launched agent often has a narrower one than your shell).
+    /// The bare name `tma-hook`, resolved off `$PATH` when the hook fires. The default: one string
+    /// that is correct on every machine, so a synced agent config keeps working, and its failure
+    /// mode is loud. The wrapper not being on `$PATH` is caught at install time (install refuses
+    /// and says so), while an absolute path pointing at another machine's home fails silently, with
+    /// hooks that simply never fire.
+    #[default]
     Bare,
 }
 
@@ -797,8 +809,9 @@ mod tests {
         );
         // Daemon autostart is opt-in: off by default (the daemon stays strictly additive).
         assert!(!c.daemon.autostart);
-        // So is the automatic upgrade restart: a daemon is never replaced under you by default.
-        assert!(!c.daemon.restart_on_upgrade);
+        // The automatic upgrade restart is opt-OUT: an upgraded tma replaces the older daemon it
+        // finds rather than leaving a stale build serving until the tmux server restarts.
+        assert!(c.daemon.restart_on_upgrade);
         // Notify + focus defaults: off / none. `on` defaults to blocked-only.
         assert!(!c.notify.from_event);
         assert!(c.notify.command.is_none());
@@ -1053,6 +1066,35 @@ mod tests {
             !c.daemon.autostart,
             "autostart stays default when only bell is set"
         );
+    }
+
+    /// The upgrade restart is the one daemon knob that ships ON, so the key that matters is the
+    /// opt-OUT: `false` has to parse and actually disable it, including from a `[daemon]` table
+    /// that sets nothing else.
+    #[test]
+    fn restart_on_upgrade_opts_out_to_false() {
+        let c: Config = toml::from_str("[daemon]\nrestart_on_upgrade = false\n").unwrap();
+        assert!(!c.daemon.restart_on_upgrade);
+        assert!(
+            !c.daemon.autostart,
+            "opting out of the restart leaves autostart at its own default"
+        );
+
+        let on: Config = toml::from_str("[daemon]\nsweep_secs = 45\n").unwrap();
+        assert!(
+            on.daemon.restart_on_upgrade,
+            "a `[daemon]` table that does not mention the key keeps the default"
+        );
+    }
+
+    /// The wrapper reference agent configs carry defaults to the bare name: one string that is the
+    /// same on every machine, whose failure (not on `$PATH`) install refuses at write time.
+    #[test]
+    fn wrapper_ref_defaults_to_bare() {
+        assert_eq!(WrapperRef::default(), WrapperRef::Bare);
+        assert_eq!(Config::default().install.wrapper_ref, WrapperRef::Bare);
+        let c: Config = toml::from_str("[install]\nwrapper_ref = \"absolute\"\n").unwrap();
+        assert_eq!(c.install.wrapper_ref, WrapperRef::Absolute);
     }
 
     // ---- config example ⇄ Config schema drift guard --------------------------------

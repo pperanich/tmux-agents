@@ -14,7 +14,7 @@ use super::js_bridge::{
     PI_EXTENSION_SRC, PI_HOOK_TOKEN,
 };
 use super::json_value::Value;
-use super::paths::{tma_bin, ConfigPaths};
+use super::paths::{same_wrapper_file, tma_bin, ConfigPaths};
 use super::statusline::{
     classify_statusline, edit_statusline_install, edit_statusline_uninstall, Statusline,
     StatuslineWiring,
@@ -115,15 +115,31 @@ fn events_wired(
                 })
                 .map(|a| a.iter().flat_map(entry_commands).collect())
                 .unwrap_or_default();
-            if commands.contains(&cmd) {
+            let ours: Vec<&String> = commands
+                .iter()
+                .filter(|c| is_wrapper_command(c, agent, event))
+                .collect();
+            if commands.contains(&cmd)
+                || ours
+                    .iter()
+                    .any(|c| entry_names_the_same_wrapper(c, wrapper, agent, event))
+            {
                 EventWiring::Current
-            } else if commands.iter().any(|c| is_wrapper_command(c, agent, event)) {
+            } else if !ours.is_empty() {
                 EventWiring::Stale
             } else {
                 EventWiring::Absent
             }
         })
         .collect()
+}
+
+/// Whether a wired command `<reference> <agent> <event>` reaches the same wrapper file `expected`
+/// does. The suffix is already known to match ([`is_wrapper_command`] gated the caller), so this
+/// only has to judge the program part.
+fn entry_names_the_same_wrapper(cmd: &str, expected: &Path, agent: &str, event: &str) -> bool {
+    cmd.strip_suffix(&format!(" {agent} {event}"))
+        .is_some_and(|reference| same_wrapper_file(reference, expected))
 }
 
 /// One declared event's wiring state. `Stale` is the distinction that matters: an entry that is

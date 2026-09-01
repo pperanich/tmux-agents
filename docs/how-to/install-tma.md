@@ -121,20 +121,27 @@ To pull the package into your own flake, use the overlay:
 
 ### The hook wrapper
 
-`tma install-hooks` writes a small `tma-hook` wrapper next to the `tma` binary and
-points the agent's config at that path. That directory is the read-only store
-here, so the Nix package installs the wrapper itself: `install-hooks` finds its
-own script already in place and writes nothing. Nothing to set, and `tma-hook`
-comes onto your `PATH` with the binary.
+`tma install-hooks` writes a small `tma-hook` wrapper next to the `tma` binary.
+That directory is the read-only store here, so the Nix package installs the
+wrapper itself: `install-hooks` finds its own script already in place and writes
+nothing. Nothing to set, and `tma-hook` comes onto your `PATH` with the binary,
+which is all the default `[install] wrapper_ref = "bare"` needs: agent configs get
+the name `tma-hook` and resolve it off `$PATH` at hook time. `tma doctor` shows
+the reference and the file behind it:
 
-What lands in the agent config is a path outside the store: your profile's
+```
+wrapper: tma-hook ✓ on $PATH (/nix/store/<hash>-tma-<version>/bin/tma-hook)
+```
+
+`wrapper_ref = "absolute"` is where the store needs care, and tma takes it. What
+lands in the agent config is then a path outside the store: your profile's
 `~/.nix-profile/bin/tma-hook`, or `/etc/profiles/per-user/<user>/bin/tma-hook`
 under Home Manager. tma will not write the store path itself, because that path
 names one build and is deleted when the build is collected, which would break
 your hooks at the next `nix flake update` rather than at anything you did. It
 finds the profile entry by walking `$PATH` for a `tma-hook` outside any store
 that resolves to the same file, so the substitution only happens when the two are
-provably the same install. `tma doctor` shows both, reference first:
+provably the same install:
 
 ```
 wrapper: /etc/profiles/per-user/you/bin/tma-hook ✓ (/nix/store/<hash>-tma-<version>/bin/tma-hook)
@@ -144,14 +151,10 @@ Running straight from the store with no profile install (`nix run`, a `nix build
 result) has no such stable path to find, so tma wires the store path and warns
 that it will not survive collection.
 
-Two settings change this if you want them. `--wrapper-path <PATH>` (env
-`TMA_WRAPPER_PATH`) keeps the wrapper out of the store entirely by naming where
-it is written; `tma install-hooks --check` and `tma doctor` resolve it the same
-way install did, so export the variable rather than passing the flag once. And
-`[install] wrapper_ref = "bare"` writes the name `tma-hook` with no path at all,
-which is worth it when one agent config is shared between machines — though it
-then depends on the `$PATH` each agent inherits, where an absolute reference does
-not.
+`--wrapper-path <PATH>` (env `TMA_WRAPPER_PATH`) keeps the wrapper out of the
+store entirely by naming where it is written; `tma install-hooks --check` and
+`tma doctor` resolve it the same way install did, so export the variable rather
+than passing the flag once.
 
 ## With the Home Manager module
 

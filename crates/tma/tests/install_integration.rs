@@ -97,13 +97,29 @@ impl Scratch {
     /// [`Self::install_hooks`] with extra environment for the child. The `--wrapper-ref bare` tests
     /// set `PATH`, which they can only do per-spawn: the suite runs in parallel, so mutating this
     /// process's environment would leak into every other test.
+    ///
+    /// A caller that names no `--wrapper-ref` gets `absolute` pinned. The shipped default is
+    /// `bare`, and under it what these assertions see would depend on whether the machine running
+    /// the suite happens to have a real `tma-hook` on `$PATH`, and the harness writes its own to
+    /// a temp dir that is not. The default is covered on its own terms by
+    /// [`the_default_wrapper_ref_writes_the_bare_name`].
     fn install_hooks_env(&self, extra: &[&str], env: &[(&str, &str)]) -> Output {
+        let mut args: Vec<String> = extra.iter().map(|s| s.to_string()).collect();
+        if !extra.contains(&"--wrapper-ref") {
+            args.extend(["--wrapper-ref".to_string(), "absolute".to_string()]);
+        }
+        self.install_hooks_raw(&args, env)
+    }
+
+    /// [`Self::install_hooks_env`] with nothing pinned but the paths: the one way to exercise the
+    /// shipped `[install] wrapper_ref` default.
+    fn install_hooks_raw(&self, extra: &[String], env: &[(&str, &str)]) -> Output {
         let settings = self.settings();
         let cfg = self.config_dir();
         let wrapper = self.wrapper();
         let codex_config = self.codex_config();
         let mut args: Vec<String> = vec!["install-hooks".into()];
-        args.extend(extra.iter().map(|s| s.to_string()));
+        args.extend(extra.iter().cloned());
         args.extend([
             "--settings".into(),
             settings.display().to_string(),
@@ -1176,12 +1192,116 @@ fn bare_wrapper_ref_writes_the_name_for_shell_and_argv_agents() {
         "--check must pass right after a bare install"
     );
 
-    // And it is honest when the posture disagrees: checking for absolute wiring against a bare
-    // install is real drift, since the two write different strings. Re-installing repoints them.
-    let out = s.install_hooks(&["--check"]);
+    // Checking the OTHER posture against the same wiring also passes, and that is deliberate:
+    // drift is judged by what a reference resolves to, not by how it is spelled. The bare name and
+    // the absolute path are the same file here, so neither posture reports the other as stale.
     assert!(
-        !out.status.success(),
-        "an absolute --check over bare wiring is drift, not a pass"
+        s.install_hooks_env(&["--check", "--wrapper-ref", "absolute"], &on_path)
+            .status
+            .success(),
+        "two spellings of one wrapper file are not drift"
+    );
+}
+
+/// With no `--wrapper-ref` and no config saying otherwise, install writes the BARE name: `bare` is
+/// the shipped default, so a config copied to another machine keeps working instead of naming a
+/// home directory that machine does not have.
+///
+/// The rest is the upgrade path, which is the part that decides whether this default is shippable.
+/// An install made under the old default carries the wrapper's absolute path, and that must NOT
+/// start reporting as drift the day tma is upgraded: `--check` asks what a reference resolves to,
+/// not how it is spelled. Wiring that resolves to nothing is the case that still earns the report.
+#[test]
+fn the_default_wrapper_ref_writes_the_bare_name() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new();
+    assert!(s
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
+        .status
+        .success());
+    std::fs::write(s.settings(), "{}\n").unwrap();
+    let path = s.path_with_wrapper_dir();
+    let on_path = [("PATH", path.as_str())];
+
+    let out = s.install_hooks_raw(&["claude".to_string(), "--yes".to_string()], &on_path);
+    assert!(
+        out.status.success(),
+        "install failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let abs = s.wrapper().display().to_string();
+    let settings = std::fs::read_to_string(s.settings()).unwrap();
+    assert!(
+        settings.contains("tma-hook claude Notification") && !settings.contains(&abs),
+        "the default names the wrapper rather than spelling out its path: {settings}"
+    );
+
+    // The pre-upgrade shape: entries carrying the wrapper's absolute path, repointed in place
+    // rather than added beside the bare ones (an entry is recognised as tma's by its shape).
+    assert!(
+        s.install_hooks_env(&["claude", "--yes", "--wrapper-ref", "absolute"], &on_path)
+            .status
+            .success(),
+        "re-installing with absolute paths must succeed"
+    );
+    let absolute_settings = std::fs::read_to_string(s.settings()).unwrap();
+    assert!(
+        absolute_settings.contains(&abs),
+        "the absolute install really did write the path"
+    );
+    assert_eq!(
+        absolute_settings
+            .matches("tma-hook claude Notification")
+            .count(),
+        1,
+        "the switch repoints the existing entry rather than adding one beside it"
+    );
+
+    // THE UPGRADE CASE: those absolute entries read as installed under the bare default, because
+    // the path and the on-PATH bare name are one file. Nobody's doctor turns red on upgrade.
+    let check = s.install_hooks_raw(&["--check".to_string()], &on_path);
+    assert!(
+        check.status.success(),
+        "an absolute entry that resolves to the wrapper is not drift: {}",
+        String::from_utf8_lossy(&check.stderr)
+    );
+
+    // Wiring that resolves to NOTHING still is. Point the entries at a path that does not exist.
+    let dangling = s.workdir.join("gone/tma-hook");
+    let rewritten = absolute_settings.replace(&abs, &dangling.display().to_string());
+    std::fs::write(s.settings(), &rewritten).unwrap();
+    let stale = s.install_hooks_raw(&["--check".to_string()], &on_path);
+    assert!(
+        !stale.status.success(),
+        "an entry naming a wrapper that is not there is real drift"
+    );
+    assert!(
+        String::from_utf8_lossy(&stale.stderr).contains("stale"),
+        "and it is reported as stale: {}",
+        String::from_utf8_lossy(&stale.stderr)
+    );
+
+    // And so is a bare reference that `$PATH` cannot answer, which is the bare posture's own
+    // failure mode: the wiring is spelled exactly right and still reaches nothing.
+    assert!(
+        s.install_hooks_env(&["claude", "--yes"], &on_path)
+            .status
+            .success(),
+        "repoint back to the bare name"
+    );
+    let off_path = s.path_without_wrapper();
+    let lost = s.install_hooks_raw(&["--check".to_string()], &[("PATH", off_path.as_str())]);
+    assert!(
+        !lost.status.success(),
+        "a bare name nothing on $PATH answers is drift"
+    );
+    assert!(
+        String::from_utf8_lossy(&lost.stderr).contains("$PATH"),
+        "and the report names the reason: {}",
+        String::from_utf8_lossy(&lost.stderr)
     );
 }
 

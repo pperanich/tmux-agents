@@ -320,6 +320,40 @@ fn on_path(name: &Path) -> Option<PathBuf> {
     on_path_in(name, &std::env::var_os("PATH")?)
 }
 
+/// Whether a wrapper reference an agent config already carries names the SAME FILE as the one this
+/// build would write. The drift question `--check` and `tma doctor` ask.
+///
+/// Spelling is not the question. `[install] wrapper_ref` defaults to `bare`, so a config written by
+/// an older tma names the wrapper's absolute path where this build would write `tma-hook`: two
+/// spellings of one file, wired correctly, and reporting that as stale would turn every existing
+/// install red on upgrade for nothing. Resolution is the question: a bare name off `$PATH`, a path
+/// as written, both canonicalized. Anything that does not resolve is genuinely broken wiring and
+/// reads as stale, which is the case worth a report.
+///
+/// Install still writes the reference the config asks for; this only governs what is REPORTED.
+pub(super) fn same_wrapper_file(installed: &str, expected: &Path) -> bool {
+    let installed = Path::new(installed.trim());
+    installed == expected
+        || match (resolve_reference(installed), resolve_reference(expected)) {
+            (Some(a), Some(b)) => a == b,
+            _ => false,
+        }
+}
+
+/// Resolve one wrapper reference to a canonical file: a bare name off `$PATH` the way the agent
+/// would, anything with a directory in it as written. `None` when it resolves to nothing.
+fn resolve_reference(reference: &Path) -> Option<PathBuf> {
+    let bare = reference
+        .parent()
+        .is_none_or(|parent| parent.as_os_str().is_empty());
+    let file = if bare {
+        on_path(reference)?
+    } else {
+        reference.to_path_buf()
+    };
+    file.canonicalize().ok().filter(|p| p.is_file())
+}
+
 /// [`on_path`] over an explicit `PATH` value, so the search is testable without mutating the
 /// environment of a parallel suite. An empty entry means the current directory to a shell; it is
 /// skipped, since a wrapper answered by whatever directory the agent started in is not a wiring
@@ -502,6 +536,48 @@ mod tests {
             on_path_in(name, &with_empty),
             None,
             "an empty entry is not the current directory"
+        );
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Drift is a question about files, not about strings. Two spellings that land on one file are
+    /// the same wiring; a spelling that lands on nothing is stale however plausible it looks.
+    ///
+    /// The symlink case is the one that matters in practice: a profile entry
+    /// (`~/.nix-profile/bin/tma-hook`, a stow tree, a Homebrew `bin`) pointing at the real file is
+    /// what an install writes, and reporting it as different from its target would be a lie.
+    #[test]
+    fn same_wrapper_file_compares_targets_not_spellings() {
+        let dir = scratch("same_wrapper");
+        let real = dir.join(WRAPPER_NAME);
+        touch_exe(&real);
+        let real_str = real.display().to_string();
+
+        assert!(same_wrapper_file(&real_str, &real), "a path is itself");
+
+        let link = dir.join("profile-tma-hook");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        assert!(
+            same_wrapper_file(&link.display().to_string(), &real),
+            "a symlink and its target are one wrapper"
+        );
+
+        let other = dir.join("other").join(WRAPPER_NAME);
+        touch_exe(&other);
+        assert!(
+            !same_wrapper_file(&other.display().to_string(), &real),
+            "two real files are two wrappers"
+        );
+
+        let gone = dir.join("gone").join(WRAPPER_NAME);
+        assert!(
+            !same_wrapper_file(&gone.display().to_string(), &real),
+            "a reference to nothing is stale, not equivalent"
+        );
+        assert!(
+            !same_wrapper_file(&real_str, &gone),
+            "and so is wiring whose expected target has gone"
         );
 
         std::fs::remove_dir_all(&dir).unwrap();

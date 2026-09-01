@@ -60,7 +60,7 @@ osc = false                  # also post an OSC 9 desktop notification to the pa
 events = false               # set true to also install a pane-focus-in hook (needs `focus-events on`)
 
 [install]                    # what install-hooks writes into your agent configs
-wrapper_ref = "absolute"     # "bare" writes just `tma-hook`, resolved off $PATH (portable)
+wrapper_ref = "bare"         # writes just `tma-hook`, resolved off $PATH; "absolute" writes the path
 
 [tmux]                       # which tmux-compatible binary tma spawns
 # bin = "tmate"              # default: plain `tmux` off PATH; env TMA_TMUX_BIN overrides this
@@ -74,7 +74,7 @@ quiet_ms = 1000              # per-pane active->quiet capture trigger
 zero_member_recheck_secs = 1 # clientless liveness recheck
 demote_edges = 5             # hook-liveness demotion threshold
 autostart = false            # auto-start the daemon on first use of a surface
-restart_on_upgrade = false   # let a newer tma replace an older resident daemon
+restart_on_upgrade = true    # let a newer tma replace an older resident daemon
 
 [[agent]]                    # per-agent overrides (repeatable)
 name = "claude"
@@ -172,20 +172,34 @@ exists so a test or CI run can flip the fire path without writing a config file.
 
 | key | default | meaning |
 |---|---|---|
-| `wrapper_ref` | `"absolute"` | `"absolute"` writes the wrapper's full path into each agent config. `"bare"` writes the name `tma-hook` and lets the agent resolve it off `$PATH`. |
+| `wrapper_ref` | `"bare"` | `"bare"` writes the name `tma-hook` into each agent config and lets the agent resolve it off `$PATH`. `"absolute"` writes the wrapper's full path. |
 
-`"absolute"` writes one path that is not the wrapper's own: when the wrapper
-lives in a package store (`/nix/store`, `/gnu/store`), the config gets the stable
-path that reaches it instead — your profile's `bin`, found by walking `$PATH` for
-a `tma-hook` outside the store that resolves to the same file. A store path names
-one build and is deleted with it, so writing one would break your hooks at the
-next upgrade. `tma doctor` prints the reference first and the file it points at in
-parentheses.
+`"bare"` is the default because it fails loudly. One string, `tma-hook`, is
+correct on every machine, so a `~/.claude/settings.json` synced between a Mac and
+a Linux box works on both. Its failure mode is that the wrapper's directory has to
+be on the `$PATH` each agent inherits, and that failure is caught at the one moment
+there is a person to tell: `tma install-hooks` refuses to wire anything when
+`tma-hook` is not findable, and `tma doctor` reports whether `$PATH` still answers
+it:
 
-The default is machine-specific by construction: `/Users/you/.local/bin/tma-hook`
-on macOS is `/home/you/.local/bin/tma-hook` on Linux, so a `~/.claude/settings.json`
-synced between the two carries a path that only works on one. `"bare"` writes one
-string that works on both.
+```
+wrapper: tma-hook ✓ on $PATH (/home/you/.local/bin/tma-hook)
+```
+
+`"absolute"` fails silently by comparison. `/Users/you/.local/bin/tma-hook` on
+macOS is `/home/you/.local/bin/tma-hook` on Linux, and a synced config carrying the
+wrong one produces no error anywhere: the wrapper simply never runs, and hooks
+never fire. Choose it when an agent is launched with a `$PATH` you cannot widen:
+a GUI-launched editor (Cursor started from the dock) inherits the desktop
+session's `$PATH`, not your login shell's.
+
+When it is chosen, `"absolute"` writes one path that is not always the wrapper's
+own: when the wrapper lives in a package store (`/nix/store`, `/gnu/store`), the
+config gets the stable path that reaches it instead, your profile's `bin`, found
+by walking `$PATH` for a `tma-hook` outside the store that resolves to the same
+file. A store path names one build and is deleted with it, so writing one would
+break your hooks at the next upgrade. `tma doctor` prints the reference first and
+the file it points at in parentheses.
 
 A `$HOME`-relative string is not offered, because it would only work for half the
 agents. Three of the six wiring mechanisms spawn the wrapper as argv with no shell
@@ -194,20 +208,24 @@ those would pass `$HOME/.local/bin/tma-hook` through as a literal filename. A ba
 name is resolved by all six, since `execvp` searches `$PATH` exactly like a shell
 does.
 
-The cost of `"bare"` is that the wrapper's directory has to be on the `$PATH` each
-agent inherits, which for a GUI-launched editor is often narrower than your
-shell's. `tma install-hooks` refuses to wire anything when `tma-hook` is not
-findable, and `tma doctor` reports the reference and whether `$PATH` still answers
-it:
+Set the key before installing, or pass `--wrapper-ref bare` / `--wrapper-ref
+absolute` for one run.
 
-```
-wrapper: tma-hook ✓ on $PATH (/home/you/.local/bin/tma-hook)
-```
+### Switching between the two
 
-Set the key before installing, or pass `--wrapper-ref bare` for one run. The two
-postures write different strings, so after switching, run `tma install-hooks
---all` to repoint every agent already wired: until you do, `--check` reports the
-old wiring as stale.
+Wiring already installed under the other posture keeps working, and `--check` and
+`tma doctor` say so: drift is judged by what a reference RESOLVES to, not by how it
+is spelled. An absolute path and the bare name that finds the same file are the
+same wiring, so an install made before the default changed does not start
+reporting as stale. Only a reference that resolves to a different file, or to
+nothing at all, is drift.
+
+Run `tma install-hooks --all` when you want the configs rewritten to the posture
+you chose. One cost is worth knowing before you do: codex pins its `hooks.json`
+trust to the exact command string (`trusted_hash` per entry in
+`~/.codex/config.toml`), so rewriting those entries makes them inert until you
+open codex, run `/hooks`, and trust them again. Codex's `notify` channel and every
+other agent are unaffected.
 
 ## `[tmux]`: which tmux binary to spawn
 
@@ -255,16 +273,34 @@ The daemon is strictly additive; these knobs apply only when it runs.
 | `zero_member_recheck_secs` | `1` | Clientless-session liveness recheck cadence. |
 | `demote_edges` | `5` | Hook-liveness demotion threshold. |
 | `autostart` | `false` | Auto-start the daemon on first use of a surface (`ls`/`status`/`jump`/picker/`watch`/`wait`/`subscribe`). |
-| `restart_on_upgrade` | `false` | Let `tma daemon --ensure` replace a resident daemon whose build is **strictly older** than the binary running the check. |
+| `restart_on_upgrade` | `true` | Replace a resident daemon whose build is **strictly older** than the binary running the check. Runs from every user surface, from `tma event`, and from `tma daemon --ensure`. Set `false` to opt out. |
 
 ### `restart_on_upgrade`
 
 A daemon keeps the detection code it started with, so after upgrading `tma` the
-one already running is still the old build until something replaces it.
-`tma daemon --restart` does that on demand; this key does it for you, on the
-`--ensure` that the keybindings launcher and `autostart` already run.
+one already running is still the old build until something replaces it. Nothing
+about a package upgrade touches a resident process, so without this the daemon
+serving your tmux server can be days behind the CLI you are typing.
 
-The rule is deliberately one-directional. **Strictly newer replaces older.**
+On by default. The check runs before every user-invoked surface
+(`ls`/`status`/`jump`/picker/`watch`/`wait`/`subscribe`), from `tma event` (the
+hook path), and from `tma daemon --ensure`, so an upgrade is picked up on your
+next command rather than at the next tmux server restart. It does not need
+`autostart`, and it is not affected by it.
+
+It only ever REPLACES. With no daemon running it does nothing: starting one
+unasked is `autostart`'s job, and that is still off by default. Opt out with:
+
+```toml
+[daemon]
+restart_on_upgrade = false
+```
+
+`tma daemon --restart` remains the on-demand, direction-free version (it is how a
+deliberate downgrade is served).
+
+The rule is deliberately one-directional, which is what makes it safe to leave on.
+**Strictly newer replaces older.**
 Equal never restarts, and an older `tma` never touches a newer daemon — that is
 the direction of skew the wire protocol tolerates anyway (a capability the old
 peer does not know is a discriminant it rejects cleanly). Because the relation is
@@ -286,6 +322,9 @@ the socket is bound but the daemon is still running its control-mode probe.
 Nothing is lost across either: a hook that cannot reach a daemon stamps the pane
 itself, `tma wait` degrades to polling, and notification de-duplication lives in
 a pane option that outlives the process.
+
+The common case, where the versions already match, costs one small file read and
+one liveness probe per command. That is the whole price of leaving it on.
 
 ## `[telemetry.windows]`: recognized model names
 

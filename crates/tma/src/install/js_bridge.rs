@@ -101,13 +101,27 @@ pub(super) fn uninstall_js_bridge(
     }
 }
 
-/// Whether a JS bridge is installed AND references the current wrapper (used by `--check`). A
-/// missing file, or a stale one pointing at a different wrapper, is drift.
+/// Whether a JS bridge is installed AND reaches the current wrapper (used by `--check`). A missing
+/// file, or one whose reference resolves to a different file (or to nothing), is drift. A rendered
+/// module written by an older tma spells the wrapper as an absolute path where this build would
+/// write the bare name; that is the same file, so it is not drift.
 pub(super) fn js_bridge_ok(path: &Path, wrapper: &Path, marker: &str) -> bool {
-    match std::fs::read_to_string(path) {
-        Ok(text) => text.contains(marker) && text.contains(&wrapper.display().to_string()),
-        Err(_) => false,
+    let Ok(text) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    if !text.contains(marker) {
+        return false;
     }
+    text.contains(&wrapper.display().to_string())
+        || embedded_wrapper(&text).is_some_and(|r| super::paths::same_wrapper_file(&r, wrapper))
+}
+
+/// The wrapper reference a rendered bridge carries, read back out of its `const TMA_HOOK = "…";`
+/// line (the one place [`render_js_bridge`] substitutes).
+fn embedded_wrapper(text: &str) -> Option<String> {
+    let rest = text.split_once("const TMA_HOOK = \"")?.1;
+    let (reference, _) = rest.split_once('"')?;
+    Some(reference.to_string())
 }
 
 /// Install the OpenCode plugin into its plugin dir.

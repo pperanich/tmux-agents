@@ -14,4 +14,4 @@
 mod daemon;
 mod notify;
 
-pub use daemon::{run_cli, DaemonOpts};
+pub use daemon::{evict_older_daemon, run_cli, DaemonOpts};
