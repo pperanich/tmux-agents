@@ -179,10 +179,13 @@ captured evidence (see D10, X3).
   2026-08-17: the sidebar framing is withdrawn. `tma watch --toggle` (which
   split/moved/killed a managed pane), the follow-the-jump pane move, and the `☰`
   status segment that drove them are removed; tma places no pane and moves none.
-  What remains is the surface itself, run wherever the user wants it — `prefix G`'s
-  own window, a hand-written split, or a terminal outside tmux. Rationale: a
-  managed pane is a second layout owner competing with the user's, and the popup
-  picker already covers the modal half of the loop.)*
+  What remains is the surface itself, run wherever the user wants it — a
+  hand-written split/window or a terminal outside tmux. Rationale: a managed pane
+  is a second layout owner competing with the user's, and the popup picker already
+  covers the modal half of the loop. 2026-08-30: the default `prefix G` placement
+  moves from a window in the current session to a dedicated temporary session;
+  its watcher exits after a jump, and either jump or quit destroys the session, so
+  this convenience surface leaves no dashboard behind in a work session.)*
 - **F22** Notifications on transition into `blocked` (daemon phase): tmux
   `display-message` as baseline; user-configurable hook command receiving structured
   env/JSON (enables desktop notifications, ntfy, etc.); MUST respect hysteresis (F12)

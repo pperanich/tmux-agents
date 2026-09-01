@@ -99,6 +99,9 @@ pub(crate) struct SurfaceEnv<'a> {
     pub(crate) config_path: Option<PathBuf>,
     pub(crate) manifest_dir: Option<PathBuf>,
     pub(crate) acting_client: Option<&'a str>,
+    /// Override for the return-trail origin of a jump. The temporary watch session points this at
+    /// the pane it was opened from; ordinary watchers and the picker resolve the live client pane.
+    pub(crate) jump_origin: Option<String>,
     /// The surface's row filter, applied to each refresh's rows on the way into the fold.
     pub(crate) filter: RowFilter,
 }
@@ -362,7 +365,12 @@ impl ExecuteEffect for Executor<'_> {
                 Some(Event::PreviewCaptured { pane, ansi })
             }
             Effect::Focus(row) => {
-                let r = jump::focus_agent(self.env.tmux, &row, self.env.acting_client);
+                let r = jump::focus_agent(
+                    self.env.tmux,
+                    &row,
+                    self.env.acting_client,
+                    self.env.jump_origin.as_deref(),
+                );
                 self.note_failure("jump", r);
                 None
             }
@@ -575,6 +583,7 @@ mod tests {
                 config_path: None,
                 manifest_dir: None,
                 acting_client: None,
+                jump_origin: None,
                 filter: RowFilter::excluding(None),
             },
             notices: Vec::new(),

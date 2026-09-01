@@ -95,7 +95,7 @@ set -g status-right '#(tma status) %H:%M'
 pane state fresh. The [getting-started tutorial](docs/tutorial/getting-started.md)
 walks the whole loop end to end, and [status line and
 keybindings](docs/how-to/install-the-keybindings.md) covers the picker, the
-watch window, and the jump bindings.
+temporary watch session, and the jump bindings.
 
 ## Configuration
 

@@ -40,13 +40,12 @@ pub(crate) struct Cli {
     /// `--socket-name`/`--manifest-dir`. An absent file is the zero-config floor (all defaults).
     #[arg(long = "config", global = true, value_name = "PATH")]
     pub(crate) config: Option<PathBuf>,
-    /// The invoking tmux client for the picker/jump/watch Enter-jump. The `run-shell` jump
-    /// bindings pass `--client "#{client_name}"` so the correct client is switched; absent, empty,
-    /// or a still-unexpanded format (a binding context that does not expand, such as
+    /// The invoking tmux client for picker/jump/watch navigation. The `run-shell` jump and
+    /// temporary-watch bindings pass `--client "#{client_name}"` so the correct client is switched;
+    /// absent, empty, or a still-unexpanded format (a context that does not expand, such as
     /// `display-popup`) falls back to targetless best-effort. Global (like
-    /// `--socket-name`/`--config`): read from one
-    /// canonical field regardless of position, so `tma --client X jump` and `tma jump --client X`
-    /// are identical.
+    /// `--socket-name`/`--config`): read from one canonical field regardless of position, so
+    /// `tma --client X jump` and `tma jump --client X` are identical.
     #[arg(long, short = 'c', global = true, value_name = "NAME")]
     pub(crate) client: Option<String>,
     #[command(subcommand)]
@@ -81,8 +80,8 @@ pub(crate) enum Command {
     /// pushes when present and degrading to an `--interval` poll otherwise (contract-identical). A
     /// plugin spawns this instead of a polling timer; it exits on a signal or when its stdout closes.
     Subscribe(SubscribeArgs),
-    /// Persistent live dashboard for a normal pane, window, or terminal of its own:
-    /// `new-window "tma watch"`. Enter jumps (stays open); `q`/Esc quits.
+    /// Persistent live dashboard for a normal pane, window, or terminal of its own. Enter jumps
+    /// and normally stays open; `--temporary-session` closes after a jump; `q`/Esc quits.
     Watch(WatchArgs),
     /// INTERNAL, UNSTABLE: bridge one agent hook event to a stamp. Agent configs reference the
     /// `tma-hook` wrapper, never this subcommand directly (see DAEMON.md).
@@ -430,6 +429,17 @@ pub(crate) struct SelectorArgs {
 #[derive(Clone, Debug)]
 pub(crate) struct StateSet(Vec<tma_core::StateToken>);
 
+impl StateSet {
+    /// Re-encode the parsed selector for the temporary watch child.
+    pub(crate) fn cli_value(&self) -> String {
+        self.0
+            .iter()
+            .map(|state| state.token())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+}
+
 impl SelectorArgs {
     pub(crate) fn selector(&self) -> tma_core::Selector {
         tma_core::Selector {
@@ -609,6 +619,16 @@ pub(crate) struct WatchArgs {
     /// `p` toggles back to the preview at runtime. A narrow pane still falls back to the list.
     #[arg(long)]
     pub(crate) table: bool,
+    /// Open the watcher in a dedicated temporary tmux session. A jump or quit closes that session;
+    /// this is the mode used by the default prefix-G binding.
+    #[arg(long = "temporary-session")]
+    pub(crate) temporary_session: bool,
+    /// INTERNAL: make a watch child quit after its jump. Set by the temporary-session launcher.
+    #[arg(long = "exit-on-jump", hide = true)]
+    pub(crate) exit_on_jump: bool,
+    /// INTERNAL: pane to record as the jump origin instead of the temporary watch pane.
+    #[arg(long = "origin-pane", hide = true, value_name = "ID")]
+    pub(crate) origin_pane: Option<String>,
     /// Show only the agents in scope. The watcher's own poll cycle still refreshes every pane.
     #[command(flatten)]
     pub(crate) selector: SelectorArgs,
@@ -1094,6 +1114,36 @@ mod tests {
         assert_eq!(pre.client.as_deref(), Some("c1"));
         assert_eq!(pre.client, post.client);
         assert!(matches!(pre.command, Some(Command::Watch(_))));
+    }
+
+    #[test]
+    fn temporary_watch_and_its_child_flags_parse_separately() {
+        let outer = Cli::parse_from([
+            "tma",
+            "watch",
+            "--temporary-session",
+            "--table",
+            "--client",
+            "c1",
+        ]);
+        match outer.command {
+            Some(Command::Watch(args)) => {
+                assert!(args.temporary_session && args.table);
+                assert!(!args.exit_on_jump);
+                assert!(args.origin_pane.is_none());
+            }
+            _ => panic!("watch command"),
+        }
+
+        let child = Cli::parse_from(["tma", "watch", "--exit-on-jump", "--origin-pane", "%7"]);
+        match child.command {
+            Some(Command::Watch(args)) => {
+                assert!(!args.temporary_session);
+                assert!(args.exit_on_jump);
+                assert_eq!(args.origin_pane.as_deref(), Some("%7"));
+            }
+            _ => panic!("watch command"),
+        }
     }
 
     /// The picker (no subcommand) reads the same global client field.

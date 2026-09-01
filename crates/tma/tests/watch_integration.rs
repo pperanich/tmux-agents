@@ -1,8 +1,8 @@
 //! Acceptance: `tma watch` jumps to the highlighted agent on Enter, plus the width-driven
 //! preview (present when wide, absent when narrow). Like the picker, `watch` runs an alt-screen TUI in
 //! a `home` pane needing an attached PTY client (via a Python pty-fork helper; skips without python3).
-//! Unlike the picker, `watch` is persistent (no close on Enter), so this asserts the jump landed and
-//! attention cleared, then lets `Drop` tear the server down. The preview tests set pane width with
+//! A plain `watch` is persistent (no close on Enter); the managed temporary-session mode is covered
+//! separately and must close on both quit and jump. The preview tests set pane width with
 //! `window-size manual` + `resize-window`; the discriminator is the work pane's permission prompt,
 //! which renders only inside the preview, so its presence proves the split and its absence the MVP.
 
@@ -126,6 +126,93 @@ fn launch_watch(s: &Scratch) {
         wait_capture_contains(&s.socket, "home", "agents (", POLL_CEILING),
         "watch must render its first frame within 4 s after launch (startup regression)"
     );
+}
+
+/// The managed prefix-G shape opens a one-use session rather than adding a window to `home`.
+/// Quitting destroys it even under a hostile global `remain-on-exit`; opening it again and jumping
+/// destroys it after focus, while `jump --back` still returns to the pane from which G was pressed.
+#[test]
+fn temporary_watch_session_closes_on_quit_and_jump() {
+    let Some(s) = setup_blocked_agent("watch-temporary") else {
+        return;
+    };
+    let home_pane = s.display("home", "#{pane_id}");
+    let work_pane = s.display("work", "#{pane_id}");
+    let client = String::from_utf8_lossy(&s.tmux(&["list-clients", "-F", "#{client_name}"]).stdout)
+        .trim()
+        .to_string();
+    let client_pid =
+        String::from_utf8_lossy(&s.tmux(&["list-clients", "-F", "#{client_pid}"]).stdout)
+            .trim()
+            .to_string();
+    let temporary = format!("tma-watch-{client_pid}");
+
+    // Same command shape install-keys emits, with explicit scratch-only globals and an absolute
+    // test binary in place of the installed `tma` PATH lookup.
+    let command = format!(
+        "'{}' watch --temporary-session --table --client \"#{{client_name}}\" \
+         --socket-name '{}' --manifest-dir '{}' --config '{}'",
+        s.bin(),
+        s.socket,
+        s.workdir.display(),
+        tma_test_support::empty_config_path().display(),
+    );
+    assert!(s
+        .tmux(&["bind-key", "G", "run-shell", &command])
+        .status
+        .success());
+    // The launcher must override this for its one pane; otherwise q leaves a dead temporary session.
+    assert!(s
+        .tmux(&["set-option", "-gw", "remain-on-exit", "on"])
+        .status
+        .success());
+
+    s.send_client_keys("\x02G");
+    poll_until(
+        "prefix G to switch into the temporary watch session",
+        || s.display("", "#{session_name}") == temporary,
+    );
+    assert!(
+        wait_capture_contains(&s.socket, &temporary, "agent", POLL_CEILING),
+        "the temporary watcher must render"
+    );
+    s.tmux(&["send-keys", "-t", &temporary, "q"]);
+    poll_until("q to destroy the temporary watch session", || {
+        !s.tmux(&["has-session", "-t", &temporary]).status.success()
+    });
+    assert_eq!(s.display("", "#{pane_id}"), home_pane, "q returns home");
+
+    // Re-open, then jump to the highlighted blocked pane. The watch child exits after its deferred
+    // focus batch, taking the temporary session with it.
+    s.send_client_keys("\x02G");
+    poll_until("prefix G to reopen the temporary watch session", || {
+        s.display("", "#{session_name}") == temporary
+    });
+    assert!(wait_capture_contains(
+        &s.socket,
+        &temporary,
+        "agent",
+        POLL_CEILING
+    ));
+    s.tmux(&["send-keys", "-t", &temporary, "Enter"]);
+    poll_until("temporary watch Enter to land on the blocked agent", || {
+        s.display("", "#{pane_id}") == work_pane
+    });
+    poll_until("jump to destroy the temporary watch session", || {
+        !s.tmux(&["has-session", "-t", &temporary]).status.success()
+    });
+
+    // The launcher carried home into the child as its origin; the dead temporary pane never enters
+    // the trail, so back remains useful after the session has disappeared.
+    let back = s.tma(&["jump", "--back", "--client", &client]);
+    assert!(
+        back.status.success(),
+        "jump --back failed: {}",
+        String::from_utf8_lossy(&back.stderr)
+    );
+    poll_until("jump --back to return to the prefix-G origin", || {
+        s.display("", "#{pane_id}") == home_pane
+    });
 }
 
 #[test]

@@ -35,21 +35,21 @@ struct Binding {
 /// The default bindings tma writes. Popup geometry is hardcoded 80% x 60% (tma-runtime's `[picker]`
 /// config exposes glyphs/colors only, no geometry). `run-shell` format-expands its shell-command, so
 /// `--client "#{client_name}"` resolves to the client that pressed the key; `display-popup` and
-/// `split-window` do NOT (verified on 3.6a: the popup receives the literal `#{client_name}`), so the
-/// picker and `watch` bindings pass no `--client` and let tma resolve the acting client itself —
-/// from inside a popup or a pane, the targetless resolution finds the invoking client.
+/// `split-window` do NOT (verified on 3.6a: the popup receives the literal `#{client_name}`). The
+/// popup therefore passes no client, while the temporary-watch and direct-jump `run-shell` bindings
+/// pass the exact invoking one.
 const BINDINGS: &[Binding] = &[
     Binding {
         key: "a",
         command: "display-popup -E -w 80% -h 60% 'tma'",
     },
     Binding {
-        // `G` (uppercase): the persistent watcher, in a window of its own (`g` is taken by
-        // `jump --blocked`; `G` is free in the stock prefix table). A new window rather than a split,
-        // so the table gets the full terminal width; `new-window` does not format-expand, so no
-        // `--client`.
+        // `G` (uppercase): the full-width watcher in a dedicated temporary session (`g` is taken
+        // by `jump --blocked`; `G` is free in the stock prefix table). `run-shell` expands the
+        // invoking client, then `watch --temporary-session` creates/switches to the one-use session;
+        // Enter or q makes its only pane exit, so it cannot remain in the user's work session.
         key: "G",
-        command: "new-window 'tma watch --table'",
+        command: "run-shell 'tma watch --temporary-session --table --client \"#{client_name}\"'",
     },
     Binding {
         key: "j",
@@ -550,7 +550,7 @@ mod tests {
 # tma keybindings, managed by `tma install-keys`. Do not hand-edit; re-run to update,
 # or `tma install-keys --uninstall` to remove.
 bind-key a display-popup -E -w 80% -h 60% 'tma'
-bind-key G new-window 'tma watch --table'
+bind-key G run-shell 'tma watch --temporary-session --table --client \"#{client_name}\"'
 bind-key j run-shell 'tma jump --attention --client \"#{client_name}\"'
 bind-key g run-shell 'tma jump --blocked --client \"#{client_name}\"'
 bind-key b run-shell 'tma jump --back --client \"#{client_name}\"'

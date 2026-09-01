@@ -600,7 +600,9 @@ Persistent live dashboard for a normal pane, tmux window, or terminal of its own
 It shows the picker's rows in a live-updating list, refreshing every second and
 on a focus-change nudge. Enter jumps the acting client to the highlighted agent
 and clears its attention but keeps the dashboard open (non-modal); `q`, Esc, or
-`ctrl-c` quit.
+`ctrl-c` quit. `--temporary-session` instead opens the dashboard in a dedicated
+tmux session and closes that session after a jump or quit; the default `prefix G`
+binding uses this mode.
 
 `a` opens the [action menu](#tma-act) for the highlighted agent — the same
 `display-menu` `tma act --menu` renders, but aimed at the pane under the cursor
@@ -632,12 +634,15 @@ Usage: tma watch [OPTIONS]
 | option | meaning |
 |---|---|
 | `--table` | Open directly in the full-width status table when the pane is wide enough (`p` toggles back to the preview). A pane below 76 columns still falls back to the single list. |
+| `--temporary-session` | Open in a dedicated one-use tmux session. Jumping or quitting exits the watcher and destroys that session; this is the default `prefix G` mode. |
 | [selector flags](#selector-flags) | Show only the agents in scope, e.g. a `tma watch --repo app` window per repo. |
 
-tma places nothing for you: run it where you want it. `prefix G` gives it a tmux
-window of its own, a `split-window -h -l 40 'tma watch'` gives it a pane beside
-your work, and a second terminal (or a second monitor) works just as well, since
-`tma watch` reaches the server over the socket like any other client. Every
+A plain `tma watch` still runs wherever you put it. `prefix G` is the managed
+one-use placement: it creates a temporary tmux session rather than leaving a
+watch window in your current session. A `split-window -h -l 40 'tma watch'`
+gives you a persistent pane beside your work, and a second terminal (or a second
+monitor) works just as well, since `tma watch` reaches the server over the socket
+like any other client. Every
 instance advertises its pid in `@tma_watch_pid` on its own pane, which is what
 the focus-change nudge signals; several at once are fine.
 
@@ -820,8 +825,9 @@ Usage: tma install-keys [OPTIONS]
 | `--config-dir <DIR>` | Override the tma config dir holding the managed `tmux.conf` (env `TMA_CONFIG_DIR`). Defaults to `~/.config/tma`. |
 
 The default bindings are prefix-key bindings: `a` opens the picker in a popup,
-`G` opens `tma watch --table` in a new window (the full-width status table; `g` is
-taken by `jump --blocked`), `A` opens `tma act --menu` on the active pane, and
+`G` opens `tma watch --temporary-session --table` in a dedicated one-use session
+(the full-width status table; `g` is taken by `jump --blocked`), `A` opens
+`tma act --menu` on the active pane, and
 `j`/`g`/`b`/`h` run `tma jump` with
 `--attention`/`--blocked`/`--back`/`--home`. The status-line driver `#(tma status)`
 is not written; add it to `status-right` yourself. See

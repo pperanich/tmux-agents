@@ -129,6 +129,9 @@ pub struct WatchModel {
     /// derived cache, recomputed by `recompute_columns` wherever the row set changes.
     show_model: bool,
     pref: WidePref,
+    /// Whether a successful jump also closes the surface. False for a normal persistent watcher;
+    /// true for the temporary-session launcher, whose pane must exit after handing the client off.
+    exit_on_jump: bool,
     /// The last width seen (from a Resize); `last_layout` is derived from it plus `pref`.
     width: u16,
     /// The last height seen (from a Resize). With `width` it is the frame the mouse hit-test and
@@ -156,6 +159,7 @@ impl WatchModel {
             show_branch: false,
             show_model: false,
             pref,
+            exit_on_jump: false,
             width: 0,
             height: 0,
             last_layout: watch_layout(0, pref),
@@ -165,6 +169,13 @@ impl WatchModel {
         m.regroup();
         m.recompute_columns();
         m
+    }
+
+    /// Make jumps close this watcher after focus and attention clearing. The regular `tma watch`
+    /// constructor remains persistent; the dedicated temporary-session launcher opts into this.
+    pub fn with_exit_on_jump(mut self, exit_on_jump: bool) -> WatchModel {
+        self.exit_on_jump = exit_on_jump;
+        self
     }
 
     /// Fold one event into the model, returning the effects the shell executes.
@@ -206,17 +217,10 @@ impl WatchModel {
         match k {
             // q/Esc/Ctrl-C quit; a plain `Quit` batch, nothing to defer (no jump rides with it).
             Key::Char('q') | Key::Esc | Key::CtrlC => vec![Effect::Quit],
-            // Enter jumps but keeps the watcher open (persistent, non-modal): `[Focus, ClearAttention]`
-            // with NO `Quit`, so the runner runs them inline and the loop continues (watch.rs:207-215).
-            Key::Enter => match self.selected_row() {
-                Some(r) => vec![
-                    Effect::Focus(Box::new(r.clone())),
-                    Effect::ClearAttention {
-                        pane: r.pane_id.clone(),
-                    },
-                ],
-                None => vec![],
-            },
+            // A normal watcher jumps inline and stays open. The temporary-session launcher adds
+            // `Quit`, so the runner restores the terminal, jumps, clears attention, then lets the
+            // watch pane exit and take its one-use session with it.
+            Key::Enter => self.focus_batch(),
             // `a` opens the action menu on the HIGHLIGHTED pane, not the pane the watcher lives in:
             // triaging N blocked agents from here is the point, and jumping to each first is not.
             // The menu is tmux's own overlay, so the watcher neither draws it nor closes for it.
@@ -276,16 +280,8 @@ impl WatchModel {
                 self.sel.index = row;
                 self.sync_view();
                 match click {
-                    // The watcher is non-modal, so a jump keeps it open — exactly what Enter does.
-                    Click::Double => match self.selected_row() {
-                        Some(r) => vec![
-                            Effect::Focus(Box::new(r.clone())),
-                            Effect::ClearAttention {
-                                pane: r.pane_id.clone(),
-                            },
-                        ],
-                        None => vec![],
-                    },
+                    // The mouse spelling of Enter follows the same persistent/temporary policy.
+                    Click::Double => self.focus_batch(),
                     Click::Single => self.preview_effect(),
                 }
             }
@@ -298,6 +294,25 @@ impl WatchModel {
                 self.preview_effect()
             }
         }
+    }
+
+    /// The Enter/double-click jump batch. A regular watcher has no `Quit` and keeps running; a
+    /// temporary-session watcher carries `Quit`, causing the runner to defer the whole batch until
+    /// after terminal restoration and then end the process after the jump.
+    fn focus_batch(&self) -> Vec<Effect> {
+        let Some(r) = self.selected_row() else {
+            return vec![];
+        };
+        let mut effects = vec![
+            Effect::Focus(Box::new(r.clone())),
+            Effect::ClearAttention {
+                pane: r.pane_id.clone(),
+            },
+        ];
+        if self.exit_on_jump {
+            effects.push(Effect::Quit);
+        }
+        effects
     }
 
     /// The draw line under a point, `None` when the point is outside the list.
@@ -1005,6 +1020,21 @@ mod tests {
         assert!(
             !fx.iter().any(|e| matches!(e, Effect::Quit)),
             "no Quit: the watcher stays open (non-modal)"
+        );
+    }
+
+    #[test]
+    fn temporary_watch_enter_focuses_then_quits() {
+        let mut m = WatchModel::new(two_rows(), WidePref::Preview, 0).with_exit_on_jump(true);
+        let pane = m.selected_row().unwrap().pane_id.clone();
+        let fx = m.update(Event::Key(Key::Enter), 0, &mut ());
+        assert!(
+            matches!(
+                fx.as_slice(),
+                [Effect::Focus(_), Effect::ClearAttention { pane: cp }, Effect::Quit]
+                    if *cp == pane
+            ),
+            "temporary Enter yields [Focus, ClearAttention, Quit], got {fx:?}"
         );
     }
 

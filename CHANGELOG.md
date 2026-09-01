@@ -10,6 +10,14 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Changed
+
+- **`prefix G` no longer leaves a TMA window behind after a jump.** The managed binding now opens
+  the full-width watcher in a dedicated temporary tmux session. Enter jumps and exits the watcher;
+  quitting exits it too, so either path destroys the one-use session. The pane where G was pressed
+  remains the `jump --back` origin. A directly launched `tma watch` is unchanged and stays
+  persistent unless `--temporary-session` is requested.
+
 ## [0.5.6] - 2026-08-30
 
 ### Fixed

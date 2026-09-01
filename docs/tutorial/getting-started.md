@@ -200,7 +200,7 @@ tma: proposed change to ~/.config/tma/tmux.conf (tma keybindings):
   +# tma keybindings, managed by `tma install-keys`. Do not hand-edit; re-run to update,
   +# or `tma install-keys --uninstall` to remove.
   +bind-key a display-popup -E -w 80% -h 60% 'tma'
-  +bind-key G new-window 'tma watch --table'
+  +bind-key G run-shell 'tma watch --temporary-session --table --client "#{client_name}"'
   +bind-key j run-shell 'tma jump --attention --client "#{client_name}"'
   +bind-key g run-shell 'tma jump --blocked --client "#{client_name}"'
   +bind-key b run-shell 'tma jump --back --client "#{client_name}"'
@@ -227,7 +227,9 @@ $ tmux source-file ~/.config/tmux/tmux.conf
 Press `prefix g` and you land on the blocked pane. `prefix j` goes to whoever
 wants you next (blocked first, then finished-but-unreviewed), `prefix b` returns
 to where you jumped from, `prefix a` opens the picker in a popup, and `prefix G`
-opens the step-6 dashboard in a window, straight into its full-width table. See
+opens the step-6 dashboard straight into its full-width table in a dedicated
+temporary session. Jumping or quitting closes that session, so no dashboard
+window remains in the session where you pressed G. See
 the [keybindings reference](../reference/keybindings.md) for the rest of the set,
 and [Install the keybindings](../how-to/install-the-keybindings.md) for rebinding
 any of them.

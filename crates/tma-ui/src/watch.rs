@@ -4,7 +4,8 @@
 //! state-priority rows, 1 s guarded-poll refresh (an ambient producer), config + manifest hot-
 //! reload, and first-frame-from-stamps paint. Preview is width-driven: below `PREVIEW_MIN_WIDTH` a
 //! single list, at or above it a live ANSI preview beside it. Enter jumps the acting client and
-//! clears its attention flag but keeps the dashboard running; `q`/Esc/Ctrl-C quit. Startup advertises
+//! clears its attention flag; a normal watcher stays open, while the temporary-session launcher
+//! exits after the jump. `q`/Esc/Ctrl-C quit. Startup advertises
 //! a pid for the middle-tier SIGUSR1 nudge (see [`run_watch`]); styling builds a `RowPalette` from
 //! the `[picker]` config.
 //!
@@ -24,7 +25,7 @@ use tma_core::{AgentRow, Selector};
 use tma_runtime::config;
 use tma_runtime::cycle;
 use tma_runtime::manifests::LoadedManifest;
-use tma_runtime::{nudge, Server, Tmux};
+use tma_runtime::{nudge, ui, Server, Tmux};
 use tma_ui_core::layout::{watch_geom, WatchGeom};
 use tma_ui_core::render::{branch_span, fmt_since, row_style, truncate};
 use tma_ui_core::watch::{
@@ -36,10 +37,12 @@ use crate::dash;
 use crate::picker::unix_now;
 use crate::runner::{self, Surface};
 
-/// Run the watch dashboard to completion: first frame from stamps, a 1 s guarded-poll refresh (an
-/// ambient producer), Enter jumps the acting client without closing. `config`/`manifests` owned for
-/// hot-reload. `selector` narrows the rows the fold ever sees — the watcher's cycle still refreshes
-/// every pane, so a scoped watcher remains a full ambient producer.
+/// Run the watch dashboard to completion: first frame from stamps and a 1 s guarded-poll refresh
+/// (an ambient producer). `exit_on_jump` is false for a normal persistent watcher and true for the
+/// dedicated temporary-session child. `origin_pane` preserves the pane from which that temporary
+/// session was opened as the return-trail origin. `config`/`manifests` are owned for hot-reload.
+/// `selector` narrows the rows the fold ever sees — the watcher's cycle still refreshes every pane,
+/// so a scoped watcher remains a full ambient producer.
 #[allow(clippy::too_many_arguments)]
 pub fn run_watch(
     tmux: &Tmux,
@@ -50,6 +53,8 @@ pub fn run_watch(
     manifest_dir: Option<PathBuf>,
     acting_client: Option<&str>,
     start_table: bool,
+    exit_on_jump: bool,
+    origin_pane: Option<&str>,
     selector: Selector,
 ) -> io::Result<()> {
     // First frame from stamps: instant, stale-tolerant. The next refresh runs a cycle. Label the
@@ -65,7 +70,11 @@ pub fn run_watch(
     } else {
         WidePref::Preview
     };
-    let model = WatchModel::new(first_rows, pref, unix_now());
+    let model = WatchModel::new(first_rows, pref, unix_now()).with_exit_on_jump(exit_on_jump);
+    // A temporary watcher must put the pane the user opened it from on the return trail, not its
+    // own soon-to-die dashboard pane. Resolve the stable pane id after the new session starts; a
+    // vanished origin simply degrades to the ordinary current-client origin.
+    let jump_origin = origin_pane.and_then(|pane| ui::pane_locator(tmux, pane));
 
     // Middle-tier nudge: install the SIGUSR1 handler first, then let the RAII terminal guard
     // advertise our pid in the pane-scoped `@tma_watch_pid` on our own pane, but only *after* raw
@@ -89,6 +98,7 @@ pub fn run_watch(
             config_path,
             manifest_dir,
             acting_client,
+            jump_origin,
             filter: runner::RowFilter::from_selector(selector),
         },
     )

@@ -84,6 +84,7 @@ pub fn run_picker(
             config_path,
             manifest_dir,
             acting_client,
+            jump_origin: None,
             filter,
             // The picker closes on its jump, so there is nothing left to move.
         },

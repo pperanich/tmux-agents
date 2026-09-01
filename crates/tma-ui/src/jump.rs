@@ -212,14 +212,18 @@ fn resolve_client(tmux: &Tmux, acting_client: Option<&str>) -> String {
     }
 }
 
-/// Focus a specific agent pane (the picker's Enter path): record the current location as the
-/// `--back` origin, then jump. Reuses `run_jump`'s origin machinery to move the same acting client.
+/// Focus a specific agent pane (the picker/watch Enter path): record the current location as the
+/// `--back` origin, then jump. `origin_override` is set only by the temporary watch session, whose
+/// own pane is about to disappear; it preserves the pane from which the dashboard was opened.
 pub(crate) fn focus_agent(
     tmux: &Tmux,
     row: &AgentRow,
     acting_client: Option<&str>,
+    origin_override: Option<&str>,
 ) -> Result<(), TmuxError> {
-    let origin = ui::active_locator(tmux, acting_client);
+    let origin = origin_override
+        .map(str::to_string)
+        .unwrap_or_else(|| ui::active_locator(tmux, acting_client));
     let client = resolve_client(tmux, acting_client);
     if !origin.is_empty() {
         let key = origin_key(&client);

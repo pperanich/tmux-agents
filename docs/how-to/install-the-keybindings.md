@@ -64,7 +64,8 @@ so there is nothing of yours to corrupt.
 ## Rebind a key
 
 `install-keys` claims only keys that are unbound in stock tmux (that is why the
-watch window is on `G`: `g` is already `jump --blocked`). If one clashes with a
+temporary watch session is on `G`: `g` is already `jump --blocked`). If one
+clashes with a
 personal binding of yours, copy the line you want out of
 `~/.config/tma/tmux.conf` into your own tmux config with a new key and drop the
 managed file. Editing the managed file in place also works, but the edit survives
@@ -152,25 +153,24 @@ a client that does not exist).
 bind-key a display-popup -E -w 80% -h 60% 'tma'
 ```
 
-`tma watch` is a persistent dashboard for a normal pane, and the full-width table
-wants the whole terminal, so bind it to a new window. `new-window` does **not**
-format-expand, so again no `--client`. `--table` opens straight into the table;
-`p` inside `tma watch` toggles it against the preview:
+The managed full-width dashboard uses a dedicated temporary session. `run-shell`
+format-expands the invoking client; `--temporary-session` switches that client to
+the one-use session, and a jump or quit closes it. `--table` opens straight into
+the table; `p` inside `tma watch` toggles it against the preview:
 
 ```tmux
-bind-key G new-window 'tma watch --table'
+bind-key G run-shell 'tma watch --temporary-session --table --client "#{client_name}"'
 ```
 
-If you would rather have it beside your work than in a window of its own, bind a
-split instead — tma has no opinion about placement, and a narrow pane falls back
-to the single-column list:
+If you would rather keep a persistent watcher beside your work, bind a plain
+`tma watch` split instead. A narrow pane falls back to the single-column list:
 
 ```tmux
 bind-key W split-window -h -l 40 'tma watch'
 ```
 
-Mind that a split follows nothing: jump to an agent in another window and the
-pane stays behind in the window you left.
+Mind that a plain watcher is persistent and follows nothing: jump to an agent in
+another window and the pane stays behind in the window you left.
 
 Jump straight to whoever needs you, no picker. `run-shell` does format-expand, so
 pass the client: `tma` then switches the client that pressed the key and keys the

@@ -73,6 +73,15 @@ pub fn active_pane_id(tmux: &Tmux, client: Option<&str>) -> Option<String> {
         .filter(|pane| !pane.is_empty())
 }
 
+/// Resolve a stable pane id to its `session:window.pane` locator. The temporary watcher uses this
+/// after opening its dedicated session so its jump trail still points to the pane it was opened
+/// from. `None` when that origin pane vanished before the child started.
+pub fn pane_locator(tmux: &Tmux, pane_id: &str) -> Option<String> {
+    tmux.pane_format(pane_id, "#{session_name}:#{window_index}.#{pane_index}")
+        .ok()
+        .filter(|locator| !locator.is_empty())
+}
+
 /// Read the current client's name, targetless (jump's `resolve_client` fallback when the keybinding
 /// passed none). A read failure collapses to an empty string.
 pub fn active_client_name(tmux: &Tmux) -> String {

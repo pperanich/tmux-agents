@@ -13,7 +13,7 @@ prefix.
 | key | tmux command | does |
 |---|---|---|
 | `a` | `display-popup -E -w 80% -h 60% 'tma'` | Open the picker in a popup. |
-| `G` | `new-window 'tma watch --table'` | Open the full-width status table in a new window. |
+| `G` | `run-shell 'tma watch --temporary-session --table --client "#{client_name}"'` | Open the full-width table in a dedicated temporary session. |
 | `j` | `run-shell 'tma jump --attention --client "#{client_name}"'` | Jump to whoever wants you: blocked first, then finished-unreviewed. |
 | `g` | `run-shell 'tma jump --blocked --client "#{client_name}"'` | Jump to the longest-blocked agent. |
 | `b` | `run-shell 'tma jump --back --client "#{client_name}"'` | Return one step along the jump trail. |
@@ -25,8 +25,8 @@ only keys that are unbound in stock tmux.
 
 Only the `run-shell` bindings carry `--client "#{client_name}"`, because only
 `run-shell` format-expands its command. `display-popup` and `split-window` do not,
-so the flag would arrive as the literal `#{client_name}`; from inside a popup or a
-pane, `tma` resolves the acting client itself.
+so the flag would arrive as the literal `#{client_name}`; the popup therefore
+lets `tma` resolve the acting client itself.
 
 ## Mouse bindings
 
@@ -94,7 +94,7 @@ captured.
 
 | key | does |
 |---|---|
-| `enter` | Jump to the highlighted agent and clear its attention flag; the watcher stays open where it is. |
+| `enter` | Jump to the highlighted agent and clear its attention flag. A plain watcher stays open; the `prefix G` temporary watcher exits. |
 | `a`, `tab` | Open the tmux action menu for the highlighted agent. (`tab` is the picker's spelling; both work here.) |
 | `p` | Swap the live preview for the full-width status table, and back. Wide body only. |
 | `g` | Flatten the repo grouping, and regroup. Wide body only. |
@@ -109,15 +109,16 @@ runs in, which is what lets a screenful of blocked agents be answered from one
 place. See [Author a custom action](../how-to/custom-actions.md).
 
 `tma watch` takes the same mouse gestures as the picker (hover underlines, click
-selects, click again jumps — the list stays open, exactly as `enter` does;
-wheel moves three rows, and any key drops the hover). Group headers are not
+selects, click again jumps — with the same persistent/temporary behavior as
+`enter`; wheel moves three rows, and any key drops the hover). Group headers are not
 selectable, so hovering or clicking a `▸ repo` line does nothing.
 
-A jump moves your client, never the watcher. Give it a window of its own
-(`prefix G`) or a second terminal and the list stays put and stays visible while
-you work in the window you landed in; run it in a split beside your work and a
-cross-window jump leaves it behind in the window you came from. That is the
-trade-off in placing it, and tma places nothing for you.
+A plain `tma watch` is persistent: put it in a split, window, or second terminal
+and a jump leaves it running there. The managed `prefix G` placement is
+deliberately different. It opens a dedicated temporary session, records the pane
+where you pressed G as the return-trail origin, and destroys the temporary
+session when you jump or quit. No dashboard window is left behind in your work
+session.
 
 While `tma watch` is running, that pane's mouse belongs to tma: tmux's own
 drag-to-select and scroll-into-copy-mode do not apply inside it (hold `shift` for

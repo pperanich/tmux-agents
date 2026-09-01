@@ -67,8 +67,69 @@ impl Tmux {
             .map(|s| s.trim_end_matches('\n').to_string())
     }
 
+    /// Replace a client's previous temporary dashboard session, create a detached one running
+    /// `shell_command`, and switch that client to it. The child command owns the lifecycle: its
+    /// only pane closing destroys the session, so `remain-on-exit` and `destroy-unattached` are
+    /// forced off even when the user enables them globally. `detach-on-destroy` is forced off so
+    /// that destruction switches the client to another live session rather than detaching tmux.
+    /// Any setup/switch failure cleans up the newly-created session.
+    pub fn open_temporary_session(
+        &self,
+        client: &str,
+        session: &str,
+        shell_command: &str,
+    ) -> Result<(), TmuxError> {
+        // One dashboard per client. A prior one can survive only if the user manually switched away
+        // rather than jumping/quitting; replacing it here prevents stale temporary sessions piling up.
+        let _ = self.run(&["kill-session", "-t", session]);
+        // Create + local override in ONE command-client queue. If the global option is on, a detached
+        // session is reaped when the command client that created it exits; the chained local write
+        // must therefore land before that client disconnects.
+        if let Err(err) = self.run(&[
+            "new-session",
+            "-d",
+            "-s",
+            session,
+            shell_command,
+            ";",
+            "set-option",
+            "-t",
+            session,
+            "destroy-unattached",
+            "off",
+        ]) {
+            let _ = self.run(&["kill-session", "-t", session]);
+            return Err(err);
+        }
+
+        // Destroying the active temporary session should reveal another live session, not detach
+        // the tmux client (the global default is `detach-on-destroy on`).
+        if let Err(err) = self.run(&["set-option", "-t", session, "detach-on-destroy", "off"]) {
+            let _ = self.run(&["kill-session", "-t", session]);
+            return Err(err);
+        }
+        let window_target = format!("{session}:");
+        if let Err(err) = self.run(&[
+            "set-window-option",
+            "-t",
+            &window_target,
+            "remain-on-exit",
+            "off",
+        ]) {
+            let _ = self.run(&["kill-session", "-t", session]);
+            return Err(err);
+        }
+        let switch = switch_client_argv(Some(client), session);
+        let borrowed: Vec<&str> = switch.iter().map(String::as_str).collect();
+        if let Err(err) = self.run(&borrowed) {
+            let _ = self.run(&["kill-session", "-t", session]);
+            return Err(err);
+        }
+        Ok(())
+    }
+
     /// Focus a pane across sessions (`switch-client` + `select-window` + `select-pane`): the only
-    /// pane-affecting action `tma` performs. `Some(client)` moves that exact client; `None` is targetless.
+    /// pane-affecting action a jump performs. `Some(client)` moves that exact client; `None` is targetless.
     ///
     /// `select-window` is skipped when the destination window is already its session's current one.
     /// That call would be a no-op for the display, but it still runs tmux's `after-select-window`

@@ -19,6 +19,7 @@ mod mute;
 mod redact;
 mod subscribe;
 mod wait;
+mod watch_session;
 
 // Re-import the tmux/stamp modules at the crate root so the bin's `crate::tmux` / `crate::stamp`
 // paths keep resolving to the one crate that spawns tmux.
@@ -147,8 +148,19 @@ fn main() -> ExitCode {
             manifest_dir,
             config,
         }),
+        Some(Command::Watch(args)) if args.temporary_session => {
+            watch_session::run(watch_session::WatchSessionOpts {
+                args,
+                server,
+                manifest_dir,
+                config_path: cli.config,
+                client,
+            })
+        }
         Some(Command::Watch(args)) => {
             let start_table = args.table;
+            let exit_on_jump = args.exit_on_jump;
+            let origin_pane = args.origin_pane;
             let selector = args.selector.selector();
             run_dashboard_cmd(
                 &server,
@@ -167,6 +179,8 @@ fn main() -> ExitCode {
                         manifest_dir,
                         client,
                         start_table,
+                        exit_on_jump,
+                        origin_pane.as_deref(),
                         selector,
                     )
                 },
