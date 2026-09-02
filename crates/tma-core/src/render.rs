@@ -394,6 +394,14 @@ pub fn set_pane_option(pane: &str, key: &str, value: &str) -> StampCommand {
     set_plain(pane, key, value)
 }
 
+/// Render a plain server-option set (`set-option -s`). Chainable, so the poll cycle's
+/// `@tma_last_poll` claim can ride the stamp invocation instead of costing a second one.
+pub fn set_server_option(key: &str, value: &str) -> StampCommand {
+    StampCommand {
+        argv: vec!["set-option".into(), "-s".into(), key.into(), value.into()],
+    }
+}
+
 /// Render a companion pane-option set carrying the same suppression `guard` as the state tuple,
 /// so it commits iff the state write does. Appended unguarded, a hook event that lost arbitration
 /// would still clobber the notify marker or session. A suppressed write against an absent option

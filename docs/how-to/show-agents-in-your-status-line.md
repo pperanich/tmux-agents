@@ -33,6 +33,32 @@ keybindings](install-the-keybindings.md#clickable-status-segments)). Glyphs and
 colors come from `[status]` config; see
 [Configuration](../reference/configuration.md#status-and-picker-glyphs-and-colors).
 
+## What a refresh costs
+
+The driver is not a read-only renderer. Refreshing a pane's stamped state means
+`tmux set-option`, and tmux redraws every attached client in full on any option
+write, even one whose value did not change. That is a whole-screen re-emission
+rather than the single status row a plain status tick writes, so it is worth
+knowing when it happens:
+
+- **An idle agent costs nothing.** With nothing written to its window since its
+  last stamp, the cycle reuses the stored verdict and issues no write at all.
+- **A working agent costs one redraw per cycle.** Its screen keeps changing, so
+  it is restamped every time. The stampede hint rides that same invocation
+  instead of costing a second one.
+- **The status string itself is cheap.** tmux skips the write when the expanded
+  `status-right` is identical to what is already drawn, so a static string sends
+  your terminal nothing no matter how short `status-interval` is. A `%H:%M`
+  clock costs one status-row write per minute, about 165 bytes.
+
+A full redraw puts every wrapped line back through your terminal's own wrap
+logic, so a terminal that disagrees with tmux about a glyph's width can visibly
+re-wrap a pane during one. If you see that, upgrade tmux: 3.7 corrects the
+redrawing of wide characters when they are overwritten and lets
+`codepoint-widths` accept ranges. The upstream report for the agent-TUI side of
+this is
+[anthropics/claude-code#91182](https://github.com/anthropics/claude-code/issues/91182).
+
 ## Roll up the agents in each window
 
 The driver also maintains a window-scoped `@agent_summary` option, so a

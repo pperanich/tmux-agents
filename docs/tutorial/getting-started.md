@@ -144,7 +144,7 @@ $ tmux source-file ~/.config/tmux/tmux.conf
 
 The right-hand end of your status line should now read `⚑1 ●1`: a red flag for
 the agent still parked on its approval prompt, and a yellow dot for the one
-working. tmux redraws it on its own `status-interval` (10 s by default), so give
+working. tmux redraws it on its own `status-interval` (15 s by default), so give
 it a moment.
 
 Keeping it in `status-right` does more than display counts; the tier check below
