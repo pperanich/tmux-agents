@@ -9,7 +9,10 @@ tmux-agents CLI: agent state monitor, picker, jump, and stamping for tmux.
 Usage: tma [OPTIONS] [COMMAND]
 ```
 
-Running `tma` with no subcommand opens the fuzzy picker. Its rows carry a dimmed
+Running `tma` with no subcommand opens the fuzzy picker. Rows arrive in
+attention order, blocked → done → working → idle → unknown, longest-in-state
+first within each rank (`done` is a finished agent nobody has reviewed yet: idle,
+with the attention flag still set). Its rows carry a dimmed
 branch label (after the time column) when a listed pane resolves a git branch;
 the picker itself stays a flat list, ungrouped. The pane you opened the picker
 from is left out of the list (jumping to where you already are does nothing), so
@@ -140,6 +143,11 @@ Usage: tma ls [OPTIONS]
 `--pane` and the selector narrow the same way: no matching agent prints nothing
 and exits `0`. A filtered `--json` is the same document with a shorter `agents`
 array, so a consumer parses it identically.
+
+Rows come back in attention order, blocked → done → working → idle → unknown,
+then by `session:window.pane`. `done` is idle with the attention flag still set,
+a finished agent nobody has read. `--json` emits the same order in its `agents`
+array.
 
 Plain output is one tab-separated line per agent pane, in this column order:
 `pane`, `agent`, `state`, `detail`, `since`, `session:window.pane`, `title`,
@@ -284,7 +292,7 @@ which format-expands it, so the jump switches the client that pressed the key an
 keys its return trail by it.
 
 `--menu` is the tmux-native counterpart of the picker: entries are ordered like
-the picker's list (blocked, working, idle, then longest-in-state first), the first
+the picker's list (blocked, done, working, idle, then longest-in-state first), the first
 nine carry a `1`-`9` quick-select digit, and each one runs `tma jump --pane <id>`
 with the acting client and the invoking server resolved into the command. It is
 what a right-click on a [clickable status
@@ -720,11 +728,14 @@ state with detail, context gauge, time-in-state, locator, title, and a model
 column when any visible pane stamps `@agent_model`), and `p` again to swap back.
 The chosen body is session-local (never persisted).
 
-Both wide bodies group rows by repo (worktrees roll up under their origin's
-name), each group under a dimmed `▸ repo-name` header, groups ordered so the
-longest-blocked agent's group leads; every pane with no resolved repo folds into
-one `▸ (no repo)` group. Grouping is the default; press `g` to flatten the list
-to a flat state-sorted view and `g` again to regroup (session-local, like `p`).
+Rows are in attention order, blocked → done → working → idle → unknown, longest-
+in-state first within each rank. Both wide bodies then group them by repo
+(worktrees roll up under their origin's name), each group under a dimmed
+`▸ repo-name` header, groups ordered by their most urgent member so the group
+holding the pane that most needs you leads; every pane with no resolved repo
+folds into one `▸ (no repo)` group. Grouping is the default; press `g` to flatten
+the list to the ungrouped attention order and `g` again to regroup
+(session-local, like `p`).
 Selection and Enter-jump target the agent under the cursor regardless of the
 group headers. A dimmed branch label sits beside each row (table: a `branch`
 column; single list: after the time column), present only when a visible pane

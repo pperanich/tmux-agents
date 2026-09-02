@@ -5,7 +5,7 @@
 
 use std::cmp::Ordering;
 
-use tma_core::{sort_rank, AgentRow};
+use tma_core::{row_rank, AgentRow};
 
 /// The single bucket every unresolved row (no `repo`) folds into (a deliberate divergence from the
 /// reference impl's per-directory buckets).
@@ -24,7 +24,7 @@ pub(crate) struct Group {
 }
 
 /// Group `rows` by `repo` for the grouped watch layout. Every unresolved row folds into one
-/// [`NO_REPO`] bucket. Groups order by their most urgent member: best `sort_rank`, then the smallest
+/// [`NO_REPO`] bucket. Groups order by their most urgent member: best `row_rank`, then the smallest
 /// `since` among members holding that rank, then the display name, then the repo key. Member order is
 /// the input order, so state-sorted input yields state-sorted rows within each group and the
 /// globally longest-blocked row leads the first group.
@@ -52,7 +52,7 @@ pub(crate) fn group_rows(rows: &[AgentRow]) -> Vec<Group> {
         .collect()
 }
 
-/// The total group order: best member `sort_rank`, then the smallest `since` among members holding
+/// The total group order: best member `row_rank`, then the smallest `since` among members holding
 /// that rank, then display name, then repo key.
 fn group_order(
     rows: &[AgentRow],
@@ -69,17 +69,17 @@ fn group_order(
         .then_with(|| a_key.cmp(&b_key))
 }
 
-/// A group's triage key: its best (lowest) member `sort_rank`, and the smallest `since` among the
+/// A group's triage key: its best (lowest) member `row_rank`, and the smallest `since` among the
 /// members holding that rank. Members are never empty.
 fn urgency(rows: &[AgentRow], members: &[usize]) -> (u8, u64) {
     let best = members
         .iter()
-        .map(|&i| sort_rank(rows[i].state))
+        .map(|&i| row_rank(&rows[i]))
         .min()
         .unwrap_or(u8::MAX);
     let min_since = members
         .iter()
-        .filter(|&&i| sort_rank(rows[i].state) == best)
+        .filter(|&&i| row_rank(&rows[i]) == best)
         .map(|&i| rows[i].since)
         .min()
         .unwrap_or(0);
@@ -200,6 +200,36 @@ mod tests {
         let no_repo: Vec<&Group> = groups.iter().filter(|g| g.name == NO_REPO).collect();
         assert_eq!(no_repo.len(), 1, "exactly one (no repo) bucket");
         assert_eq!(no_repo[0].members, vec![0, 2]);
+    }
+
+    /// The grouped watch view, end to end: rows arrive state-sorted (the surfaces sort before
+    /// grouping), a done row leads a working one, and the group holding the done row leads the group
+    /// that only has working panes. Grouping must not undo the attention order it is layered on.
+    #[test]
+    fn a_done_row_leads_its_group_and_its_group_leads_a_working_one() {
+        let done = |pane, repo, since| AgentRow {
+            attention: true,
+            ..row(pane, repo, AgentState::Idle, since)
+        };
+        let rows = crate::picker::sorted(vec![
+            row("%0", Some("app"), AgentState::Working, 10),
+            row("%1", Some("lib"), AgentState::Working, 20),
+            done("%2", Some("lib"), 30),
+            row("%3", Some("lib"), AgentState::Idle, 40),
+        ]);
+        // Flat order first: done above both working rows, plain idle last.
+        assert_eq!(
+            rows.iter().map(|r| r.pane_id.as_str()).collect::<Vec<_>>(),
+            vec!["%2", "%0", "%1", "%3"]
+        );
+        // Then the grouping: `lib` leads because its best member is the done row.
+        let groups = group_rows(&rows);
+        assert_eq!(names(&groups), vec!["lib", "app"]);
+        assert_eq!(
+            groups[0].members.first().copied(),
+            Some(0),
+            "the done row leads its own group"
+        );
     }
 
     #[test]

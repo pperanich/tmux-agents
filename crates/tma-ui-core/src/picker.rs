@@ -6,7 +6,7 @@ use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Matcher, Utf32Str};
 use ratatui::layout::Rect;
 use ratatui::text::Text;
-use tma_core::{sort_rank, AgentRow};
+use tma_core::{row_rank, AgentRow};
 
 use crate::common::{preview_fits, Common};
 use crate::effect::Effect;
@@ -349,12 +349,13 @@ impl PickerModel {
     }
 }
 
-/// Sort rows by state priority: blocked → working → idle → unknown, then longest-in-state first
-/// (the smallest `@agent_since`). Shared with `tma watch` (same order); crate-internal.
+/// Sort rows by attention priority: blocked → done → working → idle → unknown, then
+/// longest-in-state first (the smallest `@agent_since`). Shared with `tma watch` (same order);
+/// crate-internal.
 pub(crate) fn sorted(mut rows: Vec<AgentRow>) -> Vec<AgentRow> {
     rows.sort_by(|a, b| {
-        sort_rank(a.state)
-            .cmp(&sort_rank(b.state))
+        row_rank(a)
+            .cmp(&row_rank(b))
             .then_with(|| a.since.cmp(&b.since))
     });
     rows
@@ -558,23 +559,29 @@ mod tests {
         assert_eq!(s[3].state, AgentState::Idle);
     }
 
+    /// A done row (idle + attention) outranks a working one. It used to sort as plain idle, which
+    /// put the row a user can clear in one keypress underneath every row they can do nothing about.
+    /// A plain idle row keeps its place below working: the attention flag is the whole difference.
     #[test]
-    fn done_row_keeps_idle_sort_rank() {
-        // A done row (idle + attention) sorts as idle, not promoted (presentation only).
+    fn a_done_row_outranks_working_and_a_plain_idle_row_does_not() {
         let rows = vec![
+            row("a", 0, 0, "c", AgentState::Idle, 10),
+            row("a", 0, 1, "c", AgentState::Working, 10),
             AgentRow {
                 attention: true,
-                ..row("a", 0, 0, "c", AgentState::Idle, 10)
+                ..row("a", 0, 2, "c", AgentState::Idle, 10)
             },
-            row("a", 0, 1, "c", AgentState::Working, 10),
+            row("a", 0, 3, "c", AgentState::Blocked, 10),
         ];
         let s = sorted(rows);
-        assert_eq!(
-            s[0].state,
-            AgentState::Working,
-            "working still ranks above done-idle"
+        assert_eq!(s[0].state, AgentState::Blocked);
+        assert!(
+            s[1].attention && s[1].state == AgentState::Idle,
+            "done sits second, above working"
         );
-        assert!(s[1].attention);
+        assert_eq!(s[2].state, AgentState::Working);
+        assert_eq!(s[3].state, AgentState::Idle);
+        assert!(!s[3].attention, "plain idle stays below working");
     }
 
     #[test]

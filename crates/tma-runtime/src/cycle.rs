@@ -15,7 +15,7 @@ use tma_core::render;
 use tma_core::snapshot::{PaneSnapshot, ProcInfo};
 use tma_core::stamp::opt;
 use tma_core::{
-    sort_rank, AgentRow, AgentState, FoldConfig, QuotaLabel, ReadResult, SnapshotFacts,
+    row_rank, AgentRow, AgentState, FoldConfig, QuotaLabel, ReadResult, SnapshotFacts,
     StampedState, WriteAction,
 };
 
@@ -493,9 +493,9 @@ pub fn run_cycle_with(
         }
     }
 
-    // Deterministic order for surfaces: blocked → working → idle → unknown, then locator.
+    // Deterministic order for surfaces: blocked → done → working → idle → unknown, then locator.
     report.rows.sort_by(|a, b| {
-        sort_rank(a.state).cmp(&sort_rank(b.state)).then_with(|| {
+        row_rank(a).cmp(&row_rank(b)).then_with(|| {
             (&a.session, a.window_index, a.pane_index).cmp(&(
                 &b.session,
                 b.window_index,
@@ -526,7 +526,7 @@ pub fn stamp_rows(tmux: &Tmux) -> Result<Vec<AgentRow>, TmuxError> {
         })
         .collect();
     rows.sort_by(|a, b| {
-        sort_rank(a.state).cmp(&sort_rank(b.state)).then_with(|| {
+        row_rank(a).cmp(&row_rank(b)).then_with(|| {
             (&a.session, a.window_index, a.pane_index).cmp(&(
                 &b.session,
                 b.window_index,
@@ -1026,13 +1026,6 @@ mod tests {
         // A stamp in the future (backward wall-clock step) is not a baseline to trust.
         let prev = quiet_prev(AgentState::Idle, Provenance::Capture, NOW);
         assert!(!can_reuse_stamp(&prev, quiet, true, &cfg, NOW - 1_000));
-    }
-
-    #[test]
-    fn sort_rank_orders_blocked_first() {
-        assert!(sort_rank(AgentState::Blocked) < sort_rank(AgentState::Working));
-        assert!(sort_rank(AgentState::Working) < sort_rank(AgentState::Idle));
-        assert!(sort_rank(AgentState::Idle) < sort_rank(AgentState::Unknown));
     }
 
     /// Both per-pane error branches (`run_cycle`, `capture::handle_edges`) route their skip-or-abort

@@ -53,6 +53,17 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   model](docs/explanation/security-model.md). `--all` is not going away; bulk approval is not
   arriving.
 
+### Changed
+
+- **The fleet is ordered by who needs you first: blocked, done, working, idle, unknown.** `done` is
+  the pseudo-state tma already had, a finished agent with output nobody has reviewed
+  (`@agent_state` stays `idle`, the attention flag is what makes it done), and it used to sort as
+  plain idle. That put the rows a user can clear in one keypress underneath every row they can do
+  nothing about: a working pane is waiting on itself, a done pane is waiting on a person, exactly as
+  a blocked one is. Applies to `tma ls` (plain and `--json`), the picker, `tma jump --menu`, and
+  `tma watch`, whose repo groups now lead on a done row the same way they lead on a blocked one.
+  `tma jump --attention` already walked blocked-then-done and is unchanged.
+
 ### Fixed
 
 - **`ls --json`'s `pending_tool` / `pending_call` / `pending_summary` were always `null`.** The trio
