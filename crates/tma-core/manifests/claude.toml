@@ -31,6 +31,35 @@ event = "Notification"
 matcher = "permission_prompt|elicitation_dialog"
 claim = { state = "blocked", detail = "permission" }
 
+# --- usage-limit auto-continue (Claude Code 2.1.234+, on by default) -----------------------------
+# Three `Notification` types report a quota wait, and they split on whose move it is. The installed
+# hook carries no matcher, so every notification type already reaches `tma event`; these matchers
+# are the whole filter.
+#
+# `quota_auto_resume_fired` — Claude Code continues the task after the limit paused it (at the
+# reset, or sooner when adding credits / upgrading / switching models frees usage). Nobody is
+# waiting on the human, so it is `working`, qualified `rate_limit`.
+[[hooks.map]]
+event = "Notification"
+matcher = "quota_auto_resume_fired"
+claim = { state = "working", detail = "rate_limit" }
+
+# `quota_auto_resume_stale` — the limit reset while the computer slept for more than about 30
+# minutes, so Claude Code halts and waits for `Enter` instead of continuing. That is a keypress the
+# human owes it: `blocked`.
+[[hooks.map]]
+event = "Notification"
+matcher = "quota_auto_resume_stale"
+claim = { state = "blocked", detail = "rate_limit" }
+
+# `quota_auto_resume_disabled` — the wait ended without continuing (`autoContinueAtUsageLimit` off,
+# the reset moved past 24 hours, repeated limit hits, or a blocked continuation). Nothing resumes
+# until the human sends a prompt, so it is `blocked` too.
+[[hooks.map]]
+event = "Notification"
+matcher = "quota_auto_resume_disabled"
+claim = { state = "blocked", detail = "rate_limit" }
+
 # Stop — the turn ended. `turn_end` marks it as such, so a second completion raises the done
 # marker again even when tma never observed `working` in between (nothing else would: the fold
 # sees idle→idle and an edge rule cannot tell that apart from a quiet idle pane).
@@ -184,3 +213,43 @@ state = "working"
 priority = 70
 region = "tail_lines(30)"
 match = { line_regex = '^[·✢✳✶✻✽] Waiting for \d+ [a-z][a-z ]* to finish' }
+
+# --- rate limit: the usage-limit auto-continue line ------------------------------------------------
+# Appended, like the rules above, because `tests/claude_manifest.rs` maps rule indices by
+# declaration order.
+#
+# SYNTHESIZED from the documented strings, not a live capture: triggering a real usage limit on
+# demand is not something a test run can do. The fixtures beside these rules say so in their names,
+# and the match is on the stable substrings the docs print rather than the whole line, whose middle
+# carries a reset time (`at 3:45pm`) and whose separator glyph is not load-bearing.
+#
+# Claude Code 2.1.234+ waits in the open session and continues on its own, drawing a line at the
+# bottom that reads `Usage limit reached · continuing automatically at 3:45pm · esc to cancel` and,
+# at the reset, `Usage limit reset · continuing automatically`. Neither carries the spinner chrome
+# the working rules key on, so without this the pane read `idle` for the whole wait — and `done`
+# once it carried an unacknowledged mark.
+#
+# Priority 80: above the working rules (60/70) so the detail is `rate_limit` rather than bare
+# working, and below the blocked rules (100/110) so a permission prompt drawn during the wait still
+# wins. The agent resumes by itself here, so the ball is not with the human: `working/rate_limit`.
+[[rules]]
+state = "working"
+detail = "rate_limit"
+priority = 80
+region = "tail_lines(30)"
+match = { line_regex = 'Usage limit re(ached|set).*continuing automatically' }
+
+# The halted variant. After the computer slept more than about 30 minutes with the reset falling
+# inside the sleep, Claude Code does NOT continue: the line reads `Your usage limit has reset ·
+# press enter to continue` and it sits there until the human presses Enter. A keypress the human
+# owes it is `blocked`, and the detail says the wait was the clock rather than a permission
+# decision — which is what lets `wait --until blocked` tell the two apart.
+#
+# Priority 95: it outranks nothing in the blocked lane, so a permission (100) or plan/trust (110)
+# dialog drawn over it still stamps its own detail.
+[[rules]]
+state = "blocked"
+detail = "rate_limit"
+priority = 95
+region = "tail_lines(30)"
+match = { line_regex = 'Your usage limit has reset.*press enter to continue' }

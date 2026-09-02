@@ -126,6 +126,8 @@ mod rule {
     pub(crate) const BLOCKED_TRUST: usize = 6;
     pub(crate) const WORKING_SPINNER: usize = 7;
     pub(crate) const WORKING_BACKGROUND_AGENT: usize = 8;
+    pub(crate) const WORKING_RATE_LIMIT: usize = 9;
+    pub(crate) const BLOCKED_RATE_LIMIT: usize = 10;
 }
 
 fn matched(ev: &Evaluation, index: usize) -> bool {
@@ -240,7 +242,7 @@ fn plan_and_trust_outrank_the_generic_permission_rule() {
     let m = manifest();
     assert_eq!(
         m.rules.len(),
-        9,
+        11,
         "the rule-index map in `mod rule` is positional; a rule was inserted or removed"
     );
     let generic = &m.rules[rule::BLOCKED_PERMISSION];
@@ -687,6 +689,149 @@ fn no_false_blocked_from_conversation_text() {
     assert!(has_state(&ev, AgentState::Idle), "idle evidence present");
 }
 
+// ---- rate limit: the usage-limit auto-continue lines --------------------------------
+//
+// Both fixtures are SYNTHESIZED whole (see `fixtures/README.md`): a usage limit cannot be
+// exhausted on demand, so the bodies carry the lines Claude Code's documentation prints
+// verbatim, dropped into an otherwise ordinary pane. The rules match the stable substrings,
+// not the whole line — the reset time in the middle (`at 3:45pm`) varies per wait.
+
+/// The auto-continue wait is the agent's move, not the human's: Claude Code resumes the task on
+/// its own at the reset. Before this rule the line carried no working chrome at all, so the pane
+/// folded to `idle` off its mode line (and read `done` once it held an unacknowledged mark).
+#[test]
+fn synthesized_auto_continue_line_is_working_rate_limit() {
+    let name = "claude_working_rate_limit_synthesized_w100.txt";
+    let ev = evaluate(name);
+    assert!(
+        matched(&ev, rule::WORKING_RATE_LIMIT),
+        "{name}: the auto-continue rule matched"
+    );
+    // The pane still draws its mode line and keeps the `✳` title, so idle evidence coexists;
+    // working outranks it in the fold.
+    assert!(
+        matched(&ev, rule::IDLE_MODE_LINE),
+        "{name}: mode line drawn"
+    );
+    let v = fold_verdict(name, None);
+    assert_eq!(v.state, AgentState::Working, "{name}: verdict working");
+    assert_eq!(
+        v.detail.as_ref().map(|d| d.as_str()),
+        Some("rate_limit"),
+        "{name}: the detail is what separates a quota wait from ordinary working"
+    );
+}
+
+/// The halted variant: after a long sleep Claude Code waits for `Enter` rather than continuing,
+/// so the ball IS with the human. Same detail token, different state — that split is the whole
+/// point of `rate_limit` (`wait --until blocked` sees it; `--until working` does not).
+#[test]
+fn synthesized_stale_reset_line_is_blocked_rate_limit() {
+    let name = "claude_blocked_rate_limit_synthesized_w100.txt";
+    let ev = evaluate(name);
+    assert!(
+        matched(&ev, rule::BLOCKED_RATE_LIMIT),
+        "{name}: the stale-reset rule matched"
+    );
+    assert!(
+        !matched(&ev, rule::BLOCKED_PERMISSION),
+        "{name}: no selection chrome, so the permission rule stays out of it"
+    );
+    let v = fold_verdict(name, None);
+    assert_eq!(v.state, AgentState::Blocked, "{name}: verdict blocked");
+    assert_eq!(v.detail.as_ref().map(|d| d.as_str()), Some("rate_limit"));
+}
+
+/// The auto-continue line at the reset instant reads `Usage limit reset · continuing
+/// automatically`. One rule covers both wordings, which is why it matches `re(ached|set)` rather
+/// than the fixture's line alone.
+#[test]
+fn the_reset_wording_of_the_auto_continue_line_also_matches() {
+    let mut snap = synthetic_snapshot();
+    snap.tail_text = "  Usage limit reset · continuing automatically\n\
+                      \x20 ⏵⏵ accept edits on (shift+tab to cycle)\n"
+        .to_string();
+    let ev = engine().evaluate(&snap);
+    assert!(matched(&ev, rule::WORKING_RATE_LIMIT));
+}
+
+/// A permission prompt drawn during a quota wait still stamps `permission`: the human has a
+/// decision in front of them, which outranks "the clock has not come round yet". Priority is the
+/// only thing deciding this, so it is asserted on the priorities as well as on a screen.
+#[test]
+fn a_permission_prompt_outranks_the_rate_limit_rules() {
+    let m = manifest();
+    let blocked_rate = &m.rules[rule::BLOCKED_RATE_LIMIT];
+    assert_eq!(blocked_rate.state, AgentState::Blocked);
+    assert_eq!(
+        blocked_rate.detail.as_ref().map(|d| d.as_str()),
+        Some("rate_limit")
+    );
+    for index in [
+        rule::BLOCKED_PERMISSION,
+        rule::BLOCKED_PLAN,
+        rule::BLOCKED_TRUST,
+    ] {
+        assert!(
+            m.rules[index].priority > blocked_rate.priority,
+            "rule #{index} at {} must outrank rate_limit at {}",
+            m.rules[index].priority,
+            blocked_rate.priority
+        );
+    }
+    // And the working rule outranks the ordinary working anchors, so the detail survives a pane
+    // that draws a spinner beside the wait line.
+    let working_rate = &m.rules[rule::WORKING_RATE_LIMIT];
+    for index in [
+        rule::WORKING_TITLE,
+        rule::WORKING_SPINNER,
+        rule::WORKING_BACKGROUND_AGENT,
+    ] {
+        assert!(working_rate.priority > m.rules[index].priority);
+    }
+
+    // On a real screen: the stale-reset line under a live permission dialog stamps `permission`.
+    let fx = Fixture::load(&fixtures_dir().join("claude_blocked_permission_w100.txt")).unwrap();
+    let mut snap = snapshot(&fx);
+    snap.tail_text
+        .push_str("\n  Your usage limit has reset · press enter to continue\n");
+    let ev = engine().evaluate(&snap);
+    assert!(matched(&ev, rule::BLOCKED_RATE_LIMIT) && matched(&ev, rule::BLOCKED_PERMISSION));
+    let blocked = ev
+        .evidence
+        .iter()
+        .find(|e| matches!(&e.claim, Claim::State(s) if s.state == AgentState::Blocked))
+        .expect("blocked evidence");
+    if let Claim::State(s) = &blocked.claim {
+        assert_eq!(s.detail.as_ref().map(|d| d.as_str()), Some("permission"));
+    }
+}
+
+/// Ordinary conversation about rate limits must not stamp one. The anchors are the two halves of
+/// a status line, not the words on their own.
+#[test]
+fn prose_about_usage_limits_does_not_stamp_rate_limit() {
+    let mut snap = synthetic_snapshot();
+    snap.tail_text = "\
+⏺ The retry helper backs off when the API reports a usage limit reached error, so the
+  batch keeps continuing automatically once the window rolls over.
+
+  Your usage limit has reset, but nothing here presses enter for you.
+
+  ⏵⏵ accept edits on (shift+tab to cycle)
+"
+    .to_string();
+    let ev = engine().evaluate(&snap);
+    assert!(
+        !matched(&ev, rule::WORKING_RATE_LIMIT),
+        "the two halves are on different lines, so the per-line match must not fire"
+    );
+    assert!(
+        !matched(&ev, rule::BLOCKED_RATE_LIMIT),
+        "`press enter to continue` is absent, so blocked must not fire"
+    );
+}
+
 // ---- the manifest as a whole -------------------------------------------------------
 
 #[test]
@@ -725,4 +870,52 @@ fn bundled_manifest_declares_expected_hooks_and_coverage() {
         notif.matcher.as_deref(),
         Some("permission_prompt|elicitation_dialog")
     );
+}
+
+/// The three usage-limit `Notification` types, and the split that makes them worth mapping:
+/// `fired` is the agent resuming by itself (`working`), while `stale` and `disabled` both leave the
+/// session sitting until the human acts (`blocked`). Names verified against Claude Code's hooks
+/// reference; they require 2.1.234 or later.
+#[test]
+fn quota_auto_resume_notifications_split_working_from_blocked() {
+    let m = manifest();
+    let hooks = m.hooks.as_ref().unwrap();
+    let by_matcher = |name: &str| {
+        hooks
+            .map
+            .iter()
+            .find(|h| h.event == "Notification" && h.matcher.as_deref() == Some(name))
+            .unwrap_or_else(|| panic!("Notification matcher {name} is mapped"))
+    };
+    for (matcher, state) in [
+        ("quota_auto_resume_fired", AgentState::Working),
+        ("quota_auto_resume_stale", AgentState::Blocked),
+        ("quota_auto_resume_disabled", AgentState::Blocked),
+    ] {
+        let Claim::State(s) = &by_matcher(matcher).claim else {
+            panic!("{matcher} claims a state");
+        };
+        assert_eq!(s.state, state, "{matcher}");
+        assert_eq!(
+            s.detail.as_ref().map(|d| d.as_str()),
+            Some("rate_limit"),
+            "{matcher}: the detail is what tells a quota wait from a permission prompt"
+        );
+    }
+    // The permission matcher must not swallow them: it is the first `Notification` entry in the
+    // file, and the intake returns on the first matching matcher. Its alternatives are plain
+    // literals, so disjointness is a substring question.
+    let permission = by_matcher("permission_prompt|elicitation_dialog");
+    for alternative in permission.matcher.as_deref().unwrap().split('|') {
+        for name in [
+            "quota_auto_resume_fired",
+            "quota_auto_resume_stale",
+            "quota_auto_resume_disabled",
+        ] {
+            assert!(
+                !name.contains(alternative),
+                "{name} must not match the permission matcher alternative {alternative}"
+            );
+        }
+    }
 }

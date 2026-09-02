@@ -55,6 +55,20 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   to abort; the reconciliation now does too. The rollups are convergent, so the next cycle rewrites
   whatever this one skipped.
 
+- **A Claude pane waiting out a usage limit read `idle`, and `done` once it carried an unreviewed
+  mark.** Since Claude Code 2.1.234 automatic continue is on by default: hitting a claude.ai usage
+  limit leaves the session open with a line like `Usage limit reached · continuing automatically at
+  3:45pm · esc to cancel` and no working chrome of any kind, so nothing tma looked at said the agent
+  was still on the job. `tma status` counted the pane as finished, and a supervisor loop waiting on
+  `done` woke up to a turn that had not ended. The wait is now `working/rate_limit` while Claude
+  Code resumes on its own, and `blocked/rate_limit` when it halts instead: the reset landed while
+  the machine slept for more than half an hour and it wants an Enter keypress, or automatic continue
+  ended without continuing and it wants a fresh prompt. Both the `Notification` hook
+  (`quota_auto_resume_fired` / `_stale` / `_disabled`) and a screen rule carry it, so a pane is
+  covered whether or not its hooks are installed. The `rate_limit` detail is what makes this usable
+  from a script: `tma wait --until blocked` still fires for either kind of stop, and the detail
+  beside it says whether the pane needs a decision from you or only needs the clock.
+
 ## [0.5.8] - 2026-09-01
 
 ### Changed
