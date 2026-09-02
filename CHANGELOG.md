@@ -55,6 +55,43 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   to abort; the reconciliation now does too. The rollups are convergent, so the next cycle rewrites
   whatever this one skipped.
 
+- **A Claude pane waiting out a usage limit read `idle`, and `done` once it carried an unreviewed
+  mark.** Since Claude Code 2.1.234 automatic continue is on by default: hitting a claude.ai usage
+  limit leaves the session open with a line like `Usage limit reached · continuing automatically at
+  3:45pm · esc to cancel` and no working chrome of any kind, so nothing tma looked at said the agent
+  was still on the job. `tma status` counted the pane as finished, and a supervisor loop waiting on
+  `done` woke up to a turn that had not ended. The wait is now `working/rate_limit` while Claude
+  Code resumes on its own, and `blocked/rate_limit` when it halts instead: the reset landed while
+  the machine slept for more than half an hour and it wants an Enter keypress, or automatic continue
+  ended without continuing and it wants a fresh prompt. Both the `Notification` hook
+  (`quota_auto_resume_fired` / `_stale` / `_disabled`) and a screen rule carry it, so a pane is
+  covered whether or not its hooks are installed. The `rate_limit` detail is what makes this usable
+  from a script: `tma wait --until blocked` still fires for either kind of stop, and the detail
+  beside it says whether the pane needs a decision from you or only needs the clock.
+
+- **Claude's `blocked` claim arrived about six seconds late.** It rode the `Notification` hook,
+  which Claude Code fires only after a permission prompt has already been waiting, so for those six
+  seconds `tma ls` said `working`, `tma jump --blocked` skipped the pane, and the notification you
+  had configured for exactly this moment had not gone out. tma now installs Claude's
+  `PermissionRequest` hook, which fires the instant a tool call needs a decision. It writes no
+  decision back (it exits 0 with nothing on stdout), so Claude Code draws its normal prompt and
+  answers to you as before; the `Notification` claim stays as a fallback. Run `tma install-hooks
+  claude` to pick it up.
+
+### Added
+
+- **`tma ls --json` rows say what a blocked Claude pane is actually asking about**, through three
+  new keys: `pending_tool` (`Bash`, `Edit`, …), `pending_call` (the call id), and `pending_summary`
+  (one line, at most 120 bytes: the command for Bash, the path for the file tools). The same values
+  are on the pane as `@agent_pending_tool` / `@agent_pending_call` / `@agent_pending_summary`, so a
+  status line can read them with a plain `#{@agent_pending_summary}`. All three are cleared the
+  moment the prompt ends and removed with the rest of the pane's options at session end. The schema
+  stays `1`; the keys are `null` on a pane with nothing pending.
+
+  The summary is agent-supplied text, so it stays local by design: it is in no notification payload,
+  no notify audit line, and no `TMA_*` env var handed to a `[notify] command` sink. Treat it the way
+  you treat the pane title.
+
 ## [0.5.8] - 2026-09-01
 
 ### Changed

@@ -68,6 +68,18 @@ pub mod opt {
     /// it to answer an `api` `permission-reply` op; an empty value refuses that op `requires-unmet`.
     /// Pane scope.
     pub const PERMISSION_REQUEST: &str = "@agent_permission_request";
+    /// The tool name of the call a permission prompt is asking about (Claude's `PermissionRequest`
+    /// `tool_name`). Stamped with [`PENDING_CALL`] and [`PENDING_SUMMARY`] by the event intake and
+    /// cleared with them on every edge that ends the prompt. Pane scope.
+    pub const PENDING_TOOL: &str = "@agent_pending_tool";
+    /// The pending call's id (`tool_use_id`), so a consumer can tell one prompt from the next on a
+    /// pane that blocks twice on the same tool. Pane scope.
+    pub const PENDING_CALL: &str = "@agent_pending_call";
+    /// A one-line, 120-byte summary of the pending call derived from `tool_input`: the command for
+    /// Bash, the path for Edit/Write/Read, else the first string field. **Agent-supplied text**, so
+    /// it is deliberately confined to this option and the JSON rows, it never enters the
+    /// notification payload, the notify audit line, or any env var handed to `sh -c`. Pane scope.
+    pub const PENDING_SUMMARY: &str = "@agent_pending_summary";
     /// The OpenCode server base URL: stamped at registration by the plugin from its
     /// `PluginInput.serverUrl`. The broker's `permission-reply` endpoint, with a config
     /// `[api.opencode] api_base` fallback; absent-and-no-fallback refuses `requires-unmet`.
@@ -639,6 +651,9 @@ mod tests {
         opt::CONTEXT_NOTIFIED_AT,
         opt::MODEL,
         opt::PERMISSION_REQUEST,
+        opt::PENDING_TOOL,
+        opt::PENDING_CALL,
+        opt::PENDING_SUMMARY,
         opt::API_ENDPOINT,
         opt::ACTION,
         opt::SUMMARY,

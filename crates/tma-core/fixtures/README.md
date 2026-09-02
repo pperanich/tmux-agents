@@ -35,3 +35,20 @@ holder's name redacted width-preservingly out of the welcome banner). Their
 **headers are synthesized**, so no test may assert on the title, pid or
 `captured_at` of these four. `plan_verdict_survives_an_idle_marker_in_the_title`
 authors a `✳` title onto the plan body deliberately and says so.
+
+## Synthesized bodies
+
+Two fixtures are synthesized whole, header *and* body, and their names say so:
+
+- `claude_working_rate_limit_synthesized_w100.txt`
+- `claude_blocked_rate_limit_synthesized_w100.txt`
+
+They carry Claude Code's usage-limit auto-continue lines. Reaching that screen
+means exhausting a claude.ai usage limit on demand, which no test run can do, so
+the bodies are built from the lines the vendor documentation prints verbatim
+(`Usage limit reached · continuing automatically at 3:45pm · esc to cancel` and
+`Your usage limit has reset · press enter to continue`, Claude Code 2.1.234+)
+dropped into an otherwise ordinary pane. The rules beside them match the stable
+substrings rather than the whole line, and the tests that replay them carry
+`synthesized` in their names. Replace both with real captures if a usage limit
+is ever hit with `tma debug capture` to hand.

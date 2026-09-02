@@ -27,6 +27,18 @@ onto two other axes so the state token stays stable:
   rate-limited agent is `working/rate_limit`, because the agent auto-resumes and
   the ball is not with the human; an agent that *halts* asking for confirmation
   is `blocked/permission` on its own prompt evidence.
+
+  That `rate_limit` split is implemented, not hypothetical. Claude Code waits out
+  a usage limit in the open session and continues on its own, which is
+  `working/rate_limit`, and when the wait ends without continuing (the reset
+  landed while the machine slept, or automatic continue was off) it sits there
+  until you act, which is `blocked/rate_limit`. Both the hook claims and the
+  screen rules carry it, per [agent coverage](../reference/agent-coverage.md#claude-code-mapping).
+  The detail is what makes that usable from a script: `tma wait --until blocked`
+  fires for either kind of stop, and the token beside it says whether the pane
+  needs a decision from you (`permission`, `plan`, `trust`) or merely needs the
+  clock to come round (`rate_limit`). Poll it out of `tma ls --json`'s `detail`
+  key and let the second kind wait.
 - `@agent_attention` is a presentation flag meaning "this changed and you have
   not seen it yet". It is set on a noteworthy transition and cleared two ways.
   By navigation: on the pane you move to, and on the pane you move away from. And

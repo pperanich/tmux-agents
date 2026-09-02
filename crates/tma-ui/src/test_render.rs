@@ -82,6 +82,7 @@ pub(crate) fn row(
         model: None,
         cwd: None,
         repo: None,
+        pending: None,
     }
 }
 

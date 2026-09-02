@@ -24,8 +24,9 @@ emit today:
 | `permission` | `blocked` | a tool-use permission prompt: approving grants the one action in front of the user |
 | `plan` | `blocked` | a plan-approval dialog. Its affirmative option grants **every following action**, so `tma act approve` deliberately does not resolve here |
 | `trust` | `blocked` | a workspace-trust gate. Its affirmative option grants the **whole folder**, so neither `approve` nor `deny` resolves here |
+| `rate_limit` | `working` **or** `blocked` | a usage-limit wait. The state is the whole point of the pair: `working/rate_limit` is the agent waiting out its own limit and resuming by itself, `blocked/rate_limit` is a wait that halted and needs you (a keypress, or a fresh prompt). A `wait --until blocked` that also reads the detail can tell "needs the clock" from "needs permission" |
 
-`tma-core` additionally declares `question`, `error`, `rate_limit`,
+`tma-core` additionally declares `question`, `error`,
 `background` and `compacting` as constants; no bundled manifest emits them yet.
 
 Every `@agent_*_at` value is epoch **milliseconds** (13 digits today), not
@@ -75,6 +76,8 @@ options carry rollups and hints.
 | `@agent_context_notified_at` | pane | the `context_high` notify marker: a present/absent **armed flag** (absent = armed, present = already fired), never the state lane's `@agent_notified_at`; its value is an epoch **ms** for debuggability only, not a comparison basis. Written only by the context-high notifier, guarded set-from-absent so concurrent firers resolve to one bell; cleared (rearmed) when the gauge dips below `threshold - 10` |
 | `@agent_model` | pane | best-effort model-name label the file-tail context intake reads from the rollout window; never load-bearing for a gauge, it only feeds `tma doctor`'s recognized-model line (a model no `[telemetry.windows]` entry names). Plain-set, cleared on deregister, absent when no model record sat in the tail |
 | `@agent_permission_request` | pane | the pending OpenCode permission request id, stamped by the event intake from a `permission.asked` edge (ownership-filtered against `@agent_session`) and cleared on the edges that end the prompt (a working/idle transition, or a `permission.replied`); the action broker reads it to answer an `[api]` `permission-reply` op, and an empty value refuses that op `requires-unmet`. The broker also clears it itself on a 2xx reply, so a spent id does not read as a pending request until the plugin's next event; it leaves the option alone on a 404, which may already name a newer request |
+| `@agent_pending_tool`, `@agent_pending_call` | pane | the tool name and call id of the permission decision a `blocked` pane is waiting on, stamped from Claude Code's `PermissionRequest` hook (`tool_name` / `tool_use_id`). Set together with `@agent_pending_summary` and cleared together on every edge that ends the prompt: the pane leaving `blocked` (a `PostToolUse`/`Stop` working-or-idle stamp), and `SessionEnd`, which removes the whole tuple. Absent on an agent with no such hook |
+| `@agent_pending_summary` | pane | a one-line summary of that call, derived from the hook's `tool_input`: the command for `Bash`, the file path for `Edit`/`Write`/`Read`, otherwise the first string-valued field. **Agent-supplied text**, capped at 120 bytes with control characters stripped and a `…` marking a truncation. Treat it the way you treat a pane title: it is not a machine token, and tma deliberately keeps it out of the notification payload, the notify audit line, and every `TMA_*` env var, so a summary can never reach a `[notify] command` sink or a third-party push carrier. It is here and on the JSON rows, both of which stay on your machine |
 | `@agent_api_endpoint` | pane | the OpenCode server base URL, stamped at registration by the plugin from its serving address; the broker's `permission-reply` endpoint, with a `[api.opencode] api_base` config fallback (neither present refuses `requires-unmet`) |
 | `@agent_ignore` | pane | **you set this one.** Any non-empty value takes the pane out of detection: no identity, no capture, no row, and a stamp left from before it was set is cleared on the next cycle. `tmux set-option -p @agent_ignore 1` in the pane (add `-t <pane>` from elsewhere), `tmux set-option -pu @agent_ignore` to undo. tma never writes or clears it; `tma doctor` lists every pane carrying it |
 | `@agent_mute_until` | pane | notification mute deadline in epoch **ms**: while it is ahead of the clock the pane fires no notification of any kind (state triggers and `context_high` alike), and every other lane is untouched — it is still detected, stamped, and counted. `tma mute --for 30m` writes now + the window, a bare `tma mute` writes the far-future sentinel `99999999999999` (indefinite), and `tma mute --clear` unsets it. Living in the store is what makes a mute survive a tma or daemon restart |
@@ -121,6 +124,9 @@ A versioned, additive-only document. The top level is `{ "schema": 1, "agents":
 | `repo` | string or null | the pane's git repo name (basename of the git common dir's parent, so worktrees share their origin's name), `null` when the pane's cwd resolves to no repo |
 | `branch` | string or null | the pane's checked-out branch (the literal `HEAD` for a detached head), `null` when `repo` is |
 | `worktree` | boolean or null | `false` for a resolved main checkout, `true` for a linked worktree, `null` exactly when `repo` is |
+| `pending_tool` | string or null | the tool name of the permission decision the pane is waiting on (`@agent_pending_tool`), `null` when nothing is pending |
+| `pending_call` | string or null | that call's id, `null` exactly when `pending_tool` is (an agent whose hook carries no id stamps `""`) |
+| `pending_summary` | string or null | one line of at most 120 bytes describing the call, `…` where it was truncated, `null` exactly when `pending_tool` is. **Agent-supplied text** (a command line, a path): treat it as you treat `title`. It is deliberately absent from the notification payload, the notify audit line, and every `TMA_*` env var, so it never leaves the machine through a `[notify] command` sink |
 | `server` | string | the tmux server this row was observed on: its own `#{socket_path}` (e.g. `/private/tmp/tmux-501/default`) |
 | `host` | string | the hostname of the machine that observed it |
 
@@ -129,7 +135,8 @@ that conjunction precomputed from the one definition the whole tool shares (it i
 also what `wait --until done` and `--state done` mean), so consumers stop
 re-deriving it. The state token itself is never mangled — it stays `idle`. All of
 `attention`, `done`, `session`, `context`, `context_at_ms`, `muted`, `tokens`,
-`repo`, `branch`, `worktree`, `server`, and `host` are additive, so the schema stays `1`;
+`repo`, `branch`, `worktree`, `pending_tool`, `pending_call`, `pending_summary`,
+`server`, and `host` are additive, so the schema stays `1`;
 render an absent `context` or `tokens` as absence (no gauge, no count), never as
 `0`. The `repo`/`branch`/`worktree`
 keys are best-effort: the resolver memoizes one bounded `git` call per unique cwd
@@ -164,7 +171,7 @@ The single matched agent row as one schema-1 object: the top-level `schema` key
 plus the same row fields as an `ls --json` element (`pane`, `agent`, `state`,
 `detail`, `since`, `since_ms`, `episode_ms`, `locator`, `title`, `attention`, `done`,
 `session`, `context`, `context_at_ms`, `muted`, `tokens`, `repo`, `branch`,
-`worktree`, `server`, `host`). It shares the serialization with `ls --json`, so the two can
+`worktree`, `pending_tool`, `pending_call`, `pending_summary`, `server`, `host`). It shares the serialization with `ls --json`, so the two can
 never disagree on keys, order, or null handling.
 
 The fleet targets satisfy a SET of panes, so `wait --all --json` and `wait

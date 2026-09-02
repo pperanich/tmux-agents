@@ -423,6 +423,7 @@ mod tests {
             model: None,
             cwd: None,
             repo: None,
+            pending: None,
         }
     }
 

@@ -428,6 +428,49 @@ mod tests {
         assert!(!removed.contains("tma-hook claude Stop"));
     }
 
+    /// The writer's matcher and the manifest's must agree, and the way they agree is that the
+    /// writer emits NONE: an installed entry with no `matcher` key fires for every occurrence, so
+    /// every `notification_type` reaches `tma event` and the manifest's `[[hooks.map]]` matchers are
+    /// the only filter. Mapping a new `Notification` type (the `quota_auto_resume_*` trio) therefore
+    /// needs no config rewrite, but only while this holds. A `matcher` written here would silently
+    /// narrow what an installed config delivers, and the manifest would keep claiming otherwise.
+    #[test]
+    fn the_installed_notification_hook_carries_no_matcher() {
+        let events = manifests::hook_events(&claude());
+        let installed = edit_settings_install("{}\n", &wrapper(), "claude", &events).unwrap();
+        let root = json_value::parse(&installed).unwrap();
+        let entries = root
+            .get("hooks")
+            .and_then(|h| h.get("Notification"))
+            .and_then(|n| match n {
+                Value::Arr(a) => Some(a),
+                _ => None,
+            })
+            .expect("the installer wired a Notification array");
+        assert_eq!(entries.len(), 1, "one entry, ours");
+        assert!(
+            entries[0].get("matcher").is_none(),
+            "a matcher here would filter the manifest's matchers out of reach: {installed}"
+        );
+        // Same for `PermissionRequest`, whose matcher would filter on TOOL NAME: narrowing it would
+        // leave the prompts for every unnamed tool undetected until the six-second Notification.
+        let permission = root
+            .get("hooks")
+            .and_then(|h| h.get("PermissionRequest"))
+            .and_then(|n| match n {
+                Value::Arr(a) => Some(a),
+                _ => None,
+            })
+            .expect("the installer wired a PermissionRequest array");
+        assert!(permission[0].get("matcher").is_none());
+        // And it writes no decision back: the wrapper discards stdout and exits 0, so Claude Code
+        // draws its normal prompt. Anything else here would be tma answering permission prompts.
+        assert_eq!(
+            nested_commands(&permission[0]),
+            vec!["/opt/tma/tma-hook claude PermissionRequest".to_string()]
+        );
+    }
+
     // ---- Gemini settings.json adapter -------------------------------------------
 
     #[test]

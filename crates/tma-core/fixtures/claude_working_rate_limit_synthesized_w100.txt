@@ -1,0 +1,18 @@
+# agent: claude
+# state: working
+# title: ✳ Wire the retry helper
+# command: claude
+# pid: 4211
+# captured_at: 1788017873776
+---
+
+⏺ Reading the retry helper to see which call sites still take the old timeout.
+
+  Read 1 file, ran 2 shell commands
+
+  Usage limit reached · continuing automatically at 3:45pm · esc to cancel
+
+╭──────────────────────────────────────────────────────────────────────────────────────────────────╮
+│ >                                                                                                │
+╰──────────────────────────────────────────────────────────────────────────────────────────────────╯
+  ⏵⏵ accept edits on (shift+tab to cycle)

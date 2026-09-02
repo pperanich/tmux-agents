@@ -155,6 +155,23 @@ fn write_row_fields(j: &mut JsonWriter, r: &AgentRow, origin: &Origin) {
             j.null("worktree");
         }
     }
+    // Additive (schema stays 1): the permission decision the pane is waiting on, from Claude's
+    // `PermissionRequest` payload. All three keys are null together (nothing pending, or an agent
+    // whose hooks carry none). `pending_summary` is AGENT-SUPPLIED text, a command line, a path,
+    // so it is deliberately confined to this document and the pane options: it is in no
+    // notification payload, no audit line, and no `TMA_*` env var.
+    match &r.pending {
+        Some(p) => {
+            j.string("pending_tool", &p.tool);
+            j.string("pending_call", &p.call);
+            j.string("pending_summary", &p.summary);
+        }
+        None => {
+            j.null("pending_tool");
+            j.null("pending_call");
+            j.null("pending_summary");
+        }
+    }
     // Additive (schema stays 1): where the row was observed. Resolved once per invocation and
     // repeated per row, because a merged multi-machine set has no other place to put it — two hosts'
     // rows collide on `%5` without them.
@@ -406,6 +423,7 @@ mod tests {
             model: None,
             cwd: None,
             repo: None,
+            pending: None,
         }
     }
 
@@ -617,6 +635,9 @@ mod tests {
                 "locator",
                 "muted",
                 "pane",
+                "pending_call",
+                "pending_summary",
+                "pending_tool",
                 "repo",
                 "schema",
                 "server",
@@ -657,6 +678,9 @@ mod tests {
                 "locator",
                 "muted",
                 "pane",
+                "pending_call",
+                "pending_summary",
+                "pending_tool",
                 "repo",
                 "schema",
                 "server",
@@ -698,6 +722,9 @@ mod tests {
                 "locator",
                 "muted",
                 "pane",
+                "pending_call",
+                "pending_summary",
+                "pending_tool",
                 "repo",
                 "schema",
                 "server",

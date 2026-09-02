@@ -24,6 +24,26 @@ pub struct RepoLabel {
     pub worktree: bool,
 }
 
+/// The permission decision a `blocked` pane is waiting on, read off the `@agent_pending_*` trio.
+/// Clustered like [`RepoLabel`] because the three options are stamped and cleared together: a row
+/// carrying a tool without its call id would be a state the writer cannot produce.
+///
+/// `summary` is **agent-supplied text** derived from the hook's `tool_input` (a command line, a
+/// path). It is confined to the pane option and the JSON rows on purpose: it never reaches the
+/// notification payload, the notify audit line, or a `TMA_*` env var, so it cannot leave the
+/// machine through a `[notify] command` sink.
+#[derive(Clone, Debug)]
+pub struct PendingCall {
+    /// The tool name the prompt is about (`@agent_pending_tool`), e.g. `Bash`.
+    pub tool: String,
+    /// The call id (`@agent_pending_call`), distinguishing two prompts for the same tool. Empty
+    /// when the agent's hook carried none.
+    pub call: String,
+    /// One line of at most 120 bytes describing the call (`@agent_pending_summary`), `…` where it
+    /// was truncated. Empty when `tool_input` carried no usable string.
+    pub summary: String,
+}
+
 /// One agent pane's resolved state for a surface (`tma ls`, `tma status`, jump, the picker).
 #[derive(Clone, Debug)]
 pub struct AgentRow {
@@ -73,6 +93,9 @@ pub struct AgentRow {
     /// The resolved repo annotation (name/branch/worktree), `None` until resolved or when the pane's
     /// cwd is not a git repo. Set by `tma_runtime::repo::annotate_rows`.
     pub repo: Option<RepoLabel>,
+    /// The permission decision the pane is waiting on, `None` when nothing is pending or the
+    /// agent's hooks carry no such payload. The `pending_*` keys of the JSON rows.
+    pub pending: Option<PendingCall>,
 }
 
 impl AgentRow {
@@ -260,6 +283,7 @@ mod tests {
             model: None,
             cwd: None,
             repo: None,
+            pending: None,
         }
     }
 
