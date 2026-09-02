@@ -11,6 +11,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use tma_tmux::tmux::ps_all;
+
 use common::{DaemonGuard, Scratch};
 use tma_test_support as common;
 
@@ -1001,6 +1003,87 @@ fn a_seed_whose_list_panes_times_out_is_retried_not_dropped() {
     assert!(
         s.status_u64("seed_retries") >= 1,
         "the shim must have made the seed's list-panes time out{}",
+        s.forensics(&[&pane])
+    );
+}
+
+// --- 7. Agent exit: the quit pane is cleared by its next quiet edge, not by the sweep. ---
+
+/// The pane shell's child process (`pid`, comm basename), `None` once it exits. The same `ps` walk
+/// identity runs, rather than `#{pane_current_command}`, which reports the multi-call binary under
+/// uutils.
+fn child_of(pane_pid: u32) -> Option<(u32, String)> {
+    ps_all()
+        .expect("ps")
+        .into_iter()
+        .find(|p| p.ppid == pane_pid)
+        .map(|p| (p.pid, basename(&p.comm)))
+}
+
+/// A user quits their agent and the pane falls back to its shell. The daemon's per-edge look used
+/// to identify the pane, find no agent, and leave removal to the sweep, so a status line rendering
+/// `#{@agent_summary}` kept showing `zsh* idle:1` for a whole sweep cadence (36 s measured against
+/// the default 45 s one). The pane's own quiet edge is the daemon's first look after the exit, so
+/// that is where the stamp comes down; the sweep here is pinned 13x past the poll ceiling, which
+/// makes a pass the on-demand tier's alone.
+#[test]
+fn a_quit_agent_is_cleared_by_the_quiet_edge_not_the_sweep() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("t28");
+    let (pane, pane_pid) = new_shell_session(&s, "s1");
+
+    // The agent is a foreground CHILD of the pane's shell, so killing it leaves the pane, its
+    // shell, and the stale stamp standing, which is the shape the bug shows up in.
+    burst(&s, &pane, "sleep 600");
+    common::poll_until("the agent child to start", || child_of(pane_pid).is_some());
+    let (agent_pid, _comm) = child_of(pane_pid).expect("the agent child");
+    let names = process_names_toml(&s, "s1", agent_pid);
+    write_manifest(
+        &s,
+        &format!(
+            "min_engine_version = \"0.1\"\n\
+         [identity]\nprocess_names = [{names}]\n\
+         [capture]\nvisible = [\"working\", \"idle\", \"blocked\"]\n",
+        ),
+    );
+
+    let _daemon = spawn_daemon(&s, PINNED_SWEEP);
+    s.expect_status("clients", "1");
+    assert!(
+        wait_opt_not(&s, &pane, "@agent_state", ""),
+        "the daemon must stamp the live agent before its exit means anything{}",
+        s.forensics(&[&pane])
+    );
+
+    let quit = Instant::now();
+    let victim = rustix::process::Pid::from_raw(agent_pid as i32).expect("agent pid > 0");
+    assert!(
+        rustix::process::kill_process(victim, rustix::process::Signal::KILL).is_ok(),
+        "SIGKILL {agent_pid}"
+    );
+    // The shell repaints its prompt over the dead agent: that output is the quiet edge.
+    assert!(
+        wait_opt(&s, &pane, "@agent_state", ""),
+        "the quit agent's stamp must come down on the pane's next quiet edge{}",
+        s.forensics(&[&pane])
+    );
+    eprintln!(
+        "quit agent's stamp cleared {} ms after the exit",
+        quit.elapsed().as_millis()
+    );
+    assert_eq!(
+        s.get(&pane, "#{@agent_summary}"),
+        "",
+        "the window rollup comes down in the same invocation as the stamp"
+    );
+    assert_eq!(
+        s.status_u64("sweeps"),
+        0,
+        "the clear must be the on-demand tier's: no sweep has run{}",
         s.forensics(&[&pane])
     );
 }

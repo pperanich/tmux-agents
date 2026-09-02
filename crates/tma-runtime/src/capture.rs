@@ -2,7 +2,8 @@
 //! strictly additive (with no daemon, hookless panes fall back to [`crate::cycle::run_cycle`]);
 //! events drive state, the sweep repairs it. On-demand ([`CaptureState::handle_edges`]): `%output`
 //! bursts become per-pane active→quiet edges, captured one pane per edge (the hookless `blocked`
-//! catch), never a fan-out. The sweep ([`CaptureState::run_sweep`]) runs the full poll cycle every
+//! catch), never a fan-out; an edge landing on a pane whose agent has exited clears its stamp there
+//! and then, so a quit agent leaves the surfaces in about a second. The sweep ([`CaptureState::run_sweep`]) runs the full poll cycle every
 //! 30-60 s and is the ONLY multi-`capture-pane` fan-out (discovers agents, clears dead ones, corrects
 //! drift). Hook-liveness demotion (the edge-count rule on [`DEMOTE_EDGES`]) handles wiring that dies
 //! silently: it needs the persistent per-pane memory only the daemon holds.
@@ -16,7 +17,7 @@ use tma_core::stamp::opt;
 use tma_core::{AgentState, FoldConfig, ReadResult, StampedState};
 
 use tma_tmux::control::ActivityEdge;
-use tma_tmux::stamp;
+use tma_tmux::stamp::{self, StampPlan};
 use tma_tmux::tmux::{PaneRecord, Tmux, TmuxError};
 
 use crate::cycle;
@@ -233,10 +234,43 @@ impl CaptureState {
                 registration.as_ref(),
             );
             let PaneIdentity::Agent(id) = identity else {
-                continue; // not an agent (or remote): nothing to capture; the sweep owns removal
+                // Not an agent (or remote): nothing to capture. A lingering stamp means its agent
+                // exited and the pane fell back to its shell, so remove it here (plain unsets, the
+                // guard flag is irrelevant) rather than leaving `@agent_state` and both rollups on
+                // the status line for a whole sweep cadence. The sweep stays the backstop for a
+                // pane no edge arrives on.
+                if prev.is_some() {
+                    match stamp::apply(tmux, &panes, &rec.pane_id, &StampPlan::Remove, true) {
+                        Ok(()) => {}
+                        // The pane died before its own removal: moot, and the sweep clears residue.
+                        Err(e) if cycle::is_dead_pane(&e) => {
+                            self.hooks.remove(&edge.pane);
+                            self.skipped_dead_edges += 1;
+                            continue;
+                        }
+                        Err(e) => {
+                            self.dropped_edges += remaining + 1;
+                            return Err(e);
+                        }
+                    }
+                }
+                // Clear a stale title anchor so a lost title-narrowed match leaves nothing behind
+                // for a future coincidence. No-op when the pane never had one.
+                if let Some(cmd) = identity::title_anchor_command(
+                    &rec.pane_id,
+                    stored_title_anchor.map(String::as_str),
+                    None,
+                ) {
+                    let _ = tmux.apply(&[cmd]);
+                }
+                self.hooks.remove(&edge.pane);
+                continue;
             };
             if id.agent_pid == 0 {
-                continue; // registered but no walkable process yet: hold; the sweep clears a dead one
+                // Registered but no walkable process yet. Unlike the branch above, a stamp here is
+                // not evidence of an exit, so it is held: the poll cycle's 30 s dead-registration
+                // reaper owns the liveness call, and it runs in the sweep.
+                continue;
             }
 
             // Hook-capable = carries a hook registration (@agent_session) OR its manifest

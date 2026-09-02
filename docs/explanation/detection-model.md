@@ -351,7 +351,10 @@ low-frequency reconciliation sweep, the full poll cycle every 30 to 60 seconds,
 rediscovers agents that never announced themselves and corrects any drift. The
 governing invariant is that events *drive* state and the sweep *repairs* it, so
 the sweep's latency bounds only how long an anomaly can persist, never how fast
-a normal transition is seen.
+a normal transition is seen. Quitting an agent is a normal transition on that
+reading: the daemon removes the pane's stamp and recomputes both rollups on the
+first quiet edge after the exit (the shell repainting its prompt is that edge),
+and the sweep is the backstop for a pane no edge arrives on.
 
 The numbered decision records behind this model live in the repository:
 [`docs/internal/ARCHITECTURE.md`](https://github.com/pperanich/tmux-agents/blob/main/docs/internal/ARCHITECTURE.md)
