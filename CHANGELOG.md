@@ -52,6 +52,17 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Fixed
 
+- **An upgrade that caught the old daemon mid-`tmux` call left you with no daemon for a minute.**
+  When a newer tma replaces the daemon of an older one, it signals the old daemon and waits for it to
+  let go of the socket and the lock. That wait was 2 seconds, and the daemon notices a signal between
+  its `tmux` calls rather than inside one, so a SIGTERM landing during a call that was itself slow
+  (the one-shot cap is 3 seconds) could not be acted on in time. The replacement was then not started
+  at all, and the 60 second restart cooldown that exists to stop a flapping upgrade from retrying
+  every second blocked the next attempt too. So one slow shutdown on a loaded box cost a full minute
+  with nothing running, and detection fell back to the poll tier for that minute. The wait is now
+  derived from the one-shot cap rather than guessed at, with a margin, and the two constants say so
+  in each other's terms so neither can drift under the other.
+
 - **A pane could sit at `unknown` until the next sweep because something else held the tty for a
   moment.** When the daemon looks at a pane whose foreground is not the agent (a shell handing the
   terminal back, an `env` that has not exec'd yet, an editor), the fold caps the verdict at

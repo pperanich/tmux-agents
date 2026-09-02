@@ -305,9 +305,16 @@ pub enum StopOutcome {
 }
 
 /// How long [`stop_daemon_at`] waits out a signalled daemon. A measured shutdown unlinks the socket
-/// and exits in under 10 ms, so this is two orders of magnitude of headroom: reaching it means the
-/// daemon is wedged, not that the box was busy.
-const STOP_TIMEOUT: Duration = Duration::from_secs(2);
+/// and exits in under 10 ms, so reaching this means the daemon is wedged, not that the box was busy.
+///
+/// The floor is [`tma_tmux::tmux::TMUX_TIMEOUT`] and is not a matter of taste. The daemon notices a
+/// signal between `tmux` one-shots, never inside one, so a SIGTERM landing mid-call cannot be acted
+/// on until that call returns or hits its own cap. A budget below that cap therefore calls an
+/// ordinary slow read a wedged daemon, and the caller that believes it pays for the mistake: the
+/// upgrade eviction declines to spawn the replacement and its 60 s [`RESTART_COOLDOWN`] blocks every
+/// retry, so one slow shutdown costs a minute with nothing running. Keep this at least the one-shot
+/// cap plus a margin; never lower either below the other.
+const STOP_TIMEOUT: Duration = Duration::from_secs(tma_tmux::tmux::TMUX_TIMEOUT.as_secs() + 2);
 
 /// The poll step while waiting out a signalled daemon.
 const STOP_POLL: Duration = Duration::from_millis(10);
