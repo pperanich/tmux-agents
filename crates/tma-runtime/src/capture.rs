@@ -37,6 +37,13 @@ pub(crate) const DEMOTE_EDGES: u32 = 5;
 /// touched entry is dropped (a lost demotion self-heals on the next edges / sweep).
 const MAX_TRACKED: usize = 4096;
 
+/// Follow-up looks one pane gets per foreground-cap episode (see [`Landed::ForegroundCapped`]).
+/// The cap is a verdict about a process fact, and that fact flips with no output at all, so no
+/// further edge would arrive to re-read it. Three at the quiet cadence covers the transient shapes
+/// (a pre-exec `env`, a prompt handing the tty back) in a few seconds without turning a pane whose
+/// foreground is legitimately something else (an editor, a pager) into a capture treadmill.
+const RECHECK_LIMIT: u32 = 3;
+
 /// Per-pane hook-liveness memory (daemon-only). Bounded and pruned.
 #[derive(Clone, Debug, Default)]
 struct PaneHook {
@@ -55,6 +62,17 @@ struct PaneHook {
     touched: u64,
 }
 
+/// What one capture-sourced stamp landed as. Only the fold's foreground cap is distinguished: it is
+/// the one verdict that turns on a process fact rather than the screen, so it is the one the
+/// on-demand tier cannot wait for an activity edge to correct.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Landed {
+    /// `unknown` with [`Provenance::Process`]: the fold's foreground cap answered.
+    ForegroundCapped,
+    /// Anything else: the screen, or a held hook claim, decided it.
+    Settled,
+}
+
 /// The daemon's on-demand + sweep state. Owned by the serve loop (single-threaded); no interior
 /// mutability.
 pub struct CaptureState {
@@ -64,6 +82,14 @@ pub struct CaptureState {
     demote_edges: u32,
     /// Per-pane hook-liveness counters, hook-capable panes only.
     hooks: HashMap<String, PaneHook>,
+    /// Follow-up looks already spent on each pane's current foreground-cap episode. An entry lives
+    /// only while the cap keeps answering: the first uncapped verdict drops it, so the next episode
+    /// starts with a full [`RECHECK_LIMIT`] budget. Bounded like [`CaptureState::hooks`] and pruned
+    /// by the sweep.
+    rechecks: HashMap<String, u32>,
+    /// Panes owed a follow-up look this iteration, drained by the serve loop into the control pool
+    /// (see [`CaptureState::take_recheck`]).
+    recheck_due: Vec<String>,
     /// Monotone touch clock for [`MAX_TRACKED`] eviction.
     clock: u64,
     /// `-F` conditional-write support, resolved once and cached (see [`stamp`]).
@@ -92,6 +118,10 @@ pub struct CaptureState {
     /// `TMUX_TIMEOUT`, which is the signature to look for when a capture-latency test fails on CI
     /// and nothing else in the counters looks wrong. Monotone.
     dropped_edges: u64,
+    /// Follow-up looks scheduled after a foreground-capped capture, over the daemon's life. Nonzero
+    /// means panes were reaching the fold's foreground cap on their quiet edge, which is the
+    /// signature to look for when a pane sits at `unknown` longer than the quiet cadence. Monotone.
+    recheck_looks: u64,
     /// Panes demoted over the daemon's life (monotone).
     demotions: u64,
     /// Reconciliation sweeps run (monotone).
@@ -110,6 +140,8 @@ impl CaptureState {
             cfg,
             demote_edges,
             hooks: HashMap::new(),
+            rechecks: HashMap::new(),
+            recheck_due: Vec::new(),
             clock: 0,
             guarded: None,
             deferred_seen: Vec::new(),
@@ -118,6 +150,7 @@ impl CaptureState {
             contradiction_captures: 0,
             skipped_dead_edges: 0,
             dropped_edges: 0,
+            recheck_looks: 0,
             demotions: 0,
             sweeps: 0,
             sweep_captures: 0,
@@ -180,14 +213,14 @@ impl CaptureState {
             remaining -= 1;
             let Some(rec) = panes.iter().find(|r| r.pane_id == edge.pane) else {
                 // The pane is gone; drop its hook-liveness memory (the sweep clears any residue).
-                self.hooks.remove(&edge.pane);
+                self.forget_pane(&edge.pane);
                 continue;
             };
 
             // Ignored panes never get captured: the poll cycle owns clearing whatever stamp they
             // still carry, and reading a dev server's screen here would only re-detect it.
             if identity::is_ignored(&rec.options) {
-                self.hooks.remove(&edge.pane);
+                self.forget_pane(&edge.pane);
                 continue;
             }
 
@@ -244,7 +277,7 @@ impl CaptureState {
                         Ok(()) => {}
                         // The pane died before its own removal: moot, and the sweep clears residue.
                         Err(e) if cycle::is_dead_pane(&e) => {
-                            self.hooks.remove(&edge.pane);
+                            self.forget_pane(&edge.pane);
                             self.skipped_dead_edges += 1;
                             continue;
                         }
@@ -263,7 +296,7 @@ impl CaptureState {
                 ) {
                     let _ = tmux.apply(&[cmd]);
                 }
-                self.hooks.remove(&edge.pane);
+                self.forget_pane(&edge.pane);
                 continue;
             };
             if id.agent_pid == 0 {
@@ -310,13 +343,14 @@ impl CaptureState {
                 continue;
             }
 
-            match self.capture_one(tmux, &panes, rec, prev.as_ref(), &id, demoted, now) {
-                Ok(()) => {}
+            let landed = match self.capture_one(tmux, &panes, rec, prev.as_ref(), &id, demoted, now)
+            {
+                Ok(landed) => landed,
                 // The pane died between `list-panes` and its own capture/stamp: skip it, keep
                 // draining so a blocked sibling still fires in the SLA, and drop its demotion memory.
                 // Only `ServerGone` aborts.
                 Err(e) if cycle::is_dead_pane(&e) => {
-                    self.hooks.remove(&edge.pane);
+                    self.forget_pane(&edge.pane);
                     self.skipped_dead_edges += 1;
                     continue;
                 }
@@ -324,7 +358,10 @@ impl CaptureState {
                     self.dropped_edges += remaining + 1;
                     return Err(e);
                 }
-            }
+            };
+            // The verdict that no later edge can correct: schedule (or retire) this pane's bounded
+            // follow-up look before anything else can return early.
+            self.note_foreground_cap(&rec.pane_id, landed == Landed::ForegroundCapped);
             // Persist the flicker anchor for a title-narrowed match (parity with the poll cycle), so
             // an unregistered cursor pane holds identity through the flicker. Registered panes carry none.
             if id.title_match_pid.is_some() {
@@ -360,7 +397,7 @@ impl CaptureState {
         id: &identity::Identified,
         demoted: bool,
         now: u64,
-    ) -> Result<(), TmuxError> {
+    ) -> Result<Landed, TmuxError> {
         let guarded = *self
             .guarded
             .get_or_insert_with(|| stamp::guarded_writes_supported(tmux, all_panes));
@@ -397,7 +434,46 @@ impl CaptureState {
             live.insert(r.pane_id.clone());
         }
         self.hooks.retain(|pane, _| live.contains(pane));
+        self.rechecks.retain(|pane, _| live.contains(pane));
         Ok(())
+    }
+
+    /// Take the panes owed a follow-up look, leaving none behind. The serve loop re-marks each one
+    /// active in the control pool, which re-fires its quiet edge after the quiet threshold: the
+    /// same mechanism a post-attach seed uses, rather than a timer of this tier's own.
+    pub fn take_recheck(&mut self) -> Vec<String> {
+        std::mem::take(&mut self.recheck_due)
+    }
+
+    /// Record whether this pane's capture landed on the fold's foreground cap, and schedule the
+    /// follow-up look that a capped verdict needs. The cap answers from `#{pane_current_command}`,
+    /// not the screen, so it flips back with no output at all: no further activity edge would
+    /// arrive, and the pane would hold `unknown` until the reconciliation sweep (45 s). Retiring the
+    /// entry on the first uncapped verdict is what makes [`RECHECK_LIMIT`] per-episode rather than
+    /// per-pane-forever.
+    fn note_foreground_cap(&mut self, pane: &str, capped: bool) {
+        if !capped {
+            self.rechecks.remove(pane);
+            return;
+        }
+        // Bounded like the hook map. A pane refused an entry here still has the sweep behind it.
+        if !self.rechecks.contains_key(pane) && self.rechecks.len() >= MAX_TRACKED {
+            return;
+        }
+        let spent = self.rechecks.entry(pane.to_string()).or_insert(0);
+        if *spent >= RECHECK_LIMIT {
+            return;
+        }
+        *spent += 1;
+        self.recheck_looks += 1;
+        self.recheck_due.push(pane.to_string());
+    }
+
+    /// Drop every per-pane memory this tier holds for `pane`: it is gone, ignored, or no longer an
+    /// agent, so neither its demotion counter nor its follow-up-look budget means anything.
+    fn forget_pane(&mut self, pane: &str) {
+        self.hooks.remove(pane);
+        self.rechecks.remove(pane);
     }
 
     /// Take the sweep's deferred ordered-input-clear candidates, leaving none behind: the caller
@@ -469,13 +545,14 @@ impl CaptureState {
     pub fn status_lines(&self) -> String {
         format!(
             "on_demand_captures={}\nquiet_captures={}\ncontradiction_captures={}\n\
-             skipped_dead_edges={}\ndropped_edges={}\ndemoted={}\ndemotions={}\nsweeps={}\n\
-             sweep_captures={}\nsweep_agents={}\nlast_sweep_wall_ms={}\n",
+             skipped_dead_edges={}\ndropped_edges={}\nrecheck_looks={}\ndemoted={}\ndemotions={}\n\
+             sweeps={}\nsweep_captures={}\nsweep_agents={}\nlast_sweep_wall_ms={}\n",
             self.on_demand_captures,
             self.quiet_captures,
             self.contradiction_captures,
             self.skipped_dead_edges,
             self.dropped_edges,
+            self.recheck_looks,
             self.demoted_now(),
             self.demotions,
             self.sweeps,
@@ -508,7 +585,7 @@ pub(crate) fn stamp_from_capture(
     demoted: bool,
     guarded: bool,
     now: u64,
-) -> Result<(), TmuxError> {
+) -> Result<Landed, TmuxError> {
     let tail_text = tmux.capture_pane(&rec.pane_id)?; // the one and only on-demand capture
     let tail_hash = fnv1a64(tail_text.as_bytes());
     let snapshot = PaneSnapshot {
@@ -559,7 +636,18 @@ pub(crate) fn stamp_from_capture(
         tail_hash,
         now,
     );
-    stamp::apply(tmux, all_panes, &rec.pane_id, &plan, guarded)
+    stamp::apply(tmux, all_panes, &rec.pane_id, &plan, guarded)?;
+    // `unknown` from `Provenance::Process` is the foreground cap's own verdict and nothing else
+    // writes it, so this reads the cap without re-deriving its precedence rule.
+    Ok(
+        if verdict.state == AgentState::Unknown
+            && verdict.winning_evidence.source == Provenance::Process
+        {
+            Landed::ForegroundCapped
+        } else {
+            Landed::Settled
+        },
+    )
 }
 
 /// Whether a stored claim is hook-fresh: it came from a hook event no older than the decay window,
@@ -782,6 +870,35 @@ mod tests {
     }
 
     #[test]
+    fn a_permanently_capped_pane_stops_asking_for_follow_up_looks() {
+        // The follow-up look exists for a cap that lifts on its own. A pane whose foreground is
+        // legitimately something else (an editor left open) caps on every capture forever, and
+        // must not buy itself a look every time: the budget is per episode and runs out.
+        let mut cs = CaptureState::new(FoldConfig::default(), DEMOTE_EDGES);
+        for _ in 0..RECHECK_LIMIT * 4 {
+            cs.note_foreground_cap("%1", true);
+        }
+        assert_eq!(cs.take_recheck().len(), RECHECK_LIMIT as usize);
+        assert_eq!(cs.recheck_looks, RECHECK_LIMIT as u64);
+        assert!(cs.take_recheck().is_empty(), "the queue is drained once");
+        // Still capped, still nothing owed: the budget does not refill while the episode runs.
+        cs.note_foreground_cap("%1", true);
+        assert!(cs.take_recheck().is_empty());
+        // The cap lifting ends the episode, and the next one starts with the full budget.
+        cs.note_foreground_cap("%1", false);
+        cs.note_foreground_cap("%1", true);
+        assert_eq!(cs.take_recheck(), vec!["%1".to_string()]);
+    }
+
+    #[test]
+    fn an_uncapped_capture_asks_for_nothing() {
+        let mut cs = CaptureState::new(FoldConfig::default(), DEMOTE_EDGES);
+        cs.note_foreground_cap("%1", false);
+        assert!(cs.take_recheck().is_empty());
+        assert_eq!(cs.recheck_looks, 0);
+    }
+
+    #[test]
     fn tracked_map_is_bounded() {
         let mut cs = CaptureState::new(FoldConfig::default(), DEMOTE_EDGES);
         for i in 0..(MAX_TRACKED + 100) {
@@ -802,6 +919,7 @@ mod tests {
             "on_demand_captures=",
             "contradiction_captures=",
             "dropped_edges=",
+            "recheck_looks=",
             "demoted=",
             "sweeps=",
             "sweep_captures=",

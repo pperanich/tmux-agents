@@ -689,6 +689,24 @@ pub fn seed_attached(pool: &mut ControlPool, tmux: &Tmux, now: Instant) {
     }
 }
 
+/// The poll timeout the pool wants right now, without advancing its timers. [`tick`] answers the
+/// same question at the top of a loop iteration; this is for after the edge drain, which can re-arm
+/// a pane ([`mark_recheck`]) whose quiet deadline that earlier answer could not have seen.
+pub fn next_timeout(pool: &ControlPool, now: Instant, sweep: Duration) -> Duration {
+    pool.poll_timeout(now, sweep)
+}
+
+/// Re-mark `panes` active so each emits one more active→quiet edge, giving the capture tier a
+/// second look at a pane whose verdict turned on something other than its screen. Same mechanism as
+/// [`seed_attached`] and no cheaper: a pane still producing output just has its mark refreshed, so
+/// it still yields exactly one edge. The caller owns the retry budget; the pool counts no
+/// difference between these marks and a `%output` one.
+pub fn mark_recheck(pool: &mut ControlPool, panes: &[String], now: Instant) {
+    for pane in panes {
+        pool.mark_active(pane.clone(), now);
+    }
+}
+
 /// Advance the pool's timers once per loop wake: emit any due quiet edges, then report the
 /// poll timeout for the next wait. Time enters here at the boundary (the serve loop's clocks):
 /// `now` is the monotone deadline clock and `now_epoch` the wall epoch stamped onto emitted edges;

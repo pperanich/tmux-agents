@@ -52,6 +52,19 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Fixed
 
+- **A pane could sit at `unknown` until the next sweep because something else held the tty for a
+  moment.** When the daemon looks at a pane whose foreground is not the agent (a shell handing the
+  terminal back, an `env` that has not exec'd yet, an editor), the fold caps the verdict at
+  `unknown` and stamps `@agent_source=process`, because the screen belongs to something else and
+  must not be read as the agent's. That verdict is correct, and it is also the one verdict that
+  turns on a process fact rather than on the screen: it stops being true with no output at all, and
+  the daemon's on-demand tier only ever looks at a pane its output woke it for. So a pane that went
+  quiet in that moment held `unknown` until the reconciliation sweep came around, up to 45 seconds
+  later, with the blocked prompt sitting on the screen the whole time. A capped capture now schedules
+  its own follow-up look, up to three per episode, on the same near-instant cadence an activity edge
+  gets; the count is `recheck_looks` in the daemon's `--status-file`. The fold and the cap itself are
+  unchanged.
+
 - **A quit agent left its pane on the status line for another half minute.** When an agent exits and
   the pane falls back to its shell, the daemon's per-edge look identified the pane, found no agent,
   and moved on, because removal was the reconciliation sweep's job. `@agent_state` and both
