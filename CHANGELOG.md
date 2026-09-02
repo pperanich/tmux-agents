@@ -12,6 +12,49 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [0.5.9] - 2026-09-02
 
+### Added
+
+- **`tma ls --json` rows say what a blocked Claude pane is actually asking about**, through three
+  new keys: `pending_tool` (`Bash`, `Edit`, …), `pending_call` (the call id), and `pending_summary`
+  (one line, at most 120 bytes: the command for Bash, the path for the file tools). The same values
+  are on the pane as `@agent_pending_tool` / `@agent_pending_call` / `@agent_pending_summary`, so a
+  status line can read them with a plain `#{@agent_pending_summary}`. All three are cleared the
+  moment the prompt ends and removed with the rest of the pane's options at session end. The schema
+  stays `1`; the keys are `null` on a pane with nothing pending.
+
+  The summary is agent-supplied text, so it stays local by design: it is in no notification payload,
+  no notify audit line, and no `TMA_*` env var handed to a `[notify] command` sink. Treat it the way
+  you treat the pane title.
+
+- **Account rate-limit usage on every Claude and Codex row.** Both agents were already sending it in
+  a payload tma reads for the context gauge and then discarded: Claude's statusline
+  `rate_limits.{five_hour,seven_day,spend_limit}`, Codex's rollout `token_count`
+  `rate_limits.{primary,secondary}`. tma now stamps the window closest to exhausted as
+  `@agent_quota_pct` with a `@agent_quota_window` token naming which one, plus
+  `@agent_quota_resets_at` where the channel states it, and surfaces the trio as a nested `quota`
+  object on `ls --json` and a `quota` column in `tma watch`'s table. Context utilization is per-pane
+  and a `/compact` away from recoverable; the quota is shared by every pane on the account and is
+  not, so it is the number that answers whether starting a sixth agent is worth it at all. The
+  window token is not decoration: 80% of five hours and 80% of a week are different facts, and a
+  bare percent cannot tell you which you are looking at.
+
+  Absence is handled exactly as the context gauge handles it, because the field goes missing for
+  good reasons: it is absent for API-key auth, absent before the agent's first API response, and
+  dropped per window once that window resets. A payload with no `rate_limits` block is IGNORED
+  rather than treated as a clear, so a stored reading stays and ages instead of blinking away.
+
+- **`@agent_cost_usd` and a `cost_usd` JSON key** carry Claude's own `cost.total_cost_usd` for the
+  current session, two decimals. This is the one exception to "tma stamps no cost", and a narrow
+  one: it is the vendor's live figure for one session, stamped as stated, never recomputed and
+  never summed. **tma reports which pane, right now, and aggregates nothing across sessions**,
+  [`ccusage`](https://ccusage.com) is the tool that answers "how much since Monday". Codex's rollout
+  publishes no cost, so its panes carry none.
+
+- `@agent_model` is now also read from the Claude statusline payload's `model.id`, which the
+  registration path could never reach: that payload nests `model` as an object, while every hook
+  registration sends it as a top-level string. A Claude pane that lost its label to a `/clear` gets
+  it back on the next statusline push.
+
 ### Fixed
 
 - **A pane running one long tool call is no longer reported as having lost its hook wiring**
@@ -79,53 +122,6 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   decision back (it exits 0 with nothing on stdout), so Claude Code draws its normal prompt and
   answers to you as before; the `Notification` claim stays as a fallback. Run `tma install-hooks
   claude` to pick it up.
-
-### Added
-
-- **`tma ls --json` rows say what a blocked Claude pane is actually asking about**, through three
-  new keys: `pending_tool` (`Bash`, `Edit`, …), `pending_call` (the call id), and `pending_summary`
-  (one line, at most 120 bytes: the command for Bash, the path for the file tools). The same values
-  are on the pane as `@agent_pending_tool` / `@agent_pending_call` / `@agent_pending_summary`, so a
-  status line can read them with a plain `#{@agent_pending_summary}`. All three are cleared the
-  moment the prompt ends and removed with the rest of the pane's options at session end. The schema
-  stays `1`; the keys are `null` on a pane with nothing pending.
-
-  The summary is agent-supplied text, so it stays local by design: it is in no notification payload,
-  no notify audit line, and no `TMA_*` env var handed to a `[notify] command` sink. Treat it the way
-  you treat the pane title.
-
-### Added
-
-- **Account rate-limit usage on every Claude and Codex row.** Both agents were already sending it in
-  a payload tma reads for the context gauge and then discarded: Claude's statusline
-  `rate_limits.{five_hour,seven_day,spend_limit}`, Codex's rollout `token_count`
-  `rate_limits.{primary,secondary}`. tma now stamps the window closest to exhausted as
-  `@agent_quota_pct` with a `@agent_quota_window` token naming which one, plus
-  `@agent_quota_resets_at` where the channel states it, and surfaces the trio as a nested `quota`
-  object on `ls --json` and a `quota` column in `tma watch`'s table. Context utilization is per-pane
-  and a `/compact` away from recoverable; the quota is shared by every pane on the account and is
-  not, so it is the number that answers whether starting a sixth agent is worth it at all. The
-  window token is not decoration: 80% of five hours and 80% of a week are different facts, and a
-  bare percent cannot tell you which you are looking at.
-
-  Absence is handled exactly as the context gauge handles it, because the field goes missing for
-  good reasons: it is absent for API-key auth, absent before the agent's first API response, and
-  dropped per window once that window resets. A payload with no `rate_limits` block is IGNORED
-  rather than treated as a clear, so a stored reading stays and ages instead of blinking away.
-
-- **`@agent_cost_usd` and a `cost_usd` JSON key** carry Claude's own `cost.total_cost_usd` for the
-  current session, two decimals. This is the one exception to "tma stamps no cost", and a narrow
-  one: it is the vendor's live figure for one session, stamped as stated, never recomputed and
-  never summed. **tma reports which pane, right now, and aggregates nothing across sessions**,
-  [`ccusage`](https://ccusage.com) is the tool that answers "how much since Monday". Codex's rollout
-  publishes no cost, so its panes carry none.
-
-- `@agent_model` is now also read from the Claude statusline payload's `model.id`, which the
-  registration path could never reach: that payload nests `model` as an object, while every hook
-  registration sends it as a top-level string. A Claude pane that lost its label to a `/clear` gets
-  it back on the next statusline push.
-
-### Fixed
 
 - **A pane's context gauge could show the account's rate-limit percent instead.** The Claude parser
   looked up `used_percentage` by name anywhere in the payload, and since v2.1.80 that key lives in
