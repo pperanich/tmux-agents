@@ -1,33 +1,39 @@
-// tma OpenCode bridge — installed by `tma install-hooks opencode` into
-// `~/.config/opencode/plugin/`. OpenCode loads plugins from that dir and calls the
-// exported hooks; this module forwards the state-bearing events to tma's stable
-// `tma-hook` wrapper, which resolves the `tma` binary at fire time.
+// tma OpenCode bridge, installed by `tma install-hooks opencode` into
+// `~/.config/opencode/plugin/`. OpenCode auto-loads plugin modules from that directory and calls
+// each exported factory with its plugin input; this module forwards the state-bearing events to
+// tma's stable `tma-hook` wrapper, which resolves the `tma` binary at fire time.
 //
-// Adapted (MIT) from tmux-agent-sidebar's plugin bridge
-// (github.com/.../tmux-agent-sidebar/.opencode/plugins/tmux-agent-sidebar.js),
-// trimmed to the four state tokens tma consumes. The event set is verified live
-// against OpenCode 1.17.15 (session.created / session.status{busy|idle} /
-// session.idle / permission.asked, plus the chat.message + tool.execute.before
-// hooks). The `@@TMA_HOOK@@` path is substituted with the resolved wrapper at
-// install time (diff-before-write, so re-install is byte-identical).
+// Sources: the plugin API (factory export, the `event` bus hook, `tool.execute.before`) is
+// https://opencode.ai/docs/plugins/; the event property names are OpenCode's published OpenAPI
+// schema (`EventPermissionAsked.properties.{id,sessionID}`,
+// `EventPermissionReplied.properties.requestID`, `SessionStatus` = `{type: idle|busy|retry}`).
 //
-// API-channel actions: the plugin also forwards the pending permission
-// `request_id` on permission.asked, the serving base URL (`PluginInput.serverUrl`)
-// as `api_endpoint` at session-start, and a `permission-replied` clear on
-// permission.replied. Property shapes verified against the @opencode-ai/sdk v2
-// types shipped with 1.18.0 (EventPermissionAsked.properties.{id,requestID},
-// PluginInput.serverUrl, POST /permission/{requestID}/reply {reply}).
+// API channel: the pending permission id rides `permission-required` as `request_id` and the
+// serving base URL rides `session-start` as `api_endpoint`, so `tma act approve`/`deny` can POST
+// `/permission/{requestID}/reply` instead of sending a keystroke. `permission.replied` forwards a
+// clear so a spent id never reads as a pending request.
 //
-// Fire-and-forget: OpenCode does not await the hook's returned promise, so the
-// subprocess is spawned detached with the payload written to its stdin and unref'd
-// (matching pi-extension.js, so it can never keep OpenCode's event loop alive or
-// block it). Every failure path is swallowed — the bridge must never break OpenCode.
+// The `@@TMA_HOOK@@` path is substituted with the resolved wrapper at install time
+// (diff-before-write, so re-install is byte-identical).
+//
+// Fire-and-forget: the child is spawned detached with the payload on its stdin and unref'd, so it
+// can neither block OpenCode's event loop nor keep it alive. Every failure path is swallowed,
+// including a missing wrapper (mid-rebuild, uninstalled): the bridge must never break OpenCode.
 
 import { spawn } from "node:child_process";
 
 const TMA_HOOK = "@@TMA_HOOK@@";
 
-const fire = (event, payload) => {
+// The last session id seen on the event bus. The hooks that carry no session of their own fire
+// under it, and the load-time registration (before any event) fires with no session id at all.
+let sessionId = "";
+
+// The serving base URL from the plugin input, `undefined` when it names none: an empty string
+// would stamp `@agent_api_endpoint` blank rather than leave it alone.
+let apiEndpoint;
+
+// Spawn `tma-hook opencode <event>` with `body` (JSON) on stdin, detached and unref'd.
+function spawnHook(event, body) {
   try {
     const child = spawn(TMA_HOOK, ["opencode", event], {
       stdio: ["pipe", "ignore", "ignore"],
@@ -35,85 +41,67 @@ const fire = (event, payload) => {
     });
     child.on("error", () => {});
     child.stdin.on("error", () => {});
-    child.stdin.end(JSON.stringify(payload));
+    child.stdin.end(JSON.stringify(body));
     child.unref();
   } catch {
-    // OpenCode keeps running even if the wrapper is missing.
+    // OpenCode keeps running even if the wrapper is gone.
   }
-};
+}
 
-// tma's session guard reads `session_id` (snake_case) from the payload; emit that key.
-const sessionId = (value) =>
-  value && typeof value.sessionID === "string" ? value.sessionID : "";
+// One wrapper token, carrying the session id when one is known plus any API-channel fields for
+// this edge. `undefined` values drop out of the envelope, which is what keeps an absent field absent.
+function fire(event, extra) {
+  spawnHook(event, sessionId ? { session_id: sessionId, ...extra } : { ...extra });
+}
 
-// The pending permission id the broker replies to. The `permission.asked` edge carries it as
-// `id` (v2 SDK) or `requestID` (earlier captures); accept either so a version skew is inert.
-const requestId = (value) =>
-  value && typeof value.requestID === "string"
-    ? value.requestID
-    : value && typeof value.id === "string"
-      ? value.id
-      : "";
+// The event bus: OpenCode's own event names normalized to the wrapper tokens tma's manifest maps.
+function onEvent(event) {
+  const props = event?.properties ?? {};
+  if (typeof props.sessionID === "string" && props.sessionID) sessionId = props.sessionID;
+  switch (event?.type) {
+    case "session.created":
+      fire("session-start", { api_endpoint: apiEndpoint });
+      break;
+    case "session.idle":
+      fire("stop");
+      break;
+    case "session.status":
+      // `retry` is neither edge: a turn being retried has not started or finished.
+      if (props.status?.type === "busy") fire("user-prompt-submit");
+      else if (props.status?.type === "idle") fire("stop");
+      break;
+    // `permission.updated` is accepted as a synonym: the SDK typings and the shipped binary have
+    // disagreed on the name, so a rename lands inert instead of silently dropping `blocked`.
+    case "permission.asked":
+    case "permission.updated":
+      fire("permission-required", {
+        permission: props.permission,
+        request_id: props.id || props.requestID,
+      });
+      break;
+    case "permission.replied":
+      fire("permission-replied");
+      break;
+  }
+}
 
 export const TmaBridge = async (input) => {
-  // `PluginInput.serverUrl` is the base URL this OpenCode instance serves on. The server
-  // pins its own port, so this is the only reliable source; stamped at registration as
-  // `@agent_api_endpoint`, trailing slash trimmed. Absent (older API) ⇒ the broker's config fallback.
-  const apiEndpoint =
-    input && input.serverUrl ? String(input.serverUrl).replace(/\/+$/, "") : "";
+  // Inert outside tmux: `tma event` binds to the pane named by $TMUX_PANE, and there is none.
+  if (!process.env.TMUX_PANE) return {};
 
-  // Register at plugin load, before any session event. `session.created` fires only for a
-  // BRAND-NEW session, so a TUI sitting at the prompt and `opencode --continue` (a restored
-  // session) both emitted nothing at all — and OpenCode's `[capture] visible` is `blocked` only,
-  // so with no hook claim the fold floor left those panes at `unknown` ("?" in the status bar)
-  // until the first message. Both reproduced live on 1.18.18. Registration alone stamps idle
-  // (event::decide maps Register ⇒ idle), which is the honest state for a waiting prompt.
-  // Session-less: the id is unknown here, and the `session.created` / `session.status` edges that
-  // follow carry the real one. Plugin load happens once per process, so this cannot loop.
-  fire("session-start", { session_id: "", api_endpoint: apiEndpoint });
+  if (typeof input?.serverUrl === "string" && input.serverUrl) apiEndpoint = input.serverUrl;
+  // Register at load, not just on `session.created`: OpenCode emits that event for a brand-new
+  // session only, so a TUI waiting at its prompt and `opencode --continue` would announce nothing.
+  fire("session-start", { api_endpoint: apiEndpoint });
 
   return {
-    event: async ({ event }) => {
-      if (!event || !event.type) return;
-      const props = event.properties ?? {};
-      const session_id = sessionId(props);
-      switch (event.type) {
-        case "session.created":
-          fire("session-start", { session_id, api_endpoint: apiEndpoint });
-          return;
-        case "session.status": {
-          const type = props.status?.type;
-          if (type === "busy") fire("user-prompt-submit", { session_id });
-          else if (type === "idle") fire("stop", { session_id });
-          return;
-        }
-        case "session.idle":
-          fire("stop", { session_id });
-          return;
-        // `permission.asked` is what the 1.18.18 binary emits (verified: the shipped
-        // `@opencode-ai/sdk` typings name a `permission.updated` the runtime has no string for).
-        // Accept both so a rename lands inert rather than silently dropping `blocked`.
-        case "permission.asked":
-        case "permission.updated":
-          fire("permission-required", {
-            session_id,
-            permission: typeof props.permission === "string" ? props.permission : "",
-            request_id: requestId(props),
-          });
-          return;
-        case "permission.replied":
-          // The prompt was answered (by tma or the TUI): clear the stamped request id.
-          fire("permission-replied", { session_id });
-          return;
-      }
-    },
-
-    "chat.message": async (input) => {
-      fire("user-prompt-submit", { session_id: sessionId(input) });
-    },
-
+    event: async ({ event }) => onEvent(event),
+    // A turn start the bus does not always announce. Three sources fire this token over one turn;
+    // the intake re-stamps the same state each time, so the extra fires are inert.
+    "chat.message": async () => fire("user-prompt-submit"),
     "tool.execute.before": async (input) => {
-      fire("user-prompt-submit", { session_id: sessionId(input) });
+      if (typeof input?.sessionID === "string" && input.sessionID) sessionId = input.sessionID;
+      fire("user-prompt-submit");
     },
   };
 };

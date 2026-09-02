@@ -7,16 +7,12 @@
 //! poll/jump/act/capture paths never do. Both resolve a whole row set in one batch of
 //! spawns, so the cost is one git's wall clock rather than one per pane.
 //!
-//! The rev-parse output handling and relative-git-path resolution are adapted (MIT)
-//! from tmux-agent-sidebar's `src/group.rs`
-//! (<https://github.com/hiroppy/tmux-agent-sidebar>, Copyright (c) 2026 hiroppy): the
-//! single three-value rev-parse call, group key = parent of `--git-common-dir` (so
-//! linked worktrees roll up under their origin repo), and worktree detection by
-//! comparing the resolved `--git-common-dir` against the resolved `--git-dir`.
+//! The rev-parse argument list, its output parsing and the git-path resolution below
+//! were written from the `git rev-parse` documentation and the tests in this module.
 
 use std::collections::{BTreeSet, HashMap};
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{LazyLock, Mutex};
@@ -56,7 +52,7 @@ pub struct RepoInfo {
     pub repo_name: String,
     /// `git rev-parse --abbrev-ref HEAD`; the literal `HEAD` when detached.
     pub branch: String,
-    /// Whether this checkout is a linked worktree (git-dir differs from common-dir).
+    /// Whether this checkout is a linked worktree (its git-dir sits under the common dir).
     pub is_worktree: bool,
 }
 
@@ -291,23 +287,24 @@ fn spawn_rev_parse(program: &str, cwd: &str, missing: &AtomicBool) -> Option<Chi
     if missing.load(Ordering::Relaxed) {
         return None;
     }
-    match Command::new(program)
+    // rev-parse echoes one line per argument, in argument order, so the three lines of stdout are
+    // the branch, the common git dir and this checkout's git dir.
+    let spawned = Command::new(program)
+        .arg("-C")
+        .arg(cwd)
         .args([
-            "-C",
-            cwd,
             "rev-parse",
             "--abbrev-ref",
             "HEAD",
             "--git-common-dir",
             "--git-dir",
         ])
-        // A read-only query; skip index-lock acquisition (matches the reference).
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
-        .spawn()
-    {
+        .spawn();
+    match spawned {
         Ok(child) => Some(child),
         Err(e) => {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -318,48 +315,62 @@ fn spawn_rev_parse(program: &str, cwd: &str, missing: &AtomicBool) -> Option<Chi
     }
 }
 
-/// Parse the three-line rev-parse output into [`RepoInfo`]. Pure over `(stdout,
-/// exit_ok)`; relative git paths resolve against `cwd`. `None` for a non-zero exit (a
-/// non-repo, an unborn branch, or a bare repo, which all exit non-zero here) or output
-/// missing any of the three lines / a rootless common dir.
+/// Read the three lines [`spawn_rev_parse`] asks for into a [`RepoInfo`]. `None` unless git exited
+/// zero and printed all three: an unborn branch, a bare repo and a non-repo all fail that way, and
+/// so does output cut short, which must be unresolved rather than a panic.
 fn parse_rev_parse(cwd: &str, stdout: &str, exit_ok: bool) -> Option<RepoInfo> {
     if !exit_ok {
         return None;
     }
-    let mut lines = stdout.lines();
-    let branch = lines.next()?.trim();
-    let common_dir = lines.next()?.trim();
-    let git_dir = lines.next()?.trim();
-    if branch.is_empty() || common_dir.is_empty() || git_dir.is_empty() {
+    let mut lines = stdout.lines().map(str::trim);
+    let branch = lines.next()?;
+    let (common_line, git_dir_line) = (lines.next()?, lines.next()?);
+    if branch.is_empty() || common_line.is_empty() || git_dir_line.is_empty() {
         return None;
     }
-
-    let common_abs = resolve_git_path(cwd, common_dir);
-    let git_abs = resolve_git_path(cwd, git_dir);
-    let is_worktree = common_abs != git_abs;
-
-    // `--git-common-dir` is the main worktree's `.git`; its parent is the origin repo
-    // root, so a linked worktree shares the main checkout's group key.
-    let repo_root = common_abs.parent()?.to_path_buf();
-    let repo_name = repo_root.file_name()?.to_string_lossy().to_string();
-
+    let common = resolve_git_path(cwd, common_line);
+    let git_dir = resolve_git_path(cwd, git_dir_line);
+    // The grouping key is the origin repo root, the directory holding the common git dir, so a
+    // linked worktree and the checkout it was added from share one key.
+    let repo_name = common.parent()?.file_name()?.to_string_lossy().into_owned();
     Some(RepoInfo {
         repo_name,
         branch: branch.to_string(),
-        is_worktree,
+        // A linked worktree's git dir sits under the common dir (`.git/worktrees/<name>`), a main
+        // checkout's is the common dir itself. Containment, not inequality: see `resolve_git_path`.
+        is_worktree: git_dir != common && git_dir.starts_with(&common),
     })
 }
 
-/// Resolve a possibly-relative git path against `base`, canonicalized (so a `/var` →
-/// `/private/var` symlink or a `.` common-dir compares equal across the two reads).
-/// Canonicalization failure falls back to the joined path.
+/// Turn one path `rev-parse` printed into a comparable one. git prints these relative to the
+/// directory it ran in or absolute, and mixes the two within a single call: from a subdirectory of
+/// a plain checkout the common dir comes back as `../../.git` while the git dir is absolute. So
+/// join relatives onto `base` and fold `.`/`..` away, or the two forms never compare equal.
 fn resolve_git_path(base: &str, git_path: &str) -> PathBuf {
-    let p = if std::path::Path::new(git_path).is_absolute() {
-        PathBuf::from(git_path)
+    let raw = Path::new(git_path);
+    let joined = if raw.is_absolute() {
+        raw.to_path_buf()
     } else {
-        PathBuf::from(base).join(git_path)
+        Path::new(base).join(raw)
     };
-    p.canonicalize().unwrap_or(p)
+    // Folded lexically rather than with `canonicalize`, which touches the filesystem and fails
+    // outright on a path that does not exist.
+    let mut out = PathBuf::new();
+    for part in joined.components() {
+        match part {
+            Component::CurDir => {}
+            Component::ParentDir => match out.components().next_back() {
+                Some(Component::Normal(_)) => {
+                    out.pop();
+                }
+                // `/..` is `/`; a leading `..` has nothing to cancel and stays.
+                Some(Component::RootDir) => {}
+                _ => out.push(Component::ParentDir),
+            },
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -418,6 +429,28 @@ mod tests {
     fn parse_truncated_output_is_none() {
         // exit_ok but a missing third line: unresolved, never a panic.
         assert!(parse_rev_parse("/work/myrepo", "main\n.git\n", true).is_none());
+    }
+
+    #[test]
+    fn parse_relative_common_dir_from_a_subdirectory() {
+        // From a subdirectory of a plain checkout git prints the common dir relative to the cwd
+        // and the git dir absolute; folding the `..` away is what keeps that from reading as a
+        // worktree, and is what leaves the origin basename recoverable.
+        let stdout = "main\n../../.git\n/work/myrepo/.git\n";
+        let info = parse_rev_parse("/work/myrepo/sub/deep", stdout, true).unwrap();
+        assert_eq!(info.repo_name, "myrepo");
+        assert_eq!(info.branch, "main");
+        assert!(!info.is_worktree);
+    }
+
+    #[test]
+    fn parse_mismatched_path_flavours_are_not_a_worktree() {
+        // The same checkout reached through a symlinked cwd (`/tmp` on macOS): the relative line
+        // resolves under the link, the absolute one under the target, so the two never compare
+        // equal. Only containment under the common dir may say "worktree".
+        let stdout = "main\n../../.git\n/private/work/myrepo/.git\n";
+        let info = parse_rev_parse("/work/myrepo/sub/deep", stdout, true).unwrap();
+        assert!(!info.is_worktree);
     }
 
     // ---- runner NotFound latch (isolated: fake program + local flag) -----------------------------
