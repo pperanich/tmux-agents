@@ -1,0 +1,37 @@
+name: Nix
+
+# The flake is a supported install path (`nix profile install github:pperanich/tmux-agents`, the
+# overlay, the Home Manager module), so "does the package still build under the pinned nixpkgs" is a
+# real question. It is not a question every PR push needs answered: the cargo lanes in ci.yml already
+# run the whole suite on the same commit, and a full `nix flake check` costs about 14 minutes. This
+# workflow runs on merges to main, on changes to the files that decide the nix build, weekly, and on
+# demand. It is advisory: nothing here gates a merge.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - flake.nix
+      - flake.lock
+      - nix/**
+      - Cargo.toml
+      - Cargo.lock
+      - .github/workflows/nix.yml
+  schedule:
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  flake-check:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      # Determinate Nix ships flakes enabled. No cache action: the only derivation this builds is
+      # tma itself, whose hash changes with every commit, so a binary cache could only ever hit on
+      # a re-run of the same SHA; nixpkgs substitutes come from cache.nixos.org directly.
+      - uses: DeterminateSystems/determinate-nix-action@v3
+      - run: nix flake check

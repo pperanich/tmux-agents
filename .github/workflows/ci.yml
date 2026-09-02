@@ -37,16 +37,3 @@ jobs:
   # lane: one definition, called from both, rather than a copy that drifts.
   tests:
     uses: ./.github/workflows/tests.yml
-
-  # Optional: mirrors `nix flake check` (which pins tmux via nativeCheckInputs). Non-blocking so a
-  # nix-side hiccup never gates the cargo lanes above.
-  nix-flake-check:
-    runs-on: ubuntu-latest
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@v4
-      # Determinate Nix ships flakes enabled; no extra_nix_config needed. The cache rides the
-      # regular GitHub Actions cache, so it needs no FlakeHub account.
-      - uses: DeterminateSystems/determinate-nix-action@v3
-      - uses: DeterminateSystems/magic-nix-cache-action@main
-      - run: nix flake check

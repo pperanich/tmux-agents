@@ -37,8 +37,15 @@ rustPlatform.buildRustPackage (finalAttrs: {
 
   nativeBuildInputs = [ installShellFiles ];
 
-  # Tests spawn a scratch tmux server and `tma doctor` shells out to `ps`. No locale on
-  # purpose: the scrubbed sandbox env regression-tests tmux's utf8_sanitize vs `tmux -u`.
+  # The cargo lanes in CI run the whole workspace suite on every commit, so the nix build does
+  # not repeat it. What it keeps is the one thing only this sandbox exercises: tma-tmux spawns
+  # every tmux with `-u`, and the scrubbed, locale-less sandbox env is where a missing `-u`
+  # would turn the U+001F stamp separator into `_` (utf8_sanitize). Its integration tests run
+  # against a scratch tmux server here; the rest of the workspace is built, not tested.
+  cargoTestFlags = [
+    "-p"
+    "tma-tmux"
+  ];
   nativeCheckInputs = [
     tmux
     unixtools.ps
