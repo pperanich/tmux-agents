@@ -684,7 +684,7 @@ fn act_log_lines(path: &std::path::Path) -> Vec<String> {
 }
 
 /// Every outcome gets a line, refusals included, and each one names the surface that asked. A test
-/// process has no TTY to prompt on, so a plain `tma act` here is `cli-yes` — the same value a script
+/// process has no TTY to prompt on, so a plain `tma act` here is `cli-yes`, the same value a script
 /// or an agent shelling out would get, which is exactly the distinction the field exists to make.
 #[test]
 fn the_act_log_records_a_fire_and_a_refusal_with_their_source() {
@@ -862,7 +862,7 @@ fn all_writes_one_batch_id_across_its_lines() {
 }
 
 /// The mis-tap guard: three consecutive fires of one action inside one episode warn on stderr and
-/// record `repeat: 3`. It never refuses — the fourth fire still lands. A new episode starts the run
+/// record `repeat: 3`. It never refuses, the fourth fire still lands. A new episode starts the run
 /// over, which is what makes the counter a signal about *this* prompt rather than about the pane.
 #[test]
 fn the_repeat_run_warns_at_three_and_resets_on_a_new_episode() {
