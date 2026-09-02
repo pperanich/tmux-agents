@@ -231,7 +231,8 @@ struct AgentReport {
     /// warning), `None` when no request is pending (nothing to check).
     endpoint_ok: Option<bool>,
     /// This pane registered through a hook (`@agent_session` stamped) but its current evidence came
-    /// from capture: the hooks stopped firing for it and it has fallen back to the polling floor.
+    /// from capture: output kept arriving with no hook event behind it, so the pane fell back to the
+    /// polling floor. Suspect wiring, not proof of it: a hook claiming `working` holds the counter.
     hook_demoted: bool,
 }
 
@@ -615,7 +616,8 @@ fn gather(
             });
 
         // A pane that registered through a hook (`@agent_session` present) whose current evidence is
-        // capture has been demoted to the floor: its hooks registered once and then stopped firing.
+        // capture has been demoted to the floor: its hooks registered once, then went quiet while
+        // output kept arriving and nothing they claimed accounted for it.
         let hook_demoted = read
             .as_ref()
             .is_some_and(|s| s.session.is_some() && s.source == Provenance::Capture);

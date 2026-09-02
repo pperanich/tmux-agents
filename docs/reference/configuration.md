@@ -271,7 +271,7 @@ The daemon is strictly additive; these knobs apply only when it runs.
 | `sweep_secs` | `45` | Reconciliation-sweep cadence. |
 | `quiet_ms` | `1000` | Per-pane active-to-quiet capture trigger, in milliseconds. |
 | `zero_member_recheck_secs` | `1` | Clientless-session liveness recheck cadence. |
-| `demote_edges` | `5` | Hook-liveness demotion threshold. |
+| `demote_edges` | `5` | Hook-liveness demotion threshold: activity edges the pane's hooks do not account for before its coverage is treated as suspect. An edge landing on a fresh hook claim does not count, and neither does one on a pane whose hooks last said `working` and have not yet been contradicted by capture, so a single long tool call cannot demote a healthy pane. |
 | `autostart` | `false` | Auto-start the daemon on first use of a surface (`ls`/`status`/`jump`/picker/`watch`/`wait`/`subscribe`). |
 | `restart_on_upgrade` | `true` | Replace a resident daemon whose build is **strictly older** than the binary running the check. Runs from every user surface, from `tma event`, and from `tma daemon --ensure`. Set `false` to opt out. |
 

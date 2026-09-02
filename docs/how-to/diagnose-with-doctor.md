@@ -103,9 +103,13 @@ daemon is running and provides fallback capture (tier 3)`.
 
 Three other continuation lines show up when they apply. `demoted:` is the
 interesting one: the pane registered through a hook, but its *current* state came
-from capture, which means its hooks have stopped firing (the agent restarted
-without the wiring, or the wrapper is gone). `model:` names an unrecognized model
-string. `api:` flags a pending permission request with no reachable endpoint.
+from capture, because output kept arriving that its hooks did not account for.
+That is a suspect-wiring signal, not a proof: the usual cause is an agent
+restarted without the wiring or a missing wrapper, so run
+`tma install-hooks --check`. A hook claiming `working` accounts for the pane's
+output until capture contradicts it, so a long tool call does not demote a
+healthy pane. `model:` names an unrecognized model string. `api:` flags a pending
+permission request with no reachable endpoint.
 
 ## A pane that is not listed at all
 
