@@ -46,6 +46,14 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   to the exact command string: rewritten entries stay inert until you open codex, run `/hooks`, and
   trust them again. Codex's `notify` channel and every other agent are unaffected.
 
+### Fixed
+
+- **`scripts/release.sh` left `Cargo.lock` at the old version when `RELEASE_SKIP_CHECKS=1` was
+  set.** The step meant to refresh the lock ran `cargo metadata`, which reads the lock and never
+  rewrites it; only the test build the flag skips had been doing the rewrite. The script now runs
+  `cargo update --workspace --offline` and refuses to commit if the lock still names the old
+  version.
+
 ## [0.5.7] - 2026-09-01
 
 ### Changed
