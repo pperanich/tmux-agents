@@ -21,7 +21,7 @@ use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 
 use tma_core::stamp::opt;
-use tma_core::{codex_rollout_model, parse_context, Channel};
+use tma_core::{codex_rollout_model, parse_context, parse_usage, Channel, QuotaReport};
 
 use tma_tmux::stamp;
 use tma_tmux::tmux::{PaneRecord, Tmux};
@@ -36,10 +36,12 @@ pub const SCAN_CAP: u64 = 1024 * 1024;
 const CODEX_FORMAT: &str = "codex-rollout-jsonl";
 
 /// The newest reading from one tail poll: the context percent (`None` = no `token_count` record in the
-/// scanned window) and a best-effort model name (`None` = no model record in the window).
+/// scanned window), the newest `rate_limits` reading (`None` = no record carried one — older Codex
+/// builds, or a session before its first response), and a best-effort model name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TailResult {
     pub pct: Option<u8>,
+    pub quota: Option<QuotaReport>,
     pub model: Option<String>,
 }
 
@@ -98,9 +100,10 @@ impl RolloutTail {
     }
 
     /// Resolve `session_id` to its rollout file (cached) and poll it. `Missing` when no file resolves.
-    pub fn poll_session(&mut self, session_id: &str, codex_home: &Path) -> TailPoll {
+    /// `now_ms` resolves a relative reset offset; see [`read_result`].
+    pub fn poll_session(&mut self, session_id: &str, codex_home: &Path, now_ms: u64) -> TailPoll {
         match self.resolve(session_id, codex_home) {
-            Some(path) => self.poll(&path),
+            Some(path) => self.poll(&path, now_ms),
             None => TailPoll::Missing,
         }
     }
@@ -122,7 +125,7 @@ impl RolloutTail {
     }
 
     /// Poll a specific rollout path: one stat, then a bounded read + parse only when the file changed.
-    pub fn poll(&mut self, path: &Path) -> TailPoll {
+    pub fn poll(&mut self, path: &Path, now_ms: u64) -> TailPoll {
         self.stat_calls += 1;
         let meta = match fs::metadata(path) {
             Ok(m) => m,
@@ -139,19 +142,23 @@ impl RolloutTail {
             return TailPoll::Unchanged;
         }
         self.read_calls += 1;
-        let result = read_result(path, memo.size);
+        let result = read_result(path, memo.size, now_ms);
         self.files
             .insert(path.to_path_buf(), (memo, result.clone()));
         TailPoll::Fresh(result)
     }
 }
 
-/// Read the bounded end-anchored window and parse the newest reading + best-effort model. A read
-/// failure yields an empty result (nothing to stamp) — the tail must never error the cycle.
-fn read_result(path: &Path, size: u64) -> TailResult {
+/// Read the bounded end-anchored window and parse the newest reading, quota and best-effort model.
+/// A read failure yields an empty result (nothing to stamp) — the tail must never error the cycle.
+/// `now_ms` is only consulted for a relative `resets_in_seconds` offset (older Codex builds); it is
+/// read here rather than at the stamp because a memoized result must carry the clock it was parsed
+/// against, and a memo hit performs no read at all.
+fn read_result(path: &Path, size: u64, now_ms: u64) -> TailResult {
     let blob = read_scan(path, size).unwrap_or_default();
     TailResult {
         pct: parse_context(CODEX_FORMAT, &blob).and_then(|r| r.pct),
+        quota: parse_usage(CODEX_FORMAT, &blob, now_ms).and_then(|u| u.quota),
         model: codex_rollout_model(&blob),
     }
 }
@@ -276,8 +283,9 @@ fn is_rollout_for(path: &Path, session_id: &str) -> bool {
         })
 }
 
-/// Poll every Codex file-tail pane's rollout once and stamp `@agent_context_pct`
-/// through the same evidence-time guard as the push path, plus the best-effort `@agent_model` label.
+/// Poll every Codex file-tail pane's rollout once and stamp `@agent_context_pct` and the
+/// `@agent_quota_*` trio through the same evidence-time guards as the push path, plus the
+/// best-effort `@agent_model` label.
 /// A pane with no `@agent_session`, no `file-tail` context channel, no rollout file, or an unchanged
 /// file stamps nothing. `home` is `<CODEX_HOME>` (the caller reads it once per cycle).
 pub fn poll_context_tails(
@@ -299,13 +307,24 @@ pub fn poll_context_tails(
         if !is_codex_file_tail(manifests, name) {
             continue;
         }
-        let TailPoll::Fresh(result) = tail.poll_session(session, home) else {
+        let TailPoll::Fresh(result) = tail.poll_session(session, home, now) else {
             continue; // Unchanged / Missing: nothing to stamp
         };
         if let Some(pct) = result.pct {
             let g = *guarded.get_or_insert_with(|| stamp::guarded_writes_supported(tmux, panes));
             // Codex reports no footprint count (see `parse_codex_rollout`): the gauge only.
             let _ = stamp::apply_context(tmux, panes, &rec.pane_id, Some(pct), None, now, g);
+        }
+        if let Some(q) = &result.quota {
+            let g = *guarded.get_or_insert_with(|| stamp::guarded_writes_supported(tmux, panes));
+            // The rollout carries no cost figure, so that half of the chain stays empty.
+            let quota = tma_core::QuotaStamp {
+                pct: Some(q.pct),
+                window: Some(q.window.token()),
+                resets_at_ms: q.resets_at_ms,
+                cost_usd: None,
+            };
+            let _ = stamp::apply_quota(tmux, panes, &rec.pane_id, &quota, now, g);
         }
         if let Some(model) = result.model {
             let cmd = tma_core::render::set_pane_option(&rec.pane_id, opt::MODEL, &model);
@@ -328,6 +347,9 @@ fn is_codex_file_tail(manifests: &[LoadedManifest], agent: &str) -> bool {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    /// The parse clock the tail tests pass; only a relative `resets_in_seconds` reads it.
+    const NOW_MS: u64 = 1_788_000_000_000;
 
     /// A single rollout `token_count` line for `total_tokens` / `window` (⇒ `pct`).
     fn token_count_line(total: u64, window: u64) -> String {
@@ -377,11 +399,12 @@ mod tests {
         let mut tail = RolloutTail::new();
 
         // First poll: one stat, one read, pct computed (136000/272000 = 50%).
-        let first = tail.poll(&path);
+        let first = tail.poll(&path, NOW_MS);
         assert_eq!(
             first,
             TailPoll::Fresh(TailResult {
                 pct: Some(50),
+                quota: None,
                 model: None
             })
         );
@@ -389,7 +412,7 @@ mod tests {
         assert_eq!(tail.read_calls(), 1);
 
         // Second poll of the unchanged file: the memo skips the read — one more stat, no more reads.
-        assert_eq!(tail.poll(&path), TailPoll::Unchanged);
+        assert_eq!(tail.poll(&path, NOW_MS), TailPoll::Unchanged);
         assert_eq!(tail.stat_calls(), 2, "steady state is one stat per poll");
         assert_eq!(tail.read_calls(), 1, "unchanged file is not re-read");
 
@@ -412,7 +435,7 @@ mod tests {
         write_file(&path, &body);
 
         let mut tail = RolloutTail::new();
-        match tail.poll(&path) {
+        match tail.poll(&path, NOW_MS) {
             TailPoll::Fresh(r) => assert_eq!(
                 r.pct,
                 Some(75),
@@ -432,7 +455,7 @@ mod tests {
             "{\"type\":\"turn_context\",\"payload\":{\"model\":\"gpt-5-codex\"}}\n",
         );
         let mut tail = RolloutTail::new();
-        match tail.poll(&path) {
+        match tail.poll(&path, NOW_MS) {
             // No gauge (the surfaces grey/leave the stored value), but the model is still read.
             TailPoll::Fresh(r) => {
                 assert_eq!(r.pct, None);
@@ -466,9 +489,12 @@ mod tests {
         // The per-session path is cached (one discovery), and re-discovers only after the file vanishes.
         let mut tail = RolloutTail::new();
         write_file(&file, &format!("{}\n", token_count_line(272_000, 272_000)));
-        assert!(matches!(tail.poll_session(sid, &home), TailPoll::Fresh(_)));
+        assert!(matches!(
+            tail.poll_session(sid, &home, NOW_MS),
+            TailPoll::Fresh(_)
+        ));
         assert_eq!(tail.discover_calls(), 1);
-        assert_eq!(tail.poll_session(sid, &home), TailPoll::Unchanged);
+        assert_eq!(tail.poll_session(sid, &home, NOW_MS), TailPoll::Unchanged);
         assert_eq!(tail.discover_calls(), 1, "the path cache avoids re-walking");
 
         let _ = std::fs::remove_dir_all(&home);

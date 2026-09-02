@@ -276,3 +276,117 @@ fn out_of_order_context_stamp_is_rejected() {
         "an accepted percent-only observation clears the previous count"
     );
 }
+
+/// A statusline payload carrying both blocks: the quota trio and the cost land on their own lane
+/// while the context gauge lands on its own, and each field comes from its own object.
+#[test]
+fn the_quota_and_cost_stamp_beside_the_gauge_and_reach_ls_json() {
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = scratch();
+    let pane = s.new_pane();
+    s.event(
+        "faux",
+        "Boot",
+        &pane,
+        &format!(r#"{{"session_id":"{OWNER}"}}"#),
+    );
+
+    // `used_percentage` appears in four objects here. The gauge must be `context_window`'s 8, and
+    // the quota the highest rate-limit window (seven_day at 41), not whichever came first.
+    let payload = format!(
+        r#"{{"session_id":"{OWNER}","version":"2.1.251","rate_limits":{{"five_hour":{{"used_percentage":23.5,"resets_at":1788425600}},"seven_day":{{"used_percentage":41.2,"resets_at":1788857600}}}},"cost":{{"total_cost_usd":3.4972,"total_duration_ms":45000}},"model":{{"id":"claude-opus-5","display_name":"Opus"}},"context_window":{{"used_percentage":8,"total_input_tokens":15500,"context_window_size":200000}}}}"#
+    );
+    let out = s.event("faux", "context", &pane, &payload);
+    assert!(out.status.success(), "context intake must exit 0");
+
+    assert_eq!(s.get(&pane, "#{@agent_context_pct}"), "8");
+    assert_eq!(s.get(&pane, "#{@agent_quota_pct}"), "41");
+    assert_eq!(s.get(&pane, "#{@agent_quota_window}"), "7d");
+    // The unit trap: `resets_at` is epoch SECONDS on the wire and epoch ms in the store.
+    assert_eq!(
+        s.get(&pane, "#{@agent_quota_resets_at}"),
+        "1788857600000",
+        "the seconds the vendor sent are stamped as ms"
+    );
+    assert_eq!(s.get(&pane, "#{@agent_cost_usd}"), "3.50");
+    assert_ne!(
+        s.get(&pane, "#{@agent_quota_at}"),
+        "",
+        "the marker is written"
+    );
+    // The statusline's `model` is an object, so this is a label the registration path cannot reach.
+    assert_eq!(s.get(&pane, "#{@agent_model}"), "claude-opus-5");
+
+    let json = s.ls_json();
+    assert!(
+        json.contains(r#""quota":{"pct":41,"window":"7d","resets_at_ms":1788857600000}"#),
+        "ls --json carries the quota object: {json}"
+    );
+    assert!(json.contains(r#""cost_usd":3.50"#), "and the cost: {json}");
+    assert!(
+        json.contains(r#""context":8"#),
+        "the gauge is untouched: {json}"
+    );
+}
+
+/// A payload with no `rate_limits` block leaves a stored quota standing: the block is absent for
+/// API-key auth and before the first API response, so its absence says nothing about the account.
+#[test]
+fn a_payload_without_rate_limits_leaves_the_stored_quota_alone() {
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = scratch();
+    let pane = s.new_pane();
+    s.event(
+        "faux",
+        "Boot",
+        &pane,
+        &format!(r#"{{"session_id":"{OWNER}"}}"#),
+    );
+
+    let with_quota = format!(
+        r#"{{"session_id":"{OWNER}","rate_limits":{{"five_hour":{{"used_percentage":77}}}},"context_window":{{"used_percentage":8}}}}"#
+    );
+    s.event("faux", "context", &pane, &with_quota);
+    assert_eq!(s.get(&pane, "#{@agent_quota_pct}"), "77");
+
+    // A later gauge-only payload moves the gauge and leaves the quota where it was.
+    s.event("faux", "context", &pane, &statusline(OWNER, 55));
+    assert_eq!(s.get(&pane, "#{@agent_context_pct}"), "55");
+    assert_eq!(
+        s.get(&pane, "#{@agent_quota_pct}"),
+        "77",
+        "an absent block is no observation, not a clear"
+    );
+}
+
+/// A subagent's own statusline must not stamp the parent pane's quota either: the ownership filter
+/// covers the whole payload, not just the gauge.
+#[test]
+fn a_foreign_session_stamps_no_quota() {
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = scratch();
+    let pane = s.new_pane();
+    s.event(
+        "faux",
+        "Boot",
+        &pane,
+        &format!(r#"{{"session_id":"{OWNER}"}}"#),
+    );
+
+    let foreign = format!(
+        r#"{{"session_id":"{SUBAGENT}","rate_limits":{{"five_hour":{{"used_percentage":99}}}},"cost":{{"total_cost_usd":9.99}}}}"#
+    );
+    let out = s.event("faux", "context", &pane, &foreign);
+    assert!(out.status.success());
+    assert_eq!(s.get(&pane, "#{@agent_quota_pct}"), "");
+    assert_eq!(s.get(&pane, "#{@agent_cost_usd}"), "");
+}

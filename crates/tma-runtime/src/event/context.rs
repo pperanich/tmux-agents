@@ -39,10 +39,15 @@ pub(super) fn run_context(args: EventArgs) -> ExitCode {
     };
 
     let payload = read_payload(args.payload.as_deref());
-    // A malformed or deliberately-ignored payload (a cumulative-shape reading) yields `None`: do nothing.
-    let Some(report) = tma_core::parse_context(&format, &payload) else {
+    // A malformed or deliberately-ignored payload (a cumulative-shape reading) yields `None`. The
+    // quota half is parsed from the same bytes and is independently absent: a payload can carry a
+    // gauge with no `rate_limits` block, or the reverse.
+    let now = crate::now_ms();
+    let context = tma_core::parse_context(&format, &payload);
+    let usage = tma_core::parse_usage(&format, &payload, now);
+    if context.is_none() && usage.is_none() {
         return ExitCode::SUCCESS;
-    };
+    }
 
     // Daemonless context-high notify rides the same `from_event` opt-in as state: when a daemon
     // runs it dispatches from its reconcile instead, so the two paths never double-fire (the marker
@@ -58,8 +63,7 @@ pub(super) fn run_context(args: EventArgs) -> ExitCode {
     let command = commands.for_context_high();
 
     let tmux = Tmux::connect(&args.server);
-    let now = crate::now_ms();
-    stamp_context(&tmux, &pane, &report, now);
+    stamp_observation(&tmux, &pane, context.as_ref(), usage.as_ref(), now);
 
     if notify_opt_in {
         if let Some(threshold) = args.notify_context_high {
@@ -95,11 +99,21 @@ fn fire_context_high(
     }
 }
 
-/// Ownership-filter then stamp a context observation. Only the owning `@agent_session` may
-/// stamp: a foreign session (a subagent running its own statusline) is dropped so it cannot clobber
-/// the parent pane's gauge. A pane with no recorded owner, or a payload carrying no session, is
-/// unattributable and proceeds — the same posture as the hook path's subagent guard.
-fn stamp_context(tmux: &Tmux, pane: &str, report: &tma_core::ContextReport, now: u64) {
+/// Ownership-filter then stamp one payload's observations: the context gauge on its own chain, the
+/// quota/cost trio on its own, and the model label as a plain set. Only the owning `@agent_session`
+/// may stamp: a foreign session (a subagent running its own statusline) is dropped so it cannot
+/// clobber the parent pane's values. A pane with no recorded owner, or a payload carrying no
+/// session, is unattributable and proceeds — the same posture as the hook path's subagent guard.
+///
+/// The two chains are independent and each guards on its own marker, so a payload carrying only one
+/// of them touches only that lane; one `list_panes` serves both.
+fn stamp_observation(
+    tmux: &Tmux,
+    pane: &str,
+    context: Option<&tma_core::ContextReport>,
+    usage: Option<&tma_core::UsageReport>,
+    now: u64,
+) {
     let panes = match tmux.list_panes() {
         Ok(p) => p,
         Err(_) => return, // server gone or unreadable
@@ -108,11 +122,33 @@ fn stamp_context(tmux: &Tmux, pane: &str, report: &tma_core::ContextReport, now:
         return;
     };
     let owner = rec.options.get(opt::SESSION).filter(|v| !v.is_empty());
-    if let (Some(owner), Some(ev)) = (owner, report.session.as_deref()) {
+    let session = context
+        .and_then(|c| c.session.as_deref())
+        .or_else(|| usage.and_then(|u| u.session.as_deref()));
+    if let (Some(owner), Some(ev)) = (owner, session) {
         if owner != ev {
-            return; // a subagent's own session must not clobber the owner's gauge
+            return; // a subagent's own session must not clobber the owner's values
         }
     }
+
     let guarded = stamp::guarded_writes_supported(tmux, &panes);
-    let _ = stamp::apply_context(tmux, &panes, pane, report.pct, report.tokens, now, guarded);
+    if let Some(report) = context {
+        let _ = stamp::apply_context(tmux, &panes, pane, report.pct, report.tokens, now, guarded);
+    }
+    let Some(usage) = usage else { return };
+    if usage.has_quota_observation() {
+        let cost = usage.cost_usd.and_then(tma_core::format_cost_usd);
+        let quota = tma_core::QuotaStamp {
+            pct: usage.quota.as_ref().map(|q| q.pct),
+            window: usage.quota.as_ref().map(|q| q.window.token()),
+            resets_at_ms: usage.quota.as_ref().and_then(|q| q.resets_at_ms),
+            cost_usd: cost.as_deref(),
+        };
+        let _ = stamp::apply_quota(tmux, &panes, pane, &quota, now, guarded);
+    }
+    // The model label rides no chain: a plain last-write-wins set, as the rollout tail does it.
+    if let Some(model) = usage.model.as_deref() {
+        let cmd = tma_core::render::set_pane_option(pane, opt::MODEL, model);
+        let _ = tmux.apply(&[cmd]);
+    }
 }

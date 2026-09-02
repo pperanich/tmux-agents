@@ -227,10 +227,33 @@ pub fn apply_context(
     } else {
         // No `-F` expansion: decide producer-side. Drop an observation not newer than the stored
         // evidence time (`e|>` accepts equal, so does this: only a strictly-older one is dropped).
-        if evidence_at < stored_context_at(all_panes, pane_id) {
+        if evidence_at < stored_at(all_panes, pane_id, opt::CONTEXT_AT) {
             return Ok(());
         }
         render::render_context_advisory(pane_id, pct, tokens, evidence_at)
+    };
+    tmux.apply(&cmds)
+}
+
+/// Apply a quota/cost observation to `pane_id`, [`apply_context`]'s twin on the `@agent_quota_at`
+/// marker: the guarded `-F` evidence-time write when the server supports it, else the advisory
+/// degrade. One chained invocation, `None` fields clearing their option. The ownership filter is
+/// the caller's, as on the context path; this is the store.
+pub fn apply_quota(
+    tmux: &Tmux,
+    all_panes: &[PaneRecord],
+    pane_id: &str,
+    quota: &render::QuotaStamp,
+    evidence_at: u64,
+    guarded: bool,
+) -> Result<(), TmuxError> {
+    let cmds = if guarded {
+        render::render_quota(pane_id, quota, evidence_at)
+    } else {
+        if evidence_at < stored_at(all_panes, pane_id, opt::QUOTA_AT) {
+            return Ok(());
+        }
+        render::render_quota_advisory(pane_id, quota, evidence_at)
     };
     tmux.apply(&cmds)
 }
@@ -272,13 +295,13 @@ pub fn rearm_context_notify(tmux: &Tmux, pane_id: &str) -> Result<(), TmuxError>
     tmux.apply(std::slice::from_ref(&cmd))
 }
 
-/// The pane's currently-stored `@agent_context_at` (0 when unset): the advisory path's `not older`
-/// comparison basis.
-fn stored_context_at(all_panes: &[PaneRecord], pane_id: &str) -> u64 {
+/// The pane's currently-stored epoch value at `key` (0 when unset or unparsable): the advisory
+/// path's `not older` comparison basis, shared by the context and quota chains.
+fn stored_at(all_panes: &[PaneRecord], pane_id: &str, key: &str) -> u64 {
     all_panes
         .iter()
         .find(|p| p.pane_id == pane_id)
-        .and_then(|p| p.options.get(opt::CONTEXT_AT))
+        .and_then(|p| p.options.get(key))
         .and_then(|v| v.parse().ok())
         .unwrap_or(0)
 }

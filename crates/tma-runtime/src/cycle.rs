@@ -15,8 +15,8 @@ use tma_core::render;
 use tma_core::snapshot::{PaneSnapshot, ProcInfo};
 use tma_core::stamp::opt;
 use tma_core::{
-    sort_rank, AgentRow, AgentState, FoldConfig, ReadResult, SnapshotFacts, StampedState,
-    WriteAction,
+    sort_rank, AgentRow, AgentState, FoldConfig, QuotaLabel, ReadResult, SnapshotFacts,
+    StampedState, WriteAction,
 };
 
 use tma_tmux::stamp::{self, StampPlan};
@@ -427,8 +427,8 @@ pub fn run_cycle_with(
             context_pct: companions.context_pct,
             context_at: companions.context_at,
             tokens: companions.tokens,
-            quota: None,
-            cost_usd: None,
+            quota: companions.quota,
+            cost_usd: companions.cost_usd,
             muted: companions.muted,
             model: companions.model,
             cwd: rec.cwd.clone(),
@@ -560,8 +560,8 @@ fn row_from_stamp(rec: &PaneRecord, stamp: &StampedState, now: u64) -> AgentRow 
         context_pct: companions.context_pct,
         context_at: companions.context_at,
         tokens: companions.tokens,
-        quota: None,
-        cost_usd: None,
+        quota: companions.quota,
+        cost_usd: companions.cost_usd,
         muted: companions.muted,
         model: companions.model,
         cwd: rec.cwd.clone(),
@@ -572,13 +572,16 @@ fn row_from_stamp(rec: &PaneRecord, stamp: &StampedState, now: u64) -> AgentRow 
 
 /// The row fields a pane's stored options carry beside the state tuple: the owning `@agent_session`,
 /// the `@agent_context_pct` gauge with its `@agent_context_at` evidence time and the `@agent_tokens`
-/// count behind it, and the `@agent_model` label (watch-table-only). A struct, not a
-/// tuple: three of the five are numeric options that would swap silently at a call site.
+/// count behind it, the account `@agent_quota_*` trio and `@agent_cost_usd`, and the `@agent_model`
+/// label (watch-table-only). A struct, not a tuple: most of these are numeric options that would
+/// swap silently at a call site.
 struct RowCompanions {
     agent_session: Option<String>,
     context_pct: Option<u8>,
     context_at: Option<u64>,
     tokens: Option<u64>,
+    quota: Option<QuotaLabel>,
+    cost_usd: Option<f64>,
     muted: bool,
     model: Option<String>,
     pending: Option<tma_core::PendingCall>,
@@ -594,6 +597,17 @@ fn row_companions(rec: &PaneRecord, now: u64) -> RowCompanions {
         context_pct: opt(opt::CONTEXT_PCT).and_then(|v| v.parse().ok()),
         context_at: opt(opt::CONTEXT_AT).and_then(|v| v.parse().ok()),
         tokens: opt(opt::TOKENS).and_then(|v| v.parse().ok()),
+        // The percent and the window token are stamped together; either missing is no annotation,
+        // since a bare percent cannot say which window it measures.
+        quota: opt(opt::QUOTA_PCT)
+            .and_then(|v| v.parse().ok())
+            .zip(opt(opt::QUOTA_WINDOW))
+            .map(|(pct, window)| QuotaLabel {
+                pct,
+                window: window.clone(),
+                resets_at_ms: opt(opt::QUOTA_RESETS_AT).and_then(|v| v.parse().ok()),
+            }),
+        cost_usd: opt(opt::COST_USD).and_then(|v| v.parse().ok()),
         muted: tma_core::stamp::mute_active(opt(opt::MUTE_UNTIL).and_then(|v| v.parse().ok()), now),
         model: opt(opt::MODEL).cloned(),
         // The trio is written and cleared as one, so the tool name alone decides whether a call is
