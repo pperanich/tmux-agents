@@ -198,18 +198,28 @@ where a prompt offers numbered choices, "approve" means option 1 by convention.
 | `SessionStart` | agent-start | pane registered, state `idle` |
 | `UserPromptSubmit` | working | `working` |
 | `PreToolUse` / `PostToolUse` | working (heartbeat) | `working`, refreshes liveness |
-| `Notification` (permission / idle-prompt) | blocked | `blocked` / `permission` |
+| `PermissionRequest` | blocked | `blocked` / `permission`, the moment the decision is needed |
+| `Notification` (permission / idle-prompt) | blocked | `blocked` / `permission` (fallback) |
 | `Notification` (usage-limit auto-continue) | rate limit | `working` / `rate_limit` while it resumes itself, `blocked` / `rate_limit` when it halts |
 | `Stop` | idle | `idle` |
 | `SubagentStart` / `SubagentStop` | subagent bookkeeping | append/remove session id in `@agent_subagents`; never a top-level state change |
 | `SessionEnd` | agent-end | pane deregistered, options removed |
 
-The `Notification` matcher `permission_prompt|elicitation_dialog` separates
-permission prompts from idle reminders; it runs as a regex over the whole raw
-JSON payload, so it hits whether the discriminator lands in `message` or a
-`notification_type` field.
+`PermissionRequest` is the claim that matters for `blocked`. It fires the moment
+a tool call needs a decision, carries the pending call in its payload
+(`tool_name`, `tool_input`, `tool_use_id`), and tma writes no decision back:
+the hook exits 0 with nothing on stdout, so Claude Code draws its normal prompt.
+The hook is deliberately **not** installed with `async: true` — the point is to
+stamp the pane before the dialog draws, and a backgrounded hook would race it.
 
-Three `Notification` types report a claude.ai usage-limit wait (Claude
+The `Notification permission_prompt|elicitation_dialog` entry stays as the
+fallback for a build without `PermissionRequest`. On its own it was late: the
+vendor docs gate that notification on the prompt having already waited about six
+seconds, so a pane read `working` for those six seconds. The matcher runs as a
+regex over the whole raw JSON payload, so it hits whether the discriminator lands
+in `message` or a `notification_type` field.
+
+Three further `Notification` types report a claude.ai usage-limit wait (Claude
 Code 2.1.234 and later, where automatic continue is on by default):
 
 | `notification_type` | claim | why |

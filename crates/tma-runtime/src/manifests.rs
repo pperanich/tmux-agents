@@ -49,7 +49,7 @@ const BUNDLED: &[(&str, &str)] = &[
 pub const SUBAGENT_START: &str = "SubagentStart";
 pub const SUBAGENT_STOP: &str = "SubagentStop";
 
-/// The events the parser is authored and tested for (Claude Code's seven mapped plus the two subagent
+/// The events the parser is authored and tested for (Claude Code's eight mapped plus the two subagent
 /// events). The drift test asserts this equals [`hook_events`], so adding one without coverage fails.
 pub const CLAUDE_PARSER_COVERAGE: &[&str] = &[
     "SessionStart",
@@ -57,6 +57,7 @@ pub const CLAUDE_PARSER_COVERAGE: &[&str] = &[
     "UserPromptSubmit",
     "PreToolUse",
     "PostToolUse",
+    "PermissionRequest",
     "Notification",
     "Stop",
     SUBAGENT_START,

@@ -263,6 +263,46 @@ pub(crate) fn parse_session_id(payload: &str) -> Option<String> {
     json_string_field(payload, "session_id")
 }
 
+/// The source text of a JSON **object**-valued field, braces included (`{"command":"ls"}`), for the
+/// one payload field tma reads inside: Claude's `PermissionRequest` `tool_input`. Scans for the
+/// matching close brace, tracking string literals so a `}` inside a value does not end it early.
+/// `None` when the field is absent or is not an object.
+pub(super) fn json_object_field<'a>(payload: &'a str, field: &str) -> Option<&'a str> {
+    let needle = format!("\"{field}\"");
+    let start = payload.find(&needle)? + needle.len();
+    let rest = payload[start..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    if !rest.starts_with('{') {
+        return None;
+    }
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for (i, c) in rest.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&rest[..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// Extract a top-level JSON string field's value from a hook payload (a hand-rolled read, matching
 /// [`parse_session_id`]'s discipline). Handles the common `\n`/`\t`/`\"` escapes; a value with
 /// nested objects or non-string types is not parsed (returns `None`).

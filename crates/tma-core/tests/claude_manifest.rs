@@ -850,6 +850,7 @@ fn bundled_manifest_declares_expected_hooks_and_coverage() {
         "UserPromptSubmit",
         "PreToolUse",
         "PostToolUse",
+        "PermissionRequest",
         "Notification",
         "Stop",
     ] {
@@ -870,6 +871,28 @@ fn bundled_manifest_declares_expected_hooks_and_coverage() {
         notif.matcher.as_deref(),
         Some("permission_prompt|elicitation_dialog")
     );
+}
+
+/// `PermissionRequest` is the immediate blocked claim, and it must carry no matcher: Claude Code
+/// filters that event on TOOL NAME, so a matcher here would silently narrow the claim to whichever
+/// tools it happened to name. The `Notification` fallback is what the six-second-gated
+/// `permission_prompt` notification still drives.
+#[test]
+fn permission_request_claims_blocked_immediately_for_every_tool() {
+    let m = manifest();
+    let hooks = m.hooks.as_ref().unwrap();
+    let entry = hooks
+        .map
+        .iter()
+        .find(|h| h.event == "PermissionRequest")
+        .expect("PermissionRequest is mapped");
+    assert_eq!(entry.matcher, None, "every tool's prompt is a blocked pane");
+    let Claim::State(s) = &entry.claim else {
+        panic!("PermissionRequest claims a state");
+    };
+    assert_eq!(s.state, AgentState::Blocked);
+    assert_eq!(s.detail.as_ref().map(|d| d.as_str()), Some("permission"));
+    assert!(!entry.turn_end, "a permission prompt is not a turn end");
 }
 
 /// The three usage-limit `Notification` types, and the split that makes them worth mapping:

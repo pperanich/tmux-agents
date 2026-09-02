@@ -431,6 +431,7 @@ pub fn run_cycle_with(
             model: companions.model,
             cwd: rec.cwd.clone(),
             repo: None,
+            pending: companions.pending,
         });
     }
 
@@ -561,6 +562,7 @@ fn row_from_stamp(rec: &PaneRecord, stamp: &StampedState, now: u64) -> AgentRow 
         model: companions.model,
         cwd: rec.cwd.clone(),
         repo: None,
+        pending: companions.pending,
     }
 }
 
@@ -575,6 +577,7 @@ struct RowCompanions {
     tokens: Option<u64>,
     muted: bool,
     model: Option<String>,
+    pending: Option<tma_core::PendingCall>,
 }
 
 /// Read the companions from a pane's options. Absent/empty decodes as `None`; a non-numeric metric is
@@ -589,6 +592,13 @@ fn row_companions(rec: &PaneRecord, now: u64) -> RowCompanions {
         tokens: opt(opt::TOKENS).and_then(|v| v.parse().ok()),
         muted: tma_core::stamp::mute_active(opt(opt::MUTE_UNTIL).and_then(|v| v.parse().ok()), now),
         model: opt(opt::MODEL).cloned(),
+        // The trio is written and cleared as one, so the tool name alone decides whether a call is
+        // pending; the other two are read beside it and default to empty.
+        pending: opt(opt::PENDING_TOOL).map(|tool| tma_core::PendingCall {
+            tool: tool.clone(),
+            call: opt(opt::PENDING_CALL).cloned().unwrap_or_default(),
+            summary: opt(opt::PENDING_SUMMARY).cloned().unwrap_or_default(),
+        }),
     }
 }
 

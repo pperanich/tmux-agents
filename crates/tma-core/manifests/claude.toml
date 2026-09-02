@@ -26,6 +26,15 @@ claim = { state = "working" }
 event = "PostToolUse"
 claim = { state = "working" }
 
+# PermissionRequest — fires the moment a tool call needs a permission decision, which is what makes
+# it the primary blocked claim. The `Notification permission_prompt` entry below stays as the
+# fallback: the vendor docs gate that notification on the prompt having waited about six seconds, so
+# on its own it left a pane reading `working` for those six seconds. tma emits NO decision from this
+# hook (the wrapper discards stdout and exits 0), so Claude draws its normal prompt.
+[[hooks.map]]
+event = "PermissionRequest"
+claim = { state = "blocked", detail = "permission" }
+
 [[hooks.map]]
 event = "Notification"
 matcher = "permission_prompt|elicitation_dialog"

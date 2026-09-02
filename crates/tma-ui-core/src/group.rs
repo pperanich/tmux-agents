@@ -163,6 +163,7 @@ mod tests {
                 branch: String::new(),
                 worktree: false,
             }),
+            pending: None,
         }
     }
 

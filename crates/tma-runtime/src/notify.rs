@@ -823,6 +823,55 @@ mod tests {
         assert!(n.repo.is_empty() && n.branch.is_empty());
     }
 
+    /// The pending-call summary is agent-supplied text — a command line, a path — and it must not
+    /// take the route the pane title took before v0.5.0: the notify payload flows to `[notify]
+    /// command` sinks, third-party push carriers, and the 0644 audit log. The stamp lives on the
+    /// pane and on `tma ls --json`, both of which stay on the machine, and this pins that the
+    /// builder cannot pick it up off the pane record it reads.
+    #[test]
+    fn the_pending_call_summary_never_reaches_a_carrier() {
+        let secret = "curl -H 'Authorization: Bearer ACME-1234' https://internal.example.test";
+        let mut rec = pane_record(None);
+        rec.options
+            .insert(opt::PENDING_TOOL.to_string(), "Bash".to_string());
+        rec.options
+            .insert(opt::PENDING_CALL.to_string(), "toolu_01ABC".to_string());
+        rec.options
+            .insert(opt::PENDING_SUMMARY.to_string(), secret.to_string());
+        let n = notification_for(
+            &rec,
+            "claude",
+            "blocked",
+            Some("permission".to_string()),
+            Some("sess-1".to_string()),
+            1_000,
+            1_250,
+        );
+        for (channel, text) in [
+            ("payload", payload_json(&n, TitlePolicy::Carry)),
+            ("audit line", log_line(&n, 1_250, TitlePolicy::Carry)),
+        ] {
+            assert!(
+                !text.contains("ACME-1234") && !text.contains("toolu_01ABC"),
+                "the pending call leaked into the {channel}: {text}"
+            );
+            for key in ["pending_tool", "pending_call", "pending_summary"] {
+                assert!(!text.contains(key), "{channel} carries a {key} key: {text}");
+            }
+        }
+        // And no `TMA_*` env var an `sh -c` hook could interpolate carries it either.
+        let cmd = hook_command("true", &n, TitlePolicy::Carry);
+        for (k, v) in cmd.get_envs() {
+            let value = v
+                .map(|v| v.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            assert!(
+                !value.contains("ACME-1234") && !value.contains("toolu_01ABC"),
+                "{k:?} exports the pending call: {value}"
+            );
+        }
+    }
+
     #[test]
     fn notification_for_labels_a_checkout_from_its_cwd() {
         // The pane's cwd drives repo/branch through the memoized resolver, so the payload agrees with

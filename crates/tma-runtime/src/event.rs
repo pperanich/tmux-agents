@@ -28,7 +28,7 @@ mod permission;
 use context::run_context;
 use mapping::{decide, json_string_field, parse_session_id, EventPlan};
 pub use mapping::{map_event, Mapped};
-use permission::apply_permission_request;
+use permission::{apply_pending_call, apply_permission_request};
 
 /// Parsed `tma event` arguments (internal, unstable — the wrapper builds this).
 pub struct EventArgs {
@@ -248,7 +248,18 @@ pub fn apply_event(
         event_session.as_deref(),
         payload,
     );
-    if plan.is_verdict() || permission_wrote {
+    // The pending-call trio (`@agent_pending_tool`/`_call`/`_summary`): stamped from Claude's
+    // `PermissionRequest` payload on the same edges, cleared on the same ones.
+    let pending_wrote = apply_pending_call(
+        tmux,
+        pane,
+        kind,
+        &plan,
+        stored.as_ref(),
+        event_session.as_deref(),
+        payload,
+    );
+    if plan.is_verdict() || permission_wrote || pending_wrote {
         EventOutcome::Applied
     } else {
         EventOutcome::Declined
@@ -451,7 +462,7 @@ pub fn episode_already_notified(notified_at: Option<u64>, episode_at: u64) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::permission::{permission_request_effect, PermReq};
+    use super::permission::{pending_call_effect, permission_request_effect, PendingCall, PermReq};
     use super::*;
     use tma_core::manifest::Manifest;
     use tma_core::{AgentState, Detail};
@@ -1316,6 +1327,172 @@ mod tests {
         assert_eq!(
             permission_request_effect(PERMISSION_REPLIED, &EventPlan::Unmapped, None, None, "{}"),
             PermReq::Clear
+        );
+    }
+
+    // ---- the pending-call trio (`@agent_pending_*`) --------------------------------------------
+
+    /// Claude Code's `PermissionRequest` payload, field-for-field as its hooks reference documents
+    /// it (2.1.234): `tool_name`, a nested `tool_input`, `tool_use_id`, `permission_suggestions`.
+    const CLAUDE_PERMISSION_REQUEST: &str = r#"{"session_id":"abc123","transcript_path":"/home/u/.claude/projects/x/t.jsonl","cwd":"/home/u/my-project","permission_mode":"default","hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/build","description":"Remove build directory","timeout":120000,"run_in_background":false},"tool_use_id":"toolu_01ABC123","permission_suggestions":[{"type":"allow","description":"Allow this specific command"}]}"#;
+
+    fn blocked_plan() -> EventPlan {
+        EventPlan::Stamp {
+            state: AgentState::Blocked,
+            detail: Some(Detail::new("permission")),
+            set_attention: true,
+            register_session: None,
+            notify: false,
+            record_turn: false,
+        }
+    }
+
+    /// The Bash shape: the summary is the command, and the call id round-trips so a consumer can
+    /// tell two prompts for the same tool apart.
+    #[test]
+    fn pending_call_effect_reads_the_permission_request_payload() {
+        assert_eq!(
+            pending_call_effect(
+                "PermissionRequest",
+                &blocked_plan(),
+                None,
+                None,
+                CLAUDE_PERMISSION_REQUEST
+            ),
+            PendingCall::Set {
+                tool: "Bash".to_string(),
+                call: "toolu_01ABC123".to_string(),
+                summary: "rm -rf /tmp/build".to_string(),
+            }
+        );
+    }
+
+    /// The per-tool summary shapes: the path for the file tools, the first string field for a tool
+    /// tma has no shape for, and empty when `tool_input` carries no string at all.
+    #[test]
+    fn pending_summary_is_derived_per_tool() {
+        let set = |payload: &str| match pending_call_effect(
+            "PermissionRequest",
+            &blocked_plan(),
+            None,
+            None,
+            payload,
+        ) {
+            PendingCall::Set { summary, .. } => summary,
+            other => panic!("expected a Set, got {other:?}"),
+        };
+        assert_eq!(
+            set(
+                r#"{"tool_name":"Edit","tool_input":{"file_path":"/repo/src/lib.rs","old_string":"a"},"tool_use_id":"t1"}"#
+            ),
+            "/repo/src/lib.rs",
+            "the file tools summarize as their path, not their diff"
+        );
+        assert_eq!(
+            set(
+                r#"{"tool_name":"WebFetch","tool_input":{"url":"https://example.test/x","prompt":"read it"},"tool_use_id":"t2"}"#
+            ),
+            "https://example.test/x",
+            "an unknown tool falls back to the first string field, in source order"
+        );
+        assert_eq!(
+            set(
+                r#"{"tool_name":"Sleep","tool_input":{"seconds":30,"nested":{"deep":"not this"}},"tool_use_id":"t3"}"#
+            ),
+            "",
+            "a nested string is not the object's own first string field"
+        );
+        assert_eq!(
+            set(r#"{"tool_name":"Bash","tool_use_id":"t4"}"#),
+            "",
+            "no tool_input at all is an empty summary, never a missing stamp"
+        );
+    }
+
+    /// The summary is agent-supplied text going into a pane option, so it is flattened to one line
+    /// and capped. 120 bytes INCLUDING the `…`, and the cut lands on a char boundary.
+    #[test]
+    fn pending_summary_is_one_line_and_capped_at_120_bytes() {
+        let set = |payload: &str| match pending_call_effect(
+            "PermissionRequest",
+            &blocked_plan(),
+            None,
+            None,
+            payload,
+        ) {
+            PendingCall::Set { summary, .. } => summary,
+            other => panic!("expected a Set, got {other:?}"),
+        };
+        let multiline = set(
+            r#"{"tool_name":"Bash","tool_input":{"command":"echo one\nrm -rf /\ttwo"},"tool_use_id":"t"}"#,
+        );
+        assert_eq!(
+            multiline, "echo one rm -rf / two",
+            "control characters gone"
+        );
+        assert!(!multiline.contains('\n') && !multiline.contains('\t'));
+
+        // A long command, and a multi-byte one whose cut would split a char.
+        let long = set(&format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"{}"}},"tool_use_id":"t"}}"#,
+            "a".repeat(400)
+        ));
+        assert_eq!(long.len(), 120, "the cap counts bytes, mark included");
+        assert!(long.ends_with('…'));
+        let wide = set(&format!(
+            r#"{{"tool_name":"Bash","tool_input":{{"command":"{}"}},"tool_use_id":"t"}}"#,
+            "é".repeat(200)
+        ));
+        assert!(wide.len() <= 120 && wide.ends_with('…'));
+        assert!(
+            wide.chars().all(|c| c == 'é' || c == '…'),
+            "the truncation landed on a char boundary: {wide:?}"
+        );
+    }
+
+    /// The clear edges, which are the whole reason the trio cannot go stale: `PostToolUse` and
+    /// `Stop` both stamp a non-blocked state, and `SessionEnd` deregisters (removing every
+    /// `@agent_*`). A blocked stamp WITHOUT a tool name leaves the trio alone, which is what stops
+    /// the late `Notification permission_prompt` from wiping what `PermissionRequest` just wrote.
+    #[test]
+    fn pending_call_effect_clears_when_the_prompt_ends() {
+        for state in [AgentState::Working, AgentState::Idle] {
+            let plan = EventPlan::Stamp {
+                state,
+                detail: None,
+                set_attention: false,
+                register_session: None,
+                notify: false,
+                record_turn: false,
+            };
+            assert_eq!(
+                pending_call_effect("PostToolUse", &plan, None, None, "{}"),
+                PendingCall::Clear,
+                "{state} clears the pending call"
+            );
+        }
+        assert_eq!(
+            pending_call_effect(
+                "Notification",
+                &blocked_plan(),
+                None,
+                None,
+                r#"{"session_id":"s","notification_type":"permission_prompt"}"#
+            ),
+            PendingCall::None,
+            "the six-second-late Notification must not wipe the PermissionRequest stamp"
+        );
+        // Deregistration removes the trio through `render_remove`, not through this effect.
+        assert_eq!(
+            pending_call_effect("SessionEnd", &EventPlan::Deregister, None, None, "{}"),
+            PendingCall::None
+        );
+        assert!(
+            render::render_remove("%1").iter().any(|c| c
+                .argv
+                .iter()
+                .any(|a| a == tma_core::stamp::opt::PENDING_SUMMARY)),
+            "SessionEnd's removal covers the summary"
         );
     }
 
