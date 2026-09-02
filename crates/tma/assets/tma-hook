@@ -4,7 +4,7 @@
 # Agent configs (e.g. ~/.claude/settings.json) reference THIS script, never the `tma`
 # binary directly. The wrapper resolves the binary fresh on every fire and exits 0
 # silently when it is missing, so rebuilds, moves, and uninstalls never surface to the
-# agent as a hook failure (late-binding pattern, tmux-agent-sidebar's hook.sh).
+# agent as a hook failure (late-binding pattern).
 #
 # Frozen contract: `tma-hook <agent> <event-name>`, hook payload on stdin.
 #
