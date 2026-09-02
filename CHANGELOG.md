@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.5.9] - 2026-09-02
+
 ### Fixed
 
 - **A pane running one long tool call is no longer reported as having lost its hook wiring**
@@ -810,7 +812,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.8...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.9...HEAD
+[0.5.9]: https://github.com/pperanich/tmux-agents/compare/v0.5.8...v0.5.9
 [0.5.8]: https://github.com/pperanich/tmux-agents/compare/v0.5.7...v0.5.8
 [0.5.7]: https://github.com/pperanich/tmux-agents/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/pperanich/tmux-agents/compare/v0.5.5...v0.5.6
