@@ -847,6 +847,9 @@ fn hooks_state_is_keyed_per_server() {
         Command::new(env!("CARGO_BIN_EXE_tma"))
             .args(&args)
             .env("TMA_BIN", env!("CARGO_BIN_EXE_tma"))
+            // Bare is the default reference, so the spawned install must resolve `tma-hook` off
+            // $PATH. CI has no real one; the harness helper puts the scratch copy in front.
+            .env("PATH", s.path_with_wrapper_dir())
             .env("TMA_CONFIG", common::empty_config_path())
             .output()
             .expect("spawn tma")
