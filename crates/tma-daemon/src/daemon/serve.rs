@@ -149,7 +149,8 @@ pub(super) fn serve(
         );
         // Time enters the pool tick at this boundary: the monotone deadline clock and the wall epoch
         // stamped onto any edge emitted this wake.
-        let timeout = control::tick(&mut pool, Instant::now(), tma_runtime::now_ms(), iter_sweep);
+        let mut timeout =
+            control::tick(&mut pool, Instant::now(), tma_runtime::now_ms(), iter_sweep);
 
         // On-demand capture: drain this iteration's active→quiet edges and capture the ONE pane each
         // fired for (never a fan-out); where hookless `blocked` is caught. Server-gone ends the loop.
@@ -173,6 +174,16 @@ pub(super) fn serve(
             edges_before,
         ) {
             break;
+        }
+        // A capture that landed on the fold's foreground cap owes its pane one more look: the cap
+        // reads a process fact, which flips back with no output at all, so no further activity edge
+        // would ever arrive. Re-marking the pane active re-fires its quiet edge (the budget is the
+        // capture tier's), and the timeout is recomputed because that deadline postdates the tick
+        // above, and nothing else would wake this loop for a pane that is silent by definition.
+        let due = capture.take_recheck();
+        if !due.is_empty() {
+            control::mark_recheck(&mut pool, &due, Instant::now());
+            timeout = control::next_timeout(&pool, Instant::now(), iter_sweep);
         }
 
         // Build the poll set: listener, signal pipe, one fd per control client, one fd per `tma wait`

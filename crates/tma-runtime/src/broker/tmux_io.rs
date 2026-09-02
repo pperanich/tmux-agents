@@ -286,6 +286,8 @@ fn reverify_pane(
         guarded,
         now,
     )
+    // The follow-up-look verdict is the daemon's alone: this gate re-verifies on demand already.
+    .map(|_| ())
 }
 
 #[cfg(test)]

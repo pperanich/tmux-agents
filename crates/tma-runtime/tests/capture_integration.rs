@@ -264,6 +264,7 @@ fn hookless_quiet_edge_captures_once_and_classifies_blocked() {
     // Let attach-time shell output settle to a quiet baseline (drains any attach-noise edge).
     wait_quiescent(&s);
     let baseline = s.status_u64("on_demand_captures");
+    let looks_baseline = s.status_u64("recheck_looks");
 
     // One output burst that leaves the blocked marker on screen ⇒ one active→quiet edge.
     burst(&s, &pane, "echo tma-block-marker");
@@ -278,9 +279,15 @@ fn hookless_quiet_edge_captures_once_and_classifies_blocked() {
     wait_captures_ge(&s, baseline + 1);
     wait_quiescent(&s);
     let captured = s.status_u64("on_demand_captures") - baseline;
+    // One capture per trigger. A follow-up look is the second legitimate trigger: on a loaded box
+    // the `ps`/`list-panes` snapshot can catch this pane mid prompt-handoff, the fold's foreground
+    // cap answers `unknown`, and the daemon buys itself one more look. `recheck_looks` is normally
+    // zero here, so this still says "exactly one capture"; it just does not call the look a fan-out.
+    let looks = s.status_u64("recheck_looks") - looks_baseline;
     assert_eq!(
-        captured, 1,
-        "exactly ONE on-demand capture (not a fan-out), got {captured}"
+        captured,
+        1 + looks,
+        "one on-demand capture per trigger (not a fan-out): {captured} captures, {looks} looks"
     );
     assert_eq!(s.get(&pane, "#{@agent_source}"), "capture");
     // The reconciliation sweep never ran (45 s cadence): the fan-out path is off the hot path.
@@ -1084,6 +1091,94 @@ fn a_quit_agent_is_cleared_by_the_quiet_edge_not_the_sweep() {
         s.status_u64("sweeps"),
         0,
         "the clear must be the on-demand tier's: no sweep has run{}",
+        s.forensics(&[&pane])
+    );
+}
+
+// --- 8. Foreground cap: the capped pane gets a second look, not a wait for the sweep. ---
+
+/// The fold caps a pane whose foreground is not the agent at `unknown`, and that verdict turns on a
+/// process fact rather than on the screen, so it flips back with no output at all, and no further
+/// activity edge would ever arrive to re-read it. The daemon has to look again on its own.
+///
+/// The pane here reaches the cap deliberately and holds it until the test says otherwise: the
+/// blocked marker is already on screen when `cat` takes the foreground and blocks opening a fifo.
+/// Opening and closing the write end from outside gives `cat` its EOF, and the `exec` after it means
+/// no prompt is ever repainted, so from the burst onward this pane emits not one byte, the same
+/// silence a pane sits in when the `ps` snapshot merely caught a prompt handoff. Without the
+/// follow-up look it holds `unknown` until the reconciliation sweep, pinned 13x past the ceiling here.
+///
+/// The holder is `sh` rather than a `sleep`, and deliberately: it is the same binary the pane's own
+/// shell is, so it answers to the process name authored from that shell on every box (a `sleep`
+/// reports as `coreutils` where uutils provides it, and would never match).
+#[test]
+fn a_foreground_capped_pane_is_rechecked_without_a_sweep() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("t29");
+    let (pane, pid) = new_shell_session(&s, "s1");
+    write_block_marker_manifest(&s, &process_names_toml(&s, "s1", pid));
+
+    let fifo = s.workdir.join("cap-gate");
+    assert!(Command::new("mkfifo")
+        .arg(&fifo)
+        .status()
+        .expect("mkfifo")
+        .success());
+
+    let _daemon = spawn_daemon(&s, PINNED_SWEEP);
+    s.expect_status("clients", "1");
+    wait_quiescent(&s);
+    let looks_before = s.status_u64("recheck_looks");
+
+    burst(
+        &s,
+        &pane,
+        &format!(
+            "echo tma-block-marker; cat {}; exec sh -c 'read hold'",
+            fifo.display()
+        ),
+    );
+    // `@agent_source=process` is the foreground cap's own stamp and nothing else writes it, so this
+    // is the precondition proving the cap fired rather than a coincidence of states. `cat` holds the
+    // foreground until the gate opens, so there is no race to lose here.
+    assert!(
+        wait_opt(&s, &pane, "@agent_source", "process"),
+        "the capture under a non-agent foreground must land the cap's `unknown`{}",
+        s.forensics(&[&pane])
+    );
+    assert_eq!(s.get(&pane, "#{@agent_state}"), "unknown");
+
+    // Hand the tty back with no output whatsoever. O_NONBLOCK on the write end fails with ENXIO
+    // until `cat` holds the read end, so this can never block; closing the fd is `cat`'s EOF.
+    assert!(
+        common::wait_until(common::POLL_CEILING, || rustix::fs::open(
+            &fifo,
+            rustix::fs::OFlags::WRONLY | rustix::fs::OFlags::NONBLOCK,
+            rustix::fs::Mode::empty(),
+        )
+        .is_ok()),
+        "the pane's `cat` never opened the gate fifo"
+    );
+
+    assert!(
+        wait_opt(&s, &pane, "@agent_state", "blocked"),
+        "the capped pane must be looked at again once the cap lifts{}",
+        s.forensics(&[&pane])
+    );
+    assert_eq!(s.get(&pane, "#{@agent_source}"), "capture");
+    assert_eq!(
+        s.status_u64("sweeps"),
+        0,
+        "the second look must be the on-demand tier's, not a reconciliation sweep{}",
+        s.forensics(&[&pane])
+    );
+    assert!(
+        s.status_u64("recheck_looks") > looks_before,
+        "and the capped capture must be what scheduled the look that found it{}",
         s.forensics(&[&pane])
     );
 }

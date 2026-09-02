@@ -86,7 +86,12 @@ pub enum TmuxError {
 /// ambient `tma status` driver, the `run-shell` focus hooks (which block the invoking client), `jump`,
 /// and the poll cycle. This crate takes no config, so the cap is a constant, not a runtime knob. The
 /// control-mode pool (control.rs) has its own bounded I/O and never routes through here.
-const TMUX_TIMEOUT: Duration = Duration::from_secs(3);
+///
+/// Public because it is a floor for anyone waiting on a process that makes these calls: the daemon
+/// takes its shutdown signal between one-shots, so a stop budget shorter than this cap reports a
+/// wedged daemon for what was only a slow read. `tma_runtime::ipc`'s stop budget is derived from it
+/// for that reason; raising this raises that with it.
+pub const TMUX_TIMEOUT: Duration = Duration::from_secs(3);
 
 /// Which tmux server to talk to: the socket selector every spawn prepends. `socket_name` is tmux's
 /// `-L <name>` (a socket under tmux's own runtime dir), `socket_path` its `-S <path>` (an absolute

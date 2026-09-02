@@ -496,15 +496,25 @@ mod tests {
         std::fs::write(&hang, "#!/bin/sh\nexec sleep 30\n").unwrap();
         std::fs::set_permissions(&hang, std::fs::Permissions::from_mode(0o755)).unwrap();
 
+        // `Failed` here is a spawn failure, and the one this suite can provoke is ETXTBSY: a sibling
+        // test thread forking `tmux`/`ps` inherits the fd this script was just written through, and
+        // Linux refuses to exec a file open for writing until that child reaches its own exec.
         let missing = AtomicBool::new(false);
-        let started = Instant::now();
-        let out = run_rev_parse_batch(
-            hang.to_str().unwrap(),
-            &["/tmp"],
-            &missing,
-            Duration::from_millis(50),
-        );
-        let elapsed = started.elapsed();
+        let (out, elapsed) = (0..5)
+            .find_map(|attempt| {
+                if attempt > 0 {
+                    std::thread::sleep(Duration::from_millis(50));
+                }
+                let started = Instant::now();
+                let out = run_rev_parse_batch(
+                    hang.to_str().unwrap(),
+                    &["/tmp"],
+                    &missing,
+                    Duration::from_millis(50),
+                );
+                (out != vec![RevParse::Failed]).then(|| (out, started.elapsed()))
+            })
+            .expect("the hang script never spawned in five tries");
         let _ = std::fs::remove_dir_all(&dir);
 
         assert_eq!(out, vec![RevParse::TimedOut]);

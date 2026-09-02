@@ -52,6 +52,30 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Fixed
 
+- **An upgrade that caught the old daemon mid-`tmux` call left you with no daemon for a minute.**
+  When a newer tma replaces the daemon of an older one, it signals the old daemon and waits for it to
+  let go of the socket and the lock. That wait was 2 seconds, and the daemon notices a signal between
+  its `tmux` calls rather than inside one, so a SIGTERM landing during a call that was itself slow
+  (the one-shot cap is 3 seconds) could not be acted on in time. The replacement was then not started
+  at all, and the 60 second restart cooldown that exists to stop a flapping upgrade from retrying
+  every second blocked the next attempt too. So one slow shutdown on a loaded box cost a full minute
+  with nothing running, and detection fell back to the poll tier for that minute. The wait is now
+  derived from the one-shot cap rather than guessed at, with a margin, and the two constants say so
+  in each other's terms so neither can drift under the other.
+
+- **A pane could sit at `unknown` until the next sweep because something else held the tty for a
+  moment.** When the daemon looks at a pane whose foreground is not the agent (a shell handing the
+  terminal back, an `env` that has not exec'd yet, an editor), the fold caps the verdict at
+  `unknown` and stamps `@agent_source=process`, because the screen belongs to something else and
+  must not be read as the agent's. That verdict is correct, and it is also the one verdict that
+  turns on a process fact rather than on the screen: it stops being true with no output at all, and
+  the daemon's on-demand tier only ever looks at a pane its output woke it for. So a pane that went
+  quiet in that moment held `unknown` until the reconciliation sweep came around, up to 45 seconds
+  later, with the blocked prompt sitting on the screen the whole time. A capped capture now schedules
+  its own follow-up look, up to three per episode, on the same near-instant cadence an activity edge
+  gets; the count is `recheck_looks` in the daemon's `--status-file`. The fold and the cap itself are
+  unchanged.
+
 - **A quit agent left its pane on the status line for another half minute.** When an agent exits and
   the pane falls back to its shell, the daemon's per-edge look identified the pane, found no agent,
   and moved on, because removal was the reconciliation sweep's job. `@agent_state` and both
