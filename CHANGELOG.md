@@ -10,6 +10,20 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **A quit agent left its pane on the status line for another half minute.** When an agent exits and
+  the pane falls back to its shell, the daemon's per-edge look identified the pane, found no agent,
+  and moved on, because removal was the reconciliation sweep's job. `@agent_state` and both
+  `@agent_summary` rollups therefore stood until the next sweep came around: a status line rendering
+  `#{@agent_summary}` kept showing `zsh* idle:1` for a measured 36 seconds after the quit, on the
+  default 45 second cadence. The edge path now removes the stamp itself, the way the poll cycle
+  already did, and recomputes the window and session rollups in the same invocation, so the shell
+  repainting its prompt is what takes the pane off the surfaces, about a second after the exit. The
+  sweep remains the backstop for a pane no edge arrives on, and the 30 second dead-registration
+  reaper is untouched: a hook-registered pane with no walkable process is not an exit the edge path
+  may act on, since that is also what a live agent the process walk momentarily misses looks like.
+
 ## [0.5.9] - 2026-09-02
 
 ### Added
