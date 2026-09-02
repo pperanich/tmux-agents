@@ -37,13 +37,19 @@ pub(crate) fn append(path: &Path, line: &str) {
 /// Expand a leading `~` against `$HOME`. Config paths are user-written strings, and a literal `~`
 /// directory is never what someone meant; anything else is returned unchanged.
 fn expand_tilde(path: &Path) -> PathBuf {
+    expand_tilde_with(path, std::env::var_os("HOME").as_deref())
+}
+
+/// [`expand_tilde`] with the home directory passed in, so the rule is testable without touching
+/// the process environment (unit tests share it across threads).
+fn expand_tilde_with(path: &Path, home: Option<&std::ffi::OsStr>) -> PathBuf {
     let Some(text) = path.to_str() else {
         return path.to_path_buf();
     };
     let Some(rest) = text.strip_prefix('~') else {
         return path.to_path_buf();
     };
-    let Some(home) = std::env::var_os("HOME").filter(|h| !h.is_empty()) else {
+    let Some(home) = home.filter(|h| !h.is_empty()) else {
         return path.to_path_buf();
     };
     match rest.strip_prefix('/') {
@@ -60,24 +66,34 @@ mod tests {
 
     #[test]
     fn tilde_expands_only_for_this_user() {
-        let home = std::env::var("HOME").unwrap_or_default();
-        if home.is_empty() {
-            eprintln!("skipping: no HOME");
-            return;
-        }
+        // A fixed home rather than `$HOME`: another test in this binary rewrites the process
+        // environment, and unit tests run in parallel threads.
+        let home = std::ffi::OsStr::new("/home/tester");
         assert_eq!(
-            expand_tilde(Path::new("~/state/tma.jsonl")),
-            PathBuf::from(&home).join("state/tma.jsonl")
+            expand_tilde_with(Path::new("~/state/tma.jsonl"), Some(home)),
+            PathBuf::from("/home/tester/state/tma.jsonl")
         );
-        assert_eq!(expand_tilde(Path::new("~")), PathBuf::from(&home));
+        assert_eq!(
+            expand_tilde_with(Path::new("~"), Some(home)),
+            PathBuf::from("/home/tester")
+        );
         // Another user's home is left alone rather than guessed at.
         assert_eq!(
-            expand_tilde(Path::new("~someone/x")),
+            expand_tilde_with(Path::new("~someone/x"), Some(home)),
             PathBuf::from("~someone/x")
         );
         assert_eq!(
-            expand_tilde(Path::new("/var/log/tma.jsonl")),
+            expand_tilde_with(Path::new("/var/log/tma.jsonl"), Some(home)),
             PathBuf::from("/var/log/tma.jsonl")
+        );
+        // No home, or an empty one, expands nothing.
+        assert_eq!(
+            expand_tilde_with(Path::new("~/x"), None),
+            PathBuf::from("~/x")
+        );
+        assert_eq!(
+            expand_tilde_with(Path::new("~/x"), Some(std::ffi::OsStr::new(""))),
+            PathBuf::from("~/x")
         );
     }
 
