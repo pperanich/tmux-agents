@@ -239,17 +239,16 @@ fn draw_table(
     palette: &RowPalette,
     sel: &dash::ListSelection,
 ) {
-    let show_model = model.show_model();
-    let show_branch = model.show_branch();
+    let cols = model.columns();
     if let Some(area) = geom.table_header {
-        f.render_widget(Paragraph::new(table_header(show_model, show_branch)), area);
+        f.render_widget(Paragraph::new(table_header(cols)), area);
     }
 
     let rows_area = geom.list.rect;
-    let title_w = table_title_width(rows_area.width, show_model, show_branch);
+    let title_w = table_title_width(rows_area.width, cols);
     // The `▸ repo` headers are draw-only, so Enter-jump still reads the model's flat selection.
     let items = display_list(model, |r| {
-        ListItem::new(table_row(palette, r, now, show_model, show_branch, title_w))
+        ListItem::new(table_row(palette, r, now, cols, title_w))
     });
     let mut list_state = ListState::default();
     if sel.count > 0 {

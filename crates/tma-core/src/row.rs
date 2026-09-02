@@ -44,6 +44,22 @@ pub struct PendingCall {
     pub summary: String,
 }
 
+/// The resolved account-quota annotation for one pane: present exactly when the pane carries a
+/// stamped `@agent_quota_pct`, absent otherwise. A cluster rather than three parallel `Option`s
+/// because a percent with no window token is unreadable, 80% of five hours and 80% of a week are
+/// different facts, so the two are set together or not at all. `resets_at_ms` stays optional inside
+/// it: a channel can state the utilization without stating when it clears.
+#[derive(Clone, Debug)]
+pub struct QuotaLabel {
+    /// Utilization percent `0..=100` of the window closest to exhausted.
+    pub pct: u8,
+    /// Which window that was: `5h` / `7d` / `spend` / `primary` / `secondary`. A stored token, read
+    /// defensively, the vocabulary grows with the channels tma parses.
+    pub window: String,
+    /// Epoch **ms** at which that window resets, `None` when the channel stated none.
+    pub resets_at_ms: Option<u64>,
+}
+
 /// One agent pane's resolved state for a surface (`tma ls`, `tma status`, jump, the picker).
 #[derive(Clone, Debug)]
 pub struct AgentRow {
@@ -79,6 +95,14 @@ pub struct AgentRow {
     /// channel reports no count tma can call a footprint. The `tokens` key of the JSON rows; never a
     /// cumulative spend figure, so it is not summable across turns.
     pub tokens: Option<u64>,
+    /// The account quota annotation (`@agent_quota_pct` + `@agent_quota_window`), `None` when the
+    /// pane's channel reports no rate-limit block. The `quota` key of the JSON rows. Account-wide,
+    /// so every pane on one account carries the same reading and summing them means nothing.
+    pub quota: Option<QuotaLabel>,
+    /// The agent's own reported session cost in USD (`@agent_cost_usd`), `None` when the channel
+    /// publishes none. The `cost_usd` key of the JSON rows: this session's live figure as the vendor
+    /// states it, never a total tma computed and never aggregated across sessions.
+    pub cost_usd: Option<f64>,
     /// Whether `@agent_mute_until` is still in the future at the cycle's `now`: this pane's
     /// notifications are suppressed. A resolved boolean rather than the deadline, because every
     /// consumer asks the same question and only the cycle holds the clock. The `muted` key of the
@@ -279,6 +303,8 @@ mod tests {
             context_pct: None,
             context_at: None,
             tokens: None,
+            quota: None,
+            cost_usd: None,
             muted: false,
             model: None,
             cwd: None,

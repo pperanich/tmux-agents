@@ -140,6 +140,33 @@ fn write_row_fields(j: &mut JsonWriter, r: &AgentRow, origin: &Origin) {
         Some(t) => j.number("tokens", t as i64),
         None => j.null("tokens"),
     }
+    // Additive (schema stays 1): the account quota, nested because its three values are one fact,
+    // a percent with no window token cannot be read. `null` when the pane's channel reports no
+    // rate-limit block (API-key auth, or before the agent's first API response). It is
+    // ACCOUNT-wide, not per-pane, so several rows carrying the same numbers is correct and summing
+    // them means nothing. `resets_at_ms` is epoch ms, converted at the parser from the seconds both
+    // vendors publish.
+    match &r.quota {
+        Some(q) => {
+            j.key("quota");
+            j.begin_object();
+            j.number("pct", q.pct as i64);
+            j.string("window", &q.window);
+            match q.resets_at_ms {
+                Some(at) => j.number("resets_at_ms", at as i64),
+                None => j.null("resets_at_ms"),
+            }
+            j.end_object();
+        }
+        None => j.null("quota"),
+    }
+    // Additive (schema stays 1): the agent's own reported cost for THIS session, `null` when its
+    // channel publishes none. tma reports which pane right now and aggregates nothing across
+    // sessions, a spend total over time is `ccusage`'s job, not this row's.
+    match r.cost_usd {
+        Some(v) => j.money("cost_usd", v),
+        None => j.null("cost_usd"),
+    }
     // Additive (schema stays 1): the resolved repo/branch grouping keys. All three keys are
     // null together (the row's cwd never resolved to a repo); `worktree` is `false` for a resolved main
     // checkout, `true` for a linked worktree.
@@ -400,7 +427,7 @@ fn prom_label(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tma_core::RepoLabel;
+    use tma_core::{QuotaLabel, RepoLabel};
 
     fn row(pane: &str, agent: &str, state: AgentState, detail: Option<&str>) -> AgentRow {
         AgentRow {
@@ -419,11 +446,27 @@ mod tests {
             context_pct: None,
             context_at: None,
             tokens: None,
+            quota: None,
+            cost_usd: None,
             muted: false,
             model: None,
             cwd: None,
             repo: None,
             pending: None,
+        }
+    }
+
+    /// A row carrying the account quota and a cost, so the key-set pins reach the nested `quota`
+    /// keys (an all-`null` row would leave them unpinned and a rename inside it would ship silently).
+    fn quota_row(pane: &str) -> AgentRow {
+        AgentRow {
+            quota: Some(QuotaLabel {
+                pct: 63,
+                window: "spend".to_string(),
+                resets_at_ms: Some(1_790_787_200_000),
+            }),
+            cost_usd: Some(3.4972),
+            ..row(pane, "claude", AgentState::Blocked, Some("permission"))
         }
     }
 
@@ -609,16 +652,42 @@ mod tests {
         assert!(json.contains("\"since_ms\":500") && json.contains("\"episode_ms\":500"));
     }
 
+    /// The quota is one nested object, not three parallel scalars, and the cost renders with the
+    /// same two decimals the `@agent_cost_usd` option carries. Both surfaces emit them, and both
+    /// render an absent reading as `null`, never as a zero, which would read as "no quota used".
+    #[test]
+    fn the_quota_object_and_cost_render_together_or_as_null() {
+        for json in [
+            render_wait_json_t(&quota_row("%1")),
+            render_ls_json_t(&report(vec![quota_row("%1")])),
+        ] {
+            assert!(
+                json.contains(
+                    r#""quota":{"pct":63,"window":"spend","resets_at_ms":1790787200000}"#
+                ),
+                "the three values ride one object: {json}"
+            );
+            assert!(
+                json.contains(r#""cost_usd":3.50"#),
+                "3.4972 renders as the money the option stores: {json}"
+            );
+        }
+        // A channel with no rate-limit block and no cost: two explicit nulls, no zeros.
+        let bare = render_wait_json_t(&row("%1", "codex", AgentState::Idle, None));
+        assert!(bare.contains(r#""quota":null"#) && bare.contains(r#""cost_usd":null"#));
+
+        // A window whose reset instant the channel did not state keeps the percent.
+        let mut r = quota_row("%1");
+        r.quota.as_mut().unwrap().resets_at_ms = None;
+        assert!(render_wait_json_t(&r)
+            .contains(r#""quota":{"pct":63,"window":"spend","resets_at_ms":null}"#));
+    }
+
     /// The complete `ls --json` key inventory (additive-only): a dropped, renamed, or new key fails
     /// here. `since`/`since_ms` share a value; `since` is the compat key, `since_ms` names the unit.
     #[test]
     fn ls_json_pins_full_key_set() {
-        let json = render_ls_json_t(&report(vec![row(
-            "%1",
-            "claude",
-            AgentState::Blocked,
-            Some("permission"),
-        )]));
+        let json = render_ls_json_t(&report(vec![quota_row("%1")]));
         assert_eq!(
             json_keys(&json),
             [
@@ -628,6 +697,7 @@ mod tests {
                 "branch",
                 "context",
                 "context_at_ms",
+                "cost_usd",
                 "detail",
                 "done",
                 "episode_ms",
@@ -635,10 +705,13 @@ mod tests {
                 "locator",
                 "muted",
                 "pane",
+                "pct",
                 "pending_call",
                 "pending_summary",
                 "pending_tool",
+                "quota",
                 "repo",
+                "resets_at_ms",
                 "schema",
                 "server",
                 "session",
@@ -647,6 +720,7 @@ mod tests {
                 "state",
                 "title",
                 "tokens",
+                "window",
                 "worktree",
             ]
         );
@@ -656,12 +730,7 @@ mod tests {
     /// own exact-key-set pin: the shared row fields plus a top-level `schema`, not the `agents` wrapper.
     #[test]
     fn wait_json_pins_full_key_set() {
-        let json = render_wait_json_t(&row(
-            "%1",
-            "claude",
-            AgentState::Blocked,
-            Some("permission"),
-        ));
+        let json = render_wait_json_t(&quota_row("%1"));
         assert!(json.starts_with("{\"schema\":1"));
         assert_eq!(
             json_keys(&json),
@@ -671,6 +740,7 @@ mod tests {
                 "branch",
                 "context",
                 "context_at_ms",
+                "cost_usd",
                 "detail",
                 "done",
                 "episode_ms",
@@ -678,10 +748,13 @@ mod tests {
                 "locator",
                 "muted",
                 "pane",
+                "pct",
                 "pending_call",
                 "pending_summary",
                 "pending_tool",
+                "quota",
                 "repo",
+                "resets_at_ms",
                 "schema",
                 "server",
                 "session",
@@ -690,6 +763,7 @@ mod tests {
                 "state",
                 "title",
                 "tokens",
+                "window",
                 "worktree",
             ]
         );
@@ -699,10 +773,7 @@ mod tests {
     /// `agents` document, key-for-key the `ls --json` one, carrying every satisfied row.
     #[test]
     fn wait_json_rows_pins_full_key_set() {
-        let rows = [
-            row("%1", "claude", AgentState::Idle, None),
-            row("%2", "codex", AgentState::Idle, None),
-        ];
+        let rows = [quota_row("%1"), quota_row("%2")];
         let json = render_wait_json_rows(&rows, &origin());
         assert!(json.starts_with("{\"schema\":1,\"agents\":["));
         assert!(json.contains("\"pane\":\"%1\"") && json.contains("\"pane\":\"%2\""));
@@ -715,6 +786,7 @@ mod tests {
                 "branch",
                 "context",
                 "context_at_ms",
+                "cost_usd",
                 "detail",
                 "done",
                 "episode_ms",
@@ -722,10 +794,13 @@ mod tests {
                 "locator",
                 "muted",
                 "pane",
+                "pct",
                 "pending_call",
                 "pending_summary",
                 "pending_tool",
+                "quota",
                 "repo",
+                "resets_at_ms",
                 "schema",
                 "server",
                 "session",
@@ -734,6 +809,7 @@ mod tests {
                 "state",
                 "title",
                 "tokens",
+                "window",
                 "worktree",
             ]
         );

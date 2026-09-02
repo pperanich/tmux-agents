@@ -108,6 +108,8 @@ mod tests {
             context_pct: None,
             context_at: None,
             tokens: None,
+            quota: None,
+            cost_usd: None,
             muted: false,
             model: None,
             cwd: None,

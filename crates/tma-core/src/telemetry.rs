@@ -57,7 +57,11 @@ pub fn parse_context(format: &str, payload: &str) -> Option<ContextReport> {
 pub fn parse_claude_statusline(payload: &str) -> Option<ContextReport> {
     let session = find_string(payload, "session_id");
     let tokens = claude_token_count(payload);
-    match find_number(payload, "used_percentage") {
+    // Anchored inside `context_window`: `rate_limits.{five_hour,seven_day,spend_limit}` each carry
+    // their own `used_percentage`, so an unanchored read stamps an account-quota percent as the
+    // context gauge whenever the payload happens to order `rate_limits` first.
+    let window = find_object(payload, "context_window");
+    match window.and_then(|w| find_number(w, "used_percentage")) {
         Some(n) => {
             if !(0.0..=100.0).contains(&n) {
                 return None; // cumulative-shape garbage: ignore, do not clear
@@ -87,8 +91,10 @@ fn claude_token_count(payload: &str) -> Option<u64> {
     if version < CLAUDE_TOKEN_COUNT_MIN_VERSION {
         return None;
     }
-    let anchor = payload.find("\"context_window\"")?;
-    count(find_number(&payload[anchor..], "total_input_tokens"))
+    count(find_number(
+        find_object(payload, "context_window")?,
+        "total_input_tokens",
+    ))
 }
 
 /// A `major.minor.patch` version string as a comparable triple. `None` unless all three components
@@ -244,6 +250,257 @@ fn count(n: Option<f64>) -> Option<u64> {
     n.filter(|v| v.is_finite() && *v >= 0.0).map(|v| v as u64)
 }
 
+// ---- quota and cost ----------------------------------------------------------------------------
+
+/// One account rate-limit window a channel reports. Unlike the context gauge, which is per-pane and
+/// recoverable by a compact, these are account-wide: every pane signed into the same account shares
+/// them, so the same numbers land on several rows at once and that is correct, not a duplicate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum QuotaWindow {
+    /// Claude `rate_limits.five_hour`: the rolling five-hour window.
+    FiveHour,
+    /// Claude `rate_limits.seven_day`: the weekly window.
+    SevenDay,
+    /// Claude `rate_limits.spend_limit`: a Claude-apps-gateway spend cap, when one applies.
+    Spend,
+    /// Codex `rate_limits.primary`: the shorter of the two windows the rollout reports.
+    Primary,
+    /// Codex `rate_limits.secondary`: the longer one, absent (`null`) on many plans.
+    Secondary,
+}
+
+impl QuotaWindow {
+    /// The machine token stamped into `@agent_quota_window`, as with every other option value.
+    pub fn token(self) -> &'static str {
+        match self {
+            QuotaWindow::FiveHour => "5h",
+            QuotaWindow::SevenDay => "7d",
+            QuotaWindow::Spend => "spend",
+            QuotaWindow::Primary => "primary",
+            QuotaWindow::Secondary => "secondary",
+        }
+    }
+}
+
+/// One window's reading: its utilization percent and, when the channel states it, the instant it
+/// resets. `resets_at_ms` is epoch **milliseconds**, the parser converts, never the consumer.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct QuotaWindowReading {
+    pub window: QuotaWindow,
+    pub pct: u8,
+    pub resets_at_ms: Option<u64>,
+}
+
+/// A parsed quota observation: the window closest to exhausted, plus every window the payload
+/// carried. **Highest percent wins** because that is the one that will stop the account first; a tie
+/// goes to the window listed first, which is the shorter (and so more urgent) one on both channels.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QuotaReport {
+    pub pct: u8,
+    pub window: QuotaWindow,
+    pub resets_at_ms: Option<u64>,
+    /// Every window present, in the channel's own declaration order. Kept because the parse already
+    /// walked them, so a surface that wants "5h and 7d side by side" needs no second parse.
+    pub windows: Vec<QuotaWindowReading>,
+}
+
+impl QuotaReport {
+    /// The report for a set of window readings: the highest percent wins. `None` for an empty set,
+    /// no window parsed is no observation, never a zero.
+    fn worst(windows: Vec<QuotaWindowReading>) -> Option<QuotaReport> {
+        // `min_by_key` over the reversed percent, not `max_by_key`: `max_by_key` keeps the LAST of
+        // several equal maxima, and a tie belongs to the window declared first (the shorter one).
+        let worst = *windows.iter().min_by_key(|w| std::cmp::Reverse(w.pct))?;
+        Some(QuotaReport {
+            pct: worst.pct,
+            window: worst.window,
+            resets_at_ms: worst.resets_at_ms,
+            windows,
+        })
+    }
+}
+
+/// A parsed quota/cost/model observation from the very payload the context parsers already read.
+/// Every field is independently optional: a channel reports what it reports, and an absent field is
+/// never inferred from a present one.
+#[derive(Clone, Debug, PartialEq)]
+pub struct UsageReport {
+    /// The owning session id, for the intake's ownership filter (same field the context path reads).
+    pub session: Option<String>,
+    pub quota: Option<QuotaReport>,
+    /// The vendor's own session cost in USD, `None` when the channel publishes none. A live reading
+    /// of one session, never a total tma computed and never a price table.
+    pub cost_usd: Option<f64>,
+    /// The model id, for channels whose payload carries one the registration path cannot reach.
+    pub model: Option<String>,
+}
+
+impl UsageReport {
+    /// Whether this observation has anything for the quota chain to write. A payload carrying only a
+    /// model name stamps the label and leaves the quota lane alone.
+    pub fn has_quota_observation(&self) -> bool {
+        self.quota.is_some() || self.cost_usd.is_some()
+    }
+}
+
+/// Parse the quota/cost half of a context payload for `format`. `now_ms` is the caller's clock: a
+/// channel that reports a RELATIVE reset offset (older Codex builds) has no other way to reach an
+/// absolute instant, and this module holds no clock of its own.
+///
+/// `None` is a deliberate ignore, an unknown format, or a payload carrying no quota, no cost and no
+/// model. As on the context path there is no error case: a fire-and-forget push must never fail.
+pub fn parse_usage(format: &str, payload: &str, now_ms: u64) -> Option<UsageReport> {
+    let report = match format {
+        "claude-statusline-json" => UsageReport {
+            session: find_string(payload, "session_id"),
+            quota: claude_quota(payload),
+            cost_usd: claude_cost_usd(payload),
+            model: claude_statusline_model(payload),
+        },
+        "codex-rollout-jsonl" => UsageReport {
+            session: None, // discovery already keyed the file to the pane, as on the context path
+            quota: codex_rollout_quota(payload, now_ms),
+            cost_usd: None, // the rollout carries no cost figure
+            model: None,    // `codex_rollout_model` already covers the tail's model record
+        },
+        _ => return None,
+    };
+    let anything = report.has_quota_observation() || report.model.is_some();
+    anything.then_some(report)
+}
+
+/// Claude's rate-limit windows, shortest first (which decides a tie in [`QuotaReport::worst`]).
+const CLAUDE_WINDOWS: [(&str, QuotaWindow); 3] = [
+    ("five_hour", QuotaWindow::FiveHour),
+    ("seven_day", QuotaWindow::SevenDay),
+    ("spend_limit", QuotaWindow::Spend),
+];
+
+/// The quota half of a Claude statusline payload: `rate_limits.{five_hour,seven_day,spend_limit}`,
+/// each `{ used_percentage, resets_at }` with `resets_at` in epoch **seconds**.
+///
+/// Every read is anchored inside its own window object. `used_percentage` is a key the payload
+/// carries in four different objects (the three windows and `context_window`), so an unanchored read
+/// is not a shortcut, it is a wrong answer waiting for a field-order change.
+///
+/// `None`, no `rate_limits` object, or no window inside it that parses, is an IGNORE, never a
+/// clear. The block is absent for API-key auth, absent before the first API response, and dropped
+/// per window once its `resets_at` passes, so a missing block says nothing about the account.
+fn claude_quota(payload: &str) -> Option<QuotaReport> {
+    let block = find_object(payload, "rate_limits")?;
+    QuotaReport::worst(
+        CLAUDE_WINDOWS
+            .iter()
+            .filter_map(|&(key, window)| {
+                let obj = find_object(block, key)?;
+                Some(QuotaWindowReading {
+                    window,
+                    pct: quota_pct(find_number(obj, "used_percentage")?)?,
+                    resets_at_ms: epoch_seconds_to_ms(find_number(obj, "resets_at")),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// The session cost from a Claude statusline payload, anchored inside its own `cost` object so no
+/// future sibling of the same name can stand in. `None` when absent or not a usable amount.
+fn claude_cost_usd(payload: &str) -> Option<f64> {
+    let v = find_number(find_object(payload, "cost")?, "total_cost_usd")?;
+    (v.is_finite() && v >= 0.0).then_some(v)
+}
+
+/// The model id from a Claude **statusline** payload, whose `model` is an OBJECT
+/// (`{ "id", "display_name" }`) and so out of reach of [`hook_payload_model`]'s top-level string
+/// read. `id` over `display_name`: the id is what a `[telemetry.windows]` entry names.
+pub fn claude_statusline_model(payload: &str) -> Option<String> {
+    let id = find_string(find_object(payload, "model")?, "id")?;
+    let id = id.trim();
+    // A model name is a short safe label; reject empty/oversized junk before it reaches a pane option.
+    (!id.is_empty() && id.len() <= 64).then(|| id.to_string())
+}
+
+/// Codex's rate-limit windows, shortest first (a tie goes to `primary`, whose `window_minutes` is
+/// the smaller of the two on every observed record).
+const CODEX_WINDOWS: [(&str, QuotaWindow); 2] = [
+    ("primary", QuotaWindow::Primary),
+    ("secondary", QuotaWindow::Secondary),
+];
+
+/// The quota half of a Codex rollout tail: the newest `token_count` record's `rate_limits`, matching
+/// the context parser's newest-record-wins rule so gauge and quota describe the same instant. A
+/// record with no `rate_limits` leaves the previous record's reading standing within the window.
+fn codex_rollout_quota(payload: &str, now_ms: u64) -> Option<QuotaReport> {
+    let mut latest = None;
+    for line in payload.lines() {
+        if let Some(q) = codex_line_quota(line, now_ms) {
+            latest = Some(q);
+        }
+    }
+    latest
+}
+
+/// One rollout line's quota reading. `rate_limits` sits beside `info` on the `token_count` payload,
+/// carrying `primary`/`secondary` as `{ used_percent, window_minutes, resets_at | resets_in_seconds }`.
+/// A `"secondary": null` is not an object, so [`find_object`] skips it rather than reading through
+/// it into the next window's fields.
+fn codex_line_quota(line: &str, now_ms: u64) -> Option<QuotaReport> {
+    if !line.contains("\"token_count\"") {
+        return None;
+    }
+    let block = find_object(line, "rate_limits")?;
+    QuotaReport::worst(
+        CODEX_WINDOWS
+            .iter()
+            .filter_map(|&(key, window)| {
+                let obj = find_object(block, key)?;
+                Some(QuotaWindowReading {
+                    window,
+                    pct: quota_pct(find_number(obj, "used_percent")?)?,
+                    resets_at_ms: codex_resets_at_ms(obj, now_ms),
+                })
+            })
+            .collect(),
+    )
+}
+
+/// One Codex window's reset instant in epoch **ms**. Codex has published it two ways across
+/// releases: an absolute `resets_at` in epoch seconds (every rollout observed on this machine,
+/// 2026-09), and a relative `resets_in_seconds` offset that only the caller's clock can resolve.
+/// Absolute wins where both appear, it needs no clock and so cannot drift.
+fn codex_resets_at_ms(obj: &str, now_ms: u64) -> Option<u64> {
+    if let Some(ms) = epoch_seconds_to_ms(find_number(obj, "resets_at")) {
+        return Some(ms);
+    }
+    let secs = find_number(obj, "resets_in_seconds")?;
+    // A window that resets more than a year out is not a window; reject rather than stamp nonsense.
+    if !secs.is_finite() || !(0.0..=31_536_000.0).contains(&secs) {
+        return None;
+    }
+    Some(now_ms.saturating_add((secs * 1000.0) as u64))
+}
+
+/// A reported utilization percent as the stamped `0..=100` integer. `None` for a non-finite or
+/// negative reading; a spend limit past 100% (which Claude documents) clamps to a full gauge rather
+/// than overflowing the option's documented range.
+fn quota_pct(n: f64) -> Option<u8> {
+    (n.is_finite() && n >= 0.0).then(|| n.round().clamp(0.0, 100.0) as u8)
+}
+
+/// An epoch-**seconds** timestamp as epoch **ms**. `None` unless it is a plausible wall-clock
+/// instant: `1e11` seconds is the year 5138, past which a value is a unit mix-up or garbage, and a
+/// non-positive one is a field the channel had nothing to put in.
+fn epoch_seconds_to_ms(secs: Option<f64>) -> Option<u64> {
+    let s = secs?;
+    (s.is_finite() && s > 0.0 && s <= 1e11).then_some((s * 1000.0) as u64)
+}
+
+/// A cost reading as the `@agent_cost_usd` option value: two decimals, the form every surface
+/// renders. `None` for an amount no money label fits (non-finite or negative).
+pub fn format_cost_usd(v: f64) -> Option<String> {
+    (v.is_finite() && v >= 0.0).then(|| format!("{v:.2}"))
+}
+
 /// Best-effort model name from a Codex rollout tail window, for `tma doctor`'s recognized-model check:
 /// the newest `"model":"…"` in the window (a `turn_context`/`session_meta` record). `None` when the
 /// window carries none — the model record can sit before the tail window on a large file, so this is
@@ -301,6 +558,52 @@ fn find_string(payload: &str, key: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The `{…}` slice of the object at `"<key>":` (first occurrence), brace-balanced and quote-aware so
+/// a nested object or a brace inside a string cannot end it early. `None` when the key is absent or
+/// its value is not an object, `null`, a number, a string, which is what makes it a safe anchor:
+/// reading a field "inside" `"context_window": null` would otherwise spill into the next object.
+///
+/// This is the whole reason the parsers below are not one `find_number` each. `used_percentage`
+/// appears in four objects of a Claude payload and `total_tokens` in two of a Codex record; an
+/// unanchored read picks whichever the vendor happened to serialize first.
+fn find_object<'a>(payload: &'a str, key: &str) -> Option<&'a str> {
+    let needle = format!("\"{key}\"");
+    let start = payload.find(&needle)? + needle.len();
+    let rest = payload[start..]
+        .trim_start()
+        .strip_prefix(':')?
+        .trim_start();
+    if !rest.starts_with('{') {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (i, b) in rest.bytes().enumerate() {
+        if in_string {
+            match b {
+                _ if escaped => escaped = false,
+                b'\\' => escaped = true,
+                b'"' => in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match b {
+            b'"' => in_string = true,
+            b'{' => depth += 1,
+            b'}' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(&rest[..=i]);
+                }
+            }
+            _ => {}
+        }
+    }
+    None // unterminated: a truncated payload, which every caller treats as no reading
 }
 
 /// Extract a JSON number field `"<key>": <number>` (first occurrence). `None` when the key is absent
@@ -683,6 +986,283 @@ mod tests {
         // An oversized value is rejected before it can reach a pane option.
         let huge = format!(r#"{{"model":"{}"}}"#, "x".repeat(65));
         assert_eq!(hook_payload_model(&huge), None);
+    }
+
+    // REAL-shaped quota captures. The Claude ones are built from the statusline schema's own
+    // `rate_limits` block (code.claude.com/docs/en/statusline, verified 2026-09-01); the Codex ones
+    // reproduce the shape of a live `~/.codex/sessions` rollout record observed the same day, with
+    // its ids and account details replaced.
+    const CLAUDE_QUOTA: &str = include_str!("../fixtures/claude_statusline_quota.json");
+    /// `rate_limits` serialized BEFORE `context_window`: the field-order case an unanchored
+    /// `used_percentage` read gets wrong.
+    const CLAUDE_QUOTA_FIRST: &str = include_str!("../fixtures/claude_statusline_quota_first.json");
+    const CLAUDE_QUOTA_BAD_RESET: &str =
+        include_str!("../fixtures/claude_statusline_quota_malformed_reset.json");
+    const CODEX_QUOTA: &str = include_str!("../fixtures/codex_rollout_rate_limits.jsonl");
+    /// The older Codex shape, whose reset is a RELATIVE offset only a clock can resolve.
+    const CODEX_QUOTA_RELATIVE: &str =
+        include_str!("../fixtures/codex_rollout_rate_limits_relative.jsonl");
+
+    /// The parse clock. Any fixed value works, the absolute-reset path must ignore it entirely.
+    const NOW_MS: u64 = 1_788_000_000_000;
+
+    fn usage(format: &str, payload: &str) -> UsageReport {
+        parse_usage(format, payload, NOW_MS).unwrap()
+    }
+
+    fn quota(format: &str, payload: &str) -> QuotaReport {
+        usage(format, payload).quota.unwrap()
+    }
+
+    #[test]
+    fn claude_quota_reads_each_field_from_its_own_block() {
+        // The payload carries `used_percentage` in four objects. Every window must come from its
+        // own, and the context gauge must still come from `context_window`.
+        let u = usage("claude-statusline-json", CLAUDE_QUOTA);
+        let q = u.quota.unwrap();
+        assert_eq!(
+            q.windows,
+            vec![
+                QuotaWindowReading {
+                    window: QuotaWindow::FiveHour,
+                    pct: 24, // 23.5 rounds up
+                    resets_at_ms: Some(1_788_425_600_000),
+                },
+                QuotaWindowReading {
+                    window: QuotaWindow::SevenDay,
+                    pct: 41,
+                    resets_at_ms: Some(1_788_857_600_000),
+                },
+                QuotaWindowReading {
+                    window: QuotaWindow::Spend,
+                    pct: 63,
+                    resets_at_ms: Some(1_790_787_200_000),
+                },
+            ]
+        );
+        // Highest percent wins: the spend limit at 63%, with its own reset instant.
+        assert_eq!((q.pct, q.window.token()), (63, "spend"));
+        assert_eq!(q.resets_at_ms, Some(1_790_787_200_000));
+        assert_eq!(u.cost_usd, Some(3.4972));
+        assert_eq!(u.model.as_deref(), Some("claude-opus-4-8"));
+        assert_eq!(
+            u.session.as_deref(),
+            Some("019f8aac-ff01-75d0-9bb1-7f0eab253ce7")
+        );
+        // The same payload's context gauge is unaffected by any of it.
+        assert_eq!(parse_claude_statusline(CLAUDE_QUOTA).unwrap().pct, Some(78));
+    }
+
+    /// The anchoring regression this feature could have introduced in reverse: a payload that
+    /// serializes `rate_limits` first would make an unanchored `used_percentage` read stamp the
+    /// account quota as the pane's context gauge.
+    #[test]
+    fn a_quota_percent_is_never_read_as_the_context_gauge() {
+        assert_eq!(
+            parse_claude_statusline(CLAUDE_QUOTA_FIRST).unwrap().pct,
+            Some(8),
+            "the gauge is `context_window`'s 8, not five_hour's 91"
+        );
+        assert_eq!(
+            parse_claude_statusline(CLAUDE_QUOTA_FIRST).unwrap().tokens,
+            Some(15_500)
+        );
+        assert_eq!(quota("claude-statusline-json", CLAUDE_QUOTA_FIRST).pct, 91);
+    }
+
+    #[test]
+    fn a_payload_with_only_a_context_window_reports_no_quota() {
+        // The pre-`rate_limits` payload every other fixture uses: a gauge, and nothing to stamp on
+        // the quota lane. NOT a clear, the block is absent for API-key auth and before the first
+        // API response, so its absence says nothing about the account.
+        let u = usage("claude-statusline-json", NORMAL);
+        assert_eq!(u.quota, None);
+        assert_eq!(u.cost_usd, None);
+        assert!(!u.has_quota_observation(), "nothing for the chain to write");
+        // The model still rides along, which is why the report itself is not `None`.
+        assert_eq!(u.model.as_deref(), Some("claude-opus-4-8"));
+    }
+
+    #[test]
+    fn a_malformed_reset_leaves_the_percent_standing() {
+        // `null` and a non-numeric string both yield no instant. The percent is the useful half and
+        // must not be thrown away with it.
+        let q = quota("claude-statusline-json", CLAUDE_QUOTA_BAD_RESET);
+        assert_eq!((q.pct, q.window.token()), (55, "5h"));
+        assert_eq!(q.resets_at_ms, None);
+        assert!(q.windows.iter().all(|w| w.resets_at_ms.is_none()));
+        // An out-of-range instant (here epoch MILLIseconds mistakenly sent as seconds) is rejected
+        // rather than multiplied into the year 58691.
+        let mixed =
+            r#"{"rate_limits":{"five_hour":{"used_percentage":10,"resets_at":1788425600000}}}"#;
+        assert_eq!(
+            quota("claude-statusline-json", mixed).resets_at_ms,
+            None,
+            "a seconds field holding milliseconds is garbage, not a reading"
+        );
+    }
+
+    #[test]
+    fn codex_quota_takes_the_newest_record_and_skips_a_null_window() {
+        // Two `token_count` records: the newest carries both windows, so `secondary` at 74% wins
+        // over `primary` at 26%.
+        let q = quota("codex-rollout-jsonl", CODEX_QUOTA);
+        assert_eq!((q.pct, q.window.token()), (74, "secondary"));
+        assert_eq!(q.resets_at_ms, Some(1_788_873_462_000));
+        assert_eq!(q.windows.len(), 2);
+        // The older record has `"secondary": null`, which is not an object: primary alone, and the
+        // read must not fall through into `credits` or `plan_type`.
+        let older = CODEX_QUOTA.lines().nth(1).unwrap();
+        let q = quota("codex-rollout-jsonl", older);
+        assert_eq!((q.pct, q.window.token()), (18, "primary"));
+        assert_eq!(q.windows.len(), 1);
+        // Codex publishes no cost and no statusline-shaped model.
+        let u = usage("codex-rollout-jsonl", CODEX_QUOTA);
+        assert_eq!((u.cost_usd, u.model), (None, None));
+    }
+
+    #[test]
+    fn a_rollout_window_with_no_rate_limits_reports_no_quota() {
+        // The pre-`rate_limits` rollout fixture: a gauge, no quota, nothing to write.
+        assert_eq!(
+            parse_usage("codex-rollout-jsonl", CODEX_ROLLOUT, NOW_MS),
+            None
+        );
+        assert_eq!(
+            parse_usage("codex-rollout-jsonl", CODEX_NO_RECORD, NOW_MS),
+            None
+        );
+        // An unknown format is a silent ignore, as on the context path.
+        assert_eq!(parse_usage("carrier-pigeon", CLAUDE_QUOTA, NOW_MS), None);
+    }
+
+    /// The unit trap, both directions. Claude states an ABSOLUTE epoch-seconds instant, Codex has
+    /// published both that and a RELATIVE seconds offset; tma's contract is epoch ms everywhere, and
+    /// the conversion happens here so no consumer ever has to know which channel it came from.
+    #[test]
+    fn reset_instants_convert_to_ms_at_the_parser() {
+        // Claude: seconds x 1000, and the clock is not consulted at all.
+        let claude = quota("claude-statusline-json", CLAUDE_QUOTA);
+        assert_eq!(claude.windows[0].resets_at_ms, Some(1_788_425_600 * 1000));
+        assert_eq!(
+            parse_usage("claude-statusline-json", CLAUDE_QUOTA, 0)
+                .unwrap()
+                .quota,
+            Some(claude),
+            "an absolute instant is independent of the caller's clock"
+        );
+
+        // Codex's absolute form behaves the same way.
+        assert_eq!(
+            quota("codex-rollout-jsonl", CODEX_QUOTA).resets_at_ms,
+            Some(1_788_873_462 * 1000)
+        );
+
+        // Codex's relative form is `now + offset x 1000`, so it MOVES with the clock. 7200 s on the
+        // 42% primary window, which is the one that wins.
+        let q = quota("codex-rollout-jsonl", CODEX_QUOTA_RELATIVE);
+        assert_eq!((q.pct, q.window.token()), (42, "primary"));
+        assert_eq!(q.resets_at_ms, Some(NOW_MS + 7_200_000));
+        assert_eq!(
+            parse_usage("codex-rollout-jsonl", CODEX_QUOTA_RELATIVE, NOW_MS + 60_000)
+                .unwrap()
+                .quota
+                .unwrap()
+                .resets_at_ms,
+            Some(NOW_MS + 60_000 + 7_200_000)
+        );
+        // The seconds are never mistaken for ms: 7200 ms out would be two hours too early.
+        assert_ne!(q.resets_at_ms, Some(NOW_MS + 7_200));
+    }
+
+    #[test]
+    fn the_highest_window_wins_and_a_tie_takes_the_shorter_one() {
+        let at = |five: u32, seven: u32| {
+            let p = format!(
+                r#"{{"rate_limits":{{"five_hour":{{"used_percentage":{five}}},"seven_day":{{"used_percentage":{seven}}}}}}}"#
+            );
+            let q = quota("claude-statusline-json", &p);
+            (q.pct, q.window.token())
+        };
+        assert_eq!(at(90, 20), (90, "5h"));
+        assert_eq!(at(20, 90), (90, "7d"));
+        // A tie goes to the window declared first, which is the shorter and so more urgent one.
+        assert_eq!(at(50, 50), (50, "5h"));
+    }
+
+    #[test]
+    fn a_quota_percent_past_the_limit_clamps_to_a_full_gauge() {
+        // Claude documents `spend_limit.used_percentage` running above 100 once exceeded; the option
+        // is a documented `0..=100`, so it clamps rather than overflowing.
+        let over = r#"{"rate_limits":{"spend_limit":{"used_percentage":137.4}}}"#;
+        assert_eq!(quota("claude-statusline-json", over).pct, 100);
+        // A negative reading is not a percent at all: that window drops out entirely.
+        let negative = r#"{"rate_limits":{"five_hour":{"used_percentage":-1},"seven_day":{"used_percentage":30}}}"#;
+        let q = quota("claude-statusline-json", negative);
+        assert_eq!((q.pct, q.window.token(), q.windows.len()), (30, "7d", 1));
+    }
+
+    #[test]
+    fn the_cost_comes_from_its_own_object_and_renders_to_two_decimals() {
+        assert_eq!(
+            usage("claude-statusline-json", CLAUDE_QUOTA).cost_usd,
+            Some(3.4972)
+        );
+        assert_eq!(format_cost_usd(3.4972).as_deref(), Some("3.50"));
+        assert_eq!(format_cost_usd(0.0).as_deref(), Some("0.00"));
+        assert_eq!(format_cost_usd(12.0).as_deref(), Some("12.00"));
+        assert_eq!(format_cost_usd(-1.0), None);
+        assert_eq!(format_cost_usd(f64::NAN), None);
+        // A same-named field outside the `cost` object cannot stand in for it.
+        let decoy = r#"{"totals":{"total_cost_usd":99},"cost":{"total_duration_ms":45000}}"#;
+        assert_eq!(parse_usage("claude-statusline-json", decoy, NOW_MS), None);
+    }
+
+    #[test]
+    fn the_statusline_model_is_read_from_the_nested_object() {
+        // `hook_payload_model` deliberately refuses this shape (its `model` is an object); the
+        // statusline path needs the `id` inside it.
+        assert_eq!(
+            claude_statusline_model(r#"{"model":{"id":"claude-opus-5","display_name":"Opus"}}"#)
+                .as_deref(),
+            Some("claude-opus-5")
+        );
+        assert_eq!(
+            claude_statusline_model(r#"{"model":"claude-opus-5"}"#),
+            None
+        );
+        assert_eq!(
+            claude_statusline_model(r#"{"model":{"display_name":"Opus"}}"#),
+            None
+        );
+        let huge = format!(r#"{{"model":{{"id":"{}"}}}}"#, "x".repeat(65));
+        assert_eq!(claude_statusline_model(&huge), None);
+    }
+
+    #[test]
+    fn find_object_is_brace_balanced_and_quote_aware() {
+        let nested = r#"{"a":{"b":{"c":1},"d":2},"e":3}"#;
+        assert_eq!(find_object(nested, "a"), Some(r#"{"b":{"c":1},"d":2}"#));
+        assert_eq!(find_object(nested, "b"), Some(r#"{"c":1}"#));
+        // A brace inside a string value does not end the object.
+        let braced = r#"{"a":{"path":"/tmp/{x}/y","n":1},"b":2}"#;
+        assert_eq!(
+            find_object(braced, "a"),
+            Some(r#"{"path":"/tmp/{x}/y","n":1}"#)
+        );
+        // An escaped quote does not end the string either.
+        let escaped = r#"{"a":{"t":"he said \"}\" once","n":1}}"#;
+        assert_eq!(
+            find_object(escaped, "a"),
+            Some(r#"{"t":"he said \"}\" once","n":1}"#)
+        );
+        // A non-object value is not an anchor, so a field read "inside" it cannot spill onward.
+        assert_eq!(find_object(r#"{"a":null,"b":{"n":1}}"#, "a"), None);
+        assert_eq!(find_object(r#"{"a":7}"#, "a"), None);
+        assert_eq!(find_object(r#"{"a":"{}"}"#, "a"), None);
+        assert_eq!(find_object(r#"{"b":1}"#, "a"), None);
+        // A truncated payload yields nothing rather than a partial slice.
+        assert_eq!(find_object(r#"{"a":{"n":1"#, "a"), None);
     }
 
     #[test]

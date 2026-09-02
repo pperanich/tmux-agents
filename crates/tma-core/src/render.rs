@@ -504,6 +504,83 @@ pub fn render_context_advisory(
     cmds
 }
 
+/// One quota/cost observation to stamp. Every field is independently optional and a `None` CLEARS
+/// its option: the four are written as one chain from one payload, so an observation that reports a
+/// quota but no cost must not leave the previous payload's cost standing beside it.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct QuotaStamp<'a> {
+    pub pct: Option<u8>,
+    /// The window token (`5h` / `7d` / `spend` / `primary` / `secondary`).
+    pub window: Option<&'a str>,
+    pub resets_at_ms: Option<u64>,
+    /// The cost as its rendered two-decimal string (`tma_core::format_cost_usd`).
+    pub cost_usd: Option<&'a str>,
+}
+
+/// The evidence-time suppress expr for the quota chain: truthy (suppress) iff the stored
+/// `@agent_quota_at` is strictly newer than this observation. [`context_suppress_expr`]'s twin on its
+/// own marker, so a quota push and a context push never gate each other.
+fn quota_suppress_expr(evidence_at: u64) -> String {
+    format!(
+        "#{{e|>:#{{{at}}},{ev}}}",
+        at = opt::QUOTA_AT,
+        ev = evidence_at
+    )
+}
+
+/// Render the quota/cost write: the three quota options, the cost, then `@agent_quota_at` LAST, all
+/// under the evidence-time guard as one chained invocation. Same discipline as [`render_context`]: a
+/// `None` field writes an empty value (decoders read empty as absent) and the marker advances
+/// regardless, so a reordered stale push can neither walk the quota backward nor resurrect a
+/// cleared one.
+pub fn render_quota(pane_id: &str, q: &QuotaStamp, evidence_at: u64) -> Vec<StampCommand> {
+    let suppress = quota_suppress_expr(evidence_at);
+    let fields: [(&str, String); 4] = [
+        (
+            opt::QUOTA_PCT,
+            q.pct.map(|p| p.to_string()).unwrap_or_default(),
+        ),
+        (opt::QUOTA_WINDOW, q.window.unwrap_or_default().to_string()),
+        (
+            opt::QUOTA_RESETS_AT,
+            q.resets_at_ms.map(|v| v.to_string()).unwrap_or_default(),
+        ),
+        (opt::COST_USD, q.cost_usd.unwrap_or_default().to_string()),
+    ];
+    let mut cmds: Vec<StampCommand> = fields
+        .iter()
+        .map(|(key, value)| set_fmt(pane_id, key, &guarded(&suppress, key, value)))
+        .collect();
+    cmds.push(set_fmt(
+        pane_id,
+        opt::QUOTA_AT,
+        &guarded(&suppress, opt::QUOTA_AT, &evidence_at.to_string()),
+    ));
+    cmds
+}
+
+/// **Documented degrade**: advisory (unguarded) quota write for a tmux lacking `set -pF` expansion.
+/// The caller has already decided this observation is not older than the stored `@agent_quota_at`
+/// (a producer-side read-decide-write, NOT TOCTOU-safe). Mirrors [`render_context_advisory`]:
+/// present fields are set, absent ones unset, and the marker is written last.
+pub fn render_quota_advisory(pane_id: &str, q: &QuotaStamp, evidence_at: u64) -> Vec<StampCommand> {
+    let fields: [(&str, Option<String>); 4] = [
+        (opt::QUOTA_PCT, q.pct.map(|p| p.to_string())),
+        (opt::QUOTA_WINDOW, q.window.map(str::to_string)),
+        (opt::QUOTA_RESETS_AT, q.resets_at_ms.map(|v| v.to_string())),
+        (opt::COST_USD, q.cost_usd.map(str::to_string)),
+    ];
+    let mut cmds: Vec<StampCommand> = fields
+        .iter()
+        .map(|(key, value)| match value {
+            Some(v) => set_plain(pane_id, key, v),
+            None => unset_pane(pane_id, key),
+        })
+        .collect();
+    cmds.push(set_plain(pane_id, opt::QUOTA_AT, &evidence_at.to_string()));
+    cmds
+}
+
 /// The guarded set-from-absent write for the `context_high` notify marker: stamp `now` into
 /// `@agent_context_notified_at` only when it is empty/absent, else hold the stored value. Paired with
 /// a mandatory read-back at the tmux edge so two concurrent firers resolve to one bell (the same
@@ -564,6 +641,11 @@ const REMOVABLE: &[&str] = &[
     opt::TOKENS,
     opt::TOKENS_AT,
     opt::CONTEXT_NOTIFIED_AT,
+    opt::QUOTA_PCT,
+    opt::QUOTA_WINDOW,
+    opt::QUOTA_RESETS_AT,
+    opt::QUOTA_AT,
+    opt::COST_USD,
     opt::MODEL,
     opt::PERMISSION_REQUEST,
     opt::PENDING_TOOL,
@@ -1463,6 +1545,123 @@ mod tests {
                 .find(|c| c.argv.last().map(String::as_str) == Some(key))
                 .unwrap_or_else(|| panic!("{key} is unset by the advisory clear"));
             assert!(cmd.argv.contains(&"-u".to_string()));
+        }
+    }
+
+    #[test]
+    fn quota_write_guards_every_field_on_its_own_marker_with_at_last() {
+        // Five writes, `@agent_quota_at` last, each wrapping the quota chain's OWN suppress expr,
+        // it must compare against `@agent_quota_at`, never the context chain's marker, or a quiet
+        // gauge would gate a fresh quota push.
+        let q = QuotaStamp {
+            pct: Some(63),
+            window: Some("spend"),
+            resets_at_ms: Some(1_790_787_200_000),
+            cost_usd: Some("3.50"),
+        };
+        let cmds = render_quota("%7", &q, 1500);
+        assert_eq!(cmds.len(), 5);
+        assert!(cmds[0].argv.contains(&opt::QUOTA_PCT.to_string()));
+        assert!(cmds[4].argv.contains(&opt::QUOTA_AT.to_string()));
+        assert_eq!(
+            value_for(&cmds, opt::QUOTA_PCT).unwrap(),
+            "#{?#{e|>:#{@agent_quota_at},1500},#{@agent_quota_pct},63}"
+        );
+        assert_eq!(
+            value_for(&cmds, opt::QUOTA_WINDOW).unwrap(),
+            "#{?#{e|>:#{@agent_quota_at},1500},#{@agent_quota_window},spend}"
+        );
+        assert_eq!(
+            value_for(&cmds, opt::QUOTA_RESETS_AT).unwrap(),
+            "#{?#{e|>:#{@agent_quota_at},1500},#{@agent_quota_resets_at},1790787200000}"
+        );
+        assert_eq!(
+            value_for(&cmds, opt::COST_USD).unwrap(),
+            "#{?#{e|>:#{@agent_quota_at},1500},#{@agent_cost_usd},3.50}"
+        );
+        assert_eq!(
+            value_for(&cmds, opt::QUOTA_AT).unwrap(),
+            "#{?#{e|>:#{@agent_quota_at},1500},#{@agent_quota_at},1500}"
+        );
+    }
+
+    #[test]
+    fn a_quota_field_the_payload_omitted_is_cleared_not_left_standing() {
+        // Codex reports a quota and no cost; a reset the channel did not state is likewise empty.
+        // Both write empty (read back as absent) rather than leaving the previous payload's values
+        // beside a fresh reading, and the marker advances either way.
+        let q = QuotaStamp {
+            pct: Some(18),
+            window: Some("primary"),
+            ..QuotaStamp::default()
+        };
+        let cmds = render_quota("%7", &q, 2000);
+        for key in [opt::QUOTA_RESETS_AT, opt::COST_USD] {
+            assert!(
+                value_for(&cmds, key).unwrap().ends_with(",}"),
+                "{key} clears when the payload carried none"
+            );
+        }
+        assert!(value_for(&cmds, opt::QUOTA_PCT).unwrap().ends_with(",18}"));
+        assert_eq!(
+            value_for(&cmds, opt::QUOTA_AT).unwrap(),
+            "#{?#{e|>:#{@agent_quota_at},2000},#{@agent_quota_at},2000}"
+        );
+    }
+
+    #[test]
+    fn quota_advisory_is_plain_and_at_last() {
+        let q = QuotaStamp {
+            pct: Some(91),
+            window: Some("5h"),
+            resets_at_ms: Some(1_788_425_600_000),
+            cost_usd: Some("0.00"),
+        };
+        let set = render_quota_advisory("%7", &q, 900);
+        for c in &set {
+            assert!(
+                !c.argv.iter().any(|a| a == "-F"),
+                "advisory must not use -F"
+            );
+        }
+        assert_eq!(value_for(&set, opt::QUOTA_PCT).unwrap(), "91");
+        assert_eq!(value_for(&set, opt::QUOTA_WINDOW).unwrap(), "5h");
+        assert_eq!(value_for(&set, opt::COST_USD).unwrap(), "0.00");
+        let last = set.last().unwrap();
+        assert_eq!(last.argv[last.argv.len() - 2], opt::QUOTA_AT);
+        // An observation with nothing to report unsets each option (argv ends with the key, `-u`).
+        let clear = render_quota_advisory("%7", &QuotaStamp::default(), 900);
+        for key in [
+            opt::QUOTA_PCT,
+            opt::QUOTA_WINDOW,
+            opt::QUOTA_RESETS_AT,
+            opt::COST_USD,
+        ] {
+            let cmd = clear
+                .iter()
+                .find(|c| c.argv.last().map(String::as_str) == Some(key))
+                .unwrap_or_else(|| panic!("{key} is unset by the advisory clear"));
+            assert!(cmd.argv.contains(&"-u".to_string()));
+        }
+    }
+
+    /// A deregister must take the quota lane with it: a pane that outlives its agent carrying a
+    /// stale `@agent_quota_pct` would show a fleet-wide gauge for an account nothing is signed into.
+    #[test]
+    fn remove_clears_the_quota_lane() {
+        let keys: Vec<&str> = render_remove("%7")
+            .iter()
+            .filter_map(|c| c.argv.last().map(String::as_str))
+            .map(|k| REMOVABLE.iter().find(|r| **r == k).copied().unwrap_or(""))
+            .collect();
+        for key in [
+            opt::QUOTA_PCT,
+            opt::QUOTA_WINDOW,
+            opt::QUOTA_RESETS_AT,
+            opt::QUOTA_AT,
+            opt::COST_USD,
+        ] {
+            assert!(keys.contains(&key), "{key} is removed on deregister");
         }
     }
 

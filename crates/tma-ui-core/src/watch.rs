@@ -30,6 +30,9 @@ use crate::view::{Click, View};
 const STATE_W: usize = 20;
 const CONTEXT_W: usize = 4;
 const MODEL_W: usize = 14;
+/// The quota cell holds a percent and its window token (`63%7d`), which is the whole reading: a
+/// percent alone cannot say whether it is five hours or a week that is nearly spent.
+const QUOTA_W: usize = 7;
 
 /// Rows one wheel notch moves the selection. Three is the terminal convention for a wheel line
 /// scroll, and the selection moves with it so the highlight never leaves the window.
@@ -128,6 +131,9 @@ pub struct WatchModel {
     /// Whether any row carries a non-empty `@agent_model`: the table model column shows iff true. A
     /// derived cache, recomputed by `recompute_columns` wherever the row set changes.
     show_model: bool,
+    /// Whether any row carries an account quota: the table quota column shows iff true. A derived
+    /// cache, recomputed by `recompute_columns` wherever the row set changes.
+    show_quota: bool,
     pref: WidePref,
     /// Whether a successful jump also closes the surface. False for a normal persistent watcher;
     /// true for the temporary-session launcher, whose pane must exit after handing the client off.
@@ -158,6 +164,7 @@ impl WatchModel {
             groups: Vec::new(),
             show_branch: false,
             show_model: false,
+            show_quota: false,
             pref,
             exit_on_jump: false,
             width: 0,
@@ -389,8 +396,8 @@ impl WatchModel {
         self.sync_view();
     }
 
-    /// Recompute the `show_branch`/`show_model` column caches from the current row set. Both predicates
-    /// scan the flat `rows`, so grouping and order never affect them; called wherever the rows change.
+    /// Recompute the conditional-column caches from the current row set. Every predicate scans the
+    /// flat `rows`, so grouping and order never affect them; called wherever the rows change.
     fn recompute_columns(&mut self) {
         self.show_branch = self
             .rows
@@ -400,6 +407,7 @@ impl WatchModel {
             .rows
             .iter()
             .any(|r| r.model.as_deref().is_some_and(|m| !m.is_empty()));
+        self.show_quota = self.rows.iter().any(|r| r.quota.is_some());
     }
 
     /// Re-sort `rows` into flat state order then, when grouped, into grouped display order, and
@@ -471,6 +479,16 @@ impl WatchModel {
     /// Whether any row carries `@agent_model`, so the table spends a column on it.
     pub fn show_model(&self) -> bool {
         self.show_model
+    }
+
+    /// The table's conditional columns for the current row set, as one value: three loose booleans
+    /// at a call site are three chances to pass them in the wrong order.
+    pub fn columns(&self) -> TableColumns {
+        TableColumns {
+            model: self.show_model,
+            quota: self.show_quota,
+            branch: self.show_branch,
+        }
     }
 
     /// The selectable row count: the list title's `agents (N)`, and zero means no highlight.
@@ -558,9 +576,9 @@ impl WatchModel {
 /// The table header, column labels padded to the same widths as [`table_row`] so they line up. The
 /// leading two blanks stand in for the glyph column. The `branch` label sits next to `where` (both
 /// answer "where the pane is"), before the free-width title; it appears only when `show_branch`.
-pub fn table_header(show_model: bool, show_branch: bool) -> Line<'static> {
+pub fn table_header(cols_shown: TableColumns) -> Line<'static> {
     let mut cols = format!("  {:<aw$} ", truncate("agent", AGENT_W), aw = AGENT_W);
-    if show_model {
+    if cols_shown.model {
         cols.push_str(&format!(
             "{:<mw$} ",
             truncate("model", MODEL_W),
@@ -568,17 +586,23 @@ pub fn table_header(show_model: bool, show_branch: bool) -> Line<'static> {
         ));
     }
     cols.push_str(&format!(
-        "{:<sw$} {:>cw$} {:>tw$} {:<lw$} ",
+        "{:<sw$} {:>cw$} ",
         truncate("state", STATE_W),
         "ctx",
-        "time",
-        truncate("where", LOCATOR_W),
         sw = STATE_W,
         cw = CONTEXT_W,
+    ));
+    if cols_shown.quota {
+        cols.push_str(&format!("{:>qw$} ", "quota", qw = QUOTA_W));
+    }
+    cols.push_str(&format!(
+        "{:>tw$} {:<lw$} ",
+        "time",
+        truncate("where", LOCATOR_W),
         tw = TIME_W,
         lw = LOCATOR_W,
     ));
-    if show_branch {
+    if cols_shown.branch {
         cols.push_str(&format!(
             "{:<bw$} ",
             truncate("branch", BRANCH_W),
@@ -591,14 +615,17 @@ pub fn table_header(show_model: bool, show_branch: bool) -> Line<'static> {
 
 /// Width the title column gets after the fixed columns: the body width minus every leading cell
 /// (each padded field carries a trailing space). Floors at zero so a too-narrow frame just clips.
-pub fn table_title_width(width: u16, show_model: bool, show_branch: bool) -> usize {
+pub fn table_title_width(width: u16, cols_shown: TableColumns) -> usize {
     // glyph(2) + agent + state + ctx + time + where, each `+1` for the trailing space.
     let mut fixed =
         2 + (AGENT_W + 1) + (STATE_W + 1) + (CONTEXT_W + 1) + (TIME_W + 1) + (LOCATOR_W + 1);
-    if show_model {
+    if cols_shown.model {
         fixed += MODEL_W + 1;
     }
-    if show_branch {
+    if cols_shown.quota {
+        fixed += QUOTA_W + 1;
+    }
+    if cols_shown.branch {
         fixed += BRANCH_W + 1;
     }
     (width as usize).saturating_sub(fixed)
@@ -612,8 +639,7 @@ pub fn table_row(
     palette: &RowPalette,
     r: &AgentRow,
     now: u64,
-    show_model: bool,
-    show_branch: bool,
+    cols_shown: TableColumns,
     title_w: usize,
 ) -> Line<'static> {
     let (glyph, color) = row_style(palette, r);
@@ -625,7 +651,7 @@ pub fn table_row(
             Style::default().fg(Color::Cyan),
         ),
     ];
-    if show_model {
+    if cols_shown.model {
         let model = r.model.as_deref().unwrap_or("");
         spans.push(Span::raw(format!(
             "{:<w$} ",
@@ -638,6 +664,9 @@ pub fn table_row(
         Style::default().fg(color),
     ));
     spans.push(context_span(r, now));
+    if cols_shown.quota {
+        spans.push(quota_span(r));
+    }
     spans.push(Span::styled(
         format!("{time:>w$} ", w = TIME_W),
         Style::default().fg(Color::DarkGray),
@@ -647,7 +676,7 @@ pub fn table_row(
         truncate_locator(&r.locator(), LOCATOR_W),
         w = LOCATOR_W
     )));
-    if show_branch {
+    if cols_shown.branch {
         let branch = r.branch().unwrap_or("");
         spans.push(Span::styled(
             format!("{:<w$} ", truncate(branch, BRANCH_W), w = BRANCH_W),
@@ -656,6 +685,15 @@ pub fn table_row(
     }
     spans.push(Span::raw(truncate(&r.title, title_w)));
     Line::from(spans)
+}
+
+/// Which conditional columns the full-width table is drawing this frame. Each shows only when at
+/// least one row has something to put in it, so a fleet with no quota coverage spends no width on it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct TableColumns {
+    pub model: bool,
+    pub quota: bool,
+    pub branch: bool,
 }
 
 /// The state cell text: the state token, plus `(detail)` when a detail is present
@@ -686,11 +724,33 @@ fn context_span(r: &AgentRow, now: u64) -> Span<'static> {
     }
 }
 
+/// The account-quota cell, right-aligned in [`QUOTA_W`]: `63%7d`, the percent with its window
+/// token, since the percent alone does not say what it is a percent of. Grey throughout: it is an
+/// account-wide reading rather than this pane's state, and it is never the reason to look at a row.
+/// A blank cell when the pane carries no quota.
+fn quota_span(r: &AgentRow) -> Span<'static> {
+    let cell = match &r.quota {
+        Some(q) => format!("{}%{}", q.pct, q.window),
+        None => String::new(),
+    };
+    Span::styled(
+        format!("{:>w$} ", truncate(&cell, QUOTA_W), w = QUOTA_W),
+        Style::default().fg(Color::DarkGray),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::PREVIEW_MIN_WIDTH;
-    use tma_core::{AgentState, RepoLabel};
+    use tma_core::{AgentState, QuotaLabel, RepoLabel};
+
+    /// A [`TableColumns`] with one flag flipped, for the per-column tests.
+    fn cols(f: impl FnOnce(&mut TableColumns)) -> TableColumns {
+        let mut c = TableColumns::default();
+        f(&mut c);
+        c
+    }
 
     fn row(session: &str, w: u32, p: u32, state: AgentState, since: u64) -> AgentRow {
         AgentRow {
@@ -709,6 +769,8 @@ mod tests {
             context_pct: None,
             context_at: None,
             tokens: None,
+            quota: None,
+            cost_usd: None,
             muted: false,
             model: None,
             cwd: None,
@@ -1179,8 +1241,8 @@ mod tests {
         // A long session name and no context/detail: the fixed columns must still line up.
         let idle = row("verylongsessionname", 1, 2, AgentState::Idle, now - 90_000);
 
-        let b = table_row(&styles, &blocked, now, false, false, 10);
-        let i = table_row(&styles, &idle, now, false, false, 10);
+        let b = table_row(&styles, &blocked, now, TableColumns::default(), 10);
+        let i = table_row(&styles, &idle, now, TableColumns::default(), 10);
         assert_eq!(
             prefix_width(&b),
             prefix_width(&i),
@@ -1200,14 +1262,71 @@ mod tests {
     }
 
     #[test]
+    fn table_quota_column_shows_the_percent_with_its_window() {
+        let styles = RowPalette::default();
+        let now = 1_000_000;
+        let mut r = row("a", 0, 0, AgentState::Working, now - 1_000);
+        r.quota = Some(QuotaLabel {
+            pct: 63,
+            window: "7d".to_string(),
+            resets_at_ms: Some(now + 3_600_000),
+        });
+        let bare = row("a", 0, 1, AgentState::Idle, now - 1_000);
+        let shown = cols(|c| c.quota = true);
+
+        assert!(
+            !line_text(&table_row(&styles, &r, now, TableColumns::default(), 10)).contains("63%"),
+            "the column costs no width until a row has a quota"
+        );
+        let with = table_row(&styles, &r, now, shown, 10);
+        assert!(
+            line_text(&with).contains("63%7d"),
+            "the window token rides the percent: 63% of a week, not of five hours"
+        );
+        // The column is fixed-width, so a covered and an uncovered row still line up.
+        assert_eq!(
+            prefix_width(&with),
+            prefix_width(&table_row(&styles, &bare, now, shown, 10)),
+        );
+        assert!(line_text(&table_header(shown)).contains("quota"));
+        assert!(!line_text(&table_header(TableColumns::default())).contains("quota"));
+        assert_eq!(
+            table_title_width(100, shown) + QUOTA_W + 1,
+            table_title_width(100, TableColumns::default()),
+            "the column takes its width from the title"
+        );
+    }
+
+    /// The column caches drive what the draw spends width on, so each one turns on exactly when a
+    /// row has something to put in it.
+    #[test]
+    fn the_quota_column_cache_follows_the_row_set() {
+        let now = 1_000_000;
+        let mut m = WatchModel::new(
+            vec![row("a", 0, 0, AgentState::Idle, now)],
+            WidePref::Table,
+            now,
+        );
+        assert!(!m.columns().quota);
+        let mut r = row("a", 0, 0, AgentState::Idle, now);
+        r.quota = Some(QuotaLabel {
+            pct: 12,
+            window: "5h".to_string(),
+            resets_at_ms: None,
+        });
+        m.update(Event::RowsRefreshed(vec![r]), now, &mut ());
+        assert!(m.columns().quota, "a stamped quota shows the column");
+    }
+
+    #[test]
     fn table_model_column_appears_only_when_shown() {
         let styles = RowPalette::default();
         let now = 1_000_000;
         let mut r = row("a", 0, 0, AgentState::Working, now - 1_000);
         r.model = Some("gpt-5.6".to_string());
 
-        let without = table_row(&styles, &r, now, false, false, 10);
-        let with = table_row(&styles, &r, now, true, false, 10);
+        let without = table_row(&styles, &r, now, TableColumns::default(), 10);
+        let with = table_row(&styles, &r, now, cols(|c| c.model = true), 10);
         assert!(
             !line_text(&without).contains("gpt-5.6"),
             "hidden model column is absent"
@@ -1399,8 +1518,8 @@ mod tests {
 
     #[test]
     fn table_header_branch_label_only_when_shown() {
-        assert!(!line_text(&table_header(false, false)).contains("branch"));
-        assert!(line_text(&table_header(false, true)).contains("branch"));
+        assert!(!line_text(&table_header(TableColumns::default())).contains("branch"));
+        assert!(line_text(&table_header(cols(|c| c.branch = true))).contains("branch"));
     }
 
     // --- properties -----------------------------------------------------------------------------
@@ -1481,9 +1600,9 @@ mod tests {
         let none = row("s", 0, 3, AgentState::Idle, now - 1_000);
 
         // Shown: every row carries a fixed-width branch cell, so the fixed columns still align.
-        let a = table_row(&styles, &resolved, now, false, true, 10);
-        let b = table_row(&styles, &long, now, false, true, 10);
-        let c = table_row(&styles, &none, now, false, true, 10);
+        let a = table_row(&styles, &resolved, now, cols(|c| c.branch = true), 10);
+        let b = table_row(&styles, &long, now, cols(|c| c.branch = true), 10);
+        let c = table_row(&styles, &none, now, cols(|c| c.branch = true), 10);
         assert_eq!(prefix_width(&a), prefix_width(&b), "branch column aligns");
         assert_eq!(
             prefix_width(&a),
@@ -1494,12 +1613,12 @@ mod tests {
         assert!(line_text(&b).contains('…'), "a long branch truncates");
 
         // Hidden: the branch cell disappears, narrowing the prefix by exactly its column.
-        let off = table_row(&styles, &resolved, now, false, false, 10);
+        let off = table_row(&styles, &resolved, now, TableColumns::default(), 10);
         assert_eq!(prefix_width(&a) - prefix_width(&off), BRANCH_W + 1);
         assert!(!line_text(&off).contains("main"));
         assert_eq!(
-            table_title_width(100, false, true) + BRANCH_W + 1,
-            table_title_width(100, false, false),
+            table_title_width(100, cols(|c| c.branch = true)) + BRANCH_W + 1,
+            table_title_width(100, TableColumns::default()),
             "the branch column costs the title exactly its width"
         );
     }

@@ -35,14 +35,20 @@ pub use evidence::{Claim, Evidence, Lifecycle, Provenance, Source, StateClaim};
 pub use fold::{verdict, FoldConfig, SnapshotFacts};
 pub use manifest::{Channel, Manifest, ManifestError, Telemetry};
 pub use render::{
-    render_context, render_context_advisory, render_hold, render_publish, render_remove,
-    render_summary, set_pane_option, summary_string, unset_pane_option, Guard, Publish,
-    StampCommand, SummaryScope,
+    render_context, render_context_advisory, render_hold, render_publish, render_quota,
+    render_quota_advisory, render_remove, render_summary, set_pane_option, summary_string,
+    unset_pane_option, Guard, Publish, QuotaStamp, StampCommand, SummaryScope,
 };
-pub use row::{is_done, sort_rank, AgentRow, PendingCall, RepoLabel, Selector, StateToken};
+pub use row::{
+    is_done, sort_rank, AgentRow, PendingCall, QuotaLabel, RepoLabel, Selector, StateToken,
+};
 pub use seen::{seen_by_input, ClientView};
 pub use snapshot::{PaneSnapshot, ProcInfo};
 pub use stamp::{ReadResult, StampedState};
 pub use state::{AgentState, Detail, GrammarError};
-pub use telemetry::{codex_rollout_model, hook_payload_model, parse_context, ContextReport};
+pub use telemetry::{
+    claude_statusline_model, codex_rollout_model, format_cost_usd, hook_payload_model,
+    parse_context, parse_usage, ContextReport, QuotaReport, QuotaWindow, QuotaWindowReading,
+    UsageReport,
+};
 pub use verdict::{Verdict, WinningEvidence, WriteAction, WritePlan};

@@ -51,6 +51,27 @@ pub mod opt {
     /// chain's guard, so it equals [`CONTEXT_AT`] whenever a count is present; it exists so a reader
     /// that wants only the count can age it without also reading the gauge's marker.
     pub const TOKENS_AT: &str = "@agent_tokens_at";
+    /// Account quota utilization percent: integer `0..=100`, the HIGHEST of the rate-limit windows
+    /// the channel reported. Account-wide rather than per-pane, so every pane on one account carries
+    /// the same figure; absent when the channel reports no `rate_limits` block. Stamped under its own
+    /// evidence-time guard beside [`QUOTA_AT`]; never part of the [`super::StampedState`] tuple.
+    pub const QUOTA_PCT: &str = "@agent_quota_pct";
+    /// Which window [`QUOTA_PCT`] came from: `5h` / `7d` / `spend` (Claude) or `primary` /
+    /// `secondary` (Codex). A machine token like every other option value; without it the percent is
+    /// unreadable, since 80% of a five-hour window and 80% of a week mean different things.
+    pub const QUOTA_WINDOW: &str = "@agent_quota_window";
+    /// Epoch **ms** at which [`QUOTA_WINDOW`] resets, absent when the channel states none. Both
+    /// vendors publish seconds (Claude and newer Codex absolute, older Codex relative to the reading);
+    /// the conversion happens in the parser, so this option is ms like every other instant here.
+    pub const QUOTA_RESETS_AT: &str = "@agent_quota_resets_at";
+    /// Epoch **ms** of the evidence behind the quota trio and [`COST_USD`]: written last in the quota
+    /// mini-chain and the `not older` arbitration basis, exactly as [`CONTEXT_AT`] is for the gauge.
+    pub const QUOTA_AT: &str = "@agent_quota_at";
+    /// The agent's own reported session cost in USD, a string with two decimals (`3.50`). Absent for
+    /// a channel that publishes none. It is the VENDOR's live figure for THIS session, not a total
+    /// tma computed and not a price table; tma still aggregates nothing across sessions. Written in
+    /// the same guarded chain as the quota trio, and cleared by an observation that carries no cost.
+    pub const COST_USD: &str = "@agent_cost_usd";
     /// The `context_high` notify marker: a present/absent **armed flag**, never an episode
     /// stamp compared against a `since`. Absent = armed; present = already fired (rearmed by unsetting
     /// it below `threshold - 10`). Its value is an epoch **ms** for debuggability only, not a

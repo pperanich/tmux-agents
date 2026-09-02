@@ -37,7 +37,8 @@ const AGENT_OPTIONS: &[&str] = &[
 /// keys": the flicker-stickiness anchor, the dead-registration reaper marker, the user-set
 /// `@agent_ignore` escape hatch and `@agent_mute_until` deadline (both read here so their gates cost
 /// no second round-trip), the context metric
-/// pair (a parallel lane, not part of the state tuple; surfaces read it for the JSON rows),
+/// pair and the quota/cost lane (both parallel lanes, not part of the state tuple; surfaces read
+/// them for the JSON rows),
 /// the model label (`@agent_model`, read by `tma doctor`'s recognized-model check), and the OpenCode
 /// API-channel pair (`@agent_permission_request` / `@agent_api_endpoint`, read by the action
 /// broker and `tma doctor`). Appended after [`AGENT_OPTIONS`] (order fixed by [`parse_pane_line`]).
@@ -51,6 +52,11 @@ const EXTRA_PANE_OPTIONS: &[&str] = &[
     opt::TOKENS,
     opt::TOKENS_AT,
     opt::CONTEXT_NOTIFIED_AT,
+    opt::QUOTA_PCT,
+    opt::QUOTA_WINDOW,
+    opt::QUOTA_RESETS_AT,
+    opt::QUOTA_AT,
+    opt::COST_USD,
     opt::MODEL,
     opt::PERMISSION_REQUEST,
     opt::API_ENDPOINT,

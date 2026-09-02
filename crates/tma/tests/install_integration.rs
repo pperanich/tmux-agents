@@ -455,6 +455,9 @@ fn uninstalling_the_last_agent_sweeps_the_pane_stamps() {
         ("@agent_since", "1700000000000"),
         ("@agent_attention", "1"),
         ("@agent_context_pct", "80"),
+        ("@agent_quota_pct", "63"),
+        ("@agent_quota_window", "7d"),
+        ("@agent_cost_usd", "3.50"),
         ("@agent_action", "1700000000000:nonce:1:approve"),
     ];
     for (key, value) in stamped {
