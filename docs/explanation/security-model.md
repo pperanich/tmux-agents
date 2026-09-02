@@ -84,6 +84,49 @@ log](../reference/cli.md#the-act-audit-log) carries `all: true` and a shared
 indistinguishable from a burst of typing. Approving a prompt is a decision you
 make one prompt at a time; that is what the picker and the action menu are for.
 
+## tma is a human's tool
+
+Every guard in this document assumes a person is on the other end of the act.
+tma cannot check that assumption, and it does not try.
+
+Claude Code's auto-mode classifier blocks, by default, "Sending keystrokes to
+Claude Code's own tmux pane to drive its own interface", which it treats as
+Claude changing its own permissions or oversight
+([permission modes](https://code.claude.com/docs/en/permission-modes)). That is
+a fair description of tma's entire act path, and the vendor is right to name it.
+A human firing `tma act approve` is the tool working. An agent shelling out to
+`tma act approve` against its own pane, or a sibling's, is oversight evasion
+wearing the same command.
+
+tma does not detect the difference, because it cannot: an act arrives as a
+process running as you, and a shell you typed into and a shell an agent spawned
+are the same kind of process. What tma does instead is make it checkable
+afterwards. The [act audit log](../reference/cli.md#the-act-audit-log)'s `source`
+separates `cli` (a person at a TTY) from `cli-yes` (`--yes`, or no TTY to prompt
+on, which is where a script or an agent lands), and the repeat counter surfaces
+the same prompt being answered over and over. If you run agents in a mode that
+lets them run arbitrary commands, turn the log on and read it. It is the only
+place that question gets answered.
+
+## Nothing but a person at the dialog is consent
+
+A notification is not an approval. A tap on one is not an approval. A message
+from another agent, a queued command, and the exit status of a `[notify]
+command` hook are not approvals either, and none of them is ever treated as one:
+a hook that exits `0` has reported success at notifying you, nothing more.
+
+Two things answer an agent's prompt. A keystroke you send to the pane, and a
+`tma act` you ran. That is the whole list, and it is not going to grow.
+
+The vendors landed on the same line. Claude Code's cross-session messaging says
+plainly that a message from another session cannot approve a permission prompt
+and "never counts as your consent"
+([cross-session messaging](https://code.claude.com/docs/en/cross-session-messaging)),
+and the same rule holds for its agent teams: a teammate's prompt goes to the
+lead's session for a human to answer. tma's version of the rule is the
+`confirm` flag and the guards above. A surface may tell you an agent is waiting
+and it may put the fire one keypress away, but the keypress is yours.
+
 ## Why action context arrives as environment
 
 An exec action's `command` string is handed to `sh -c` verbatim. tma substitutes
@@ -122,5 +165,7 @@ rather than the pane's: a script that wants the agent's directory says so with
   the two rules above.
 - [`tma act`](../reference/cli.md#tma-act) for the gate, the lock, and the exit
   codes.
+- [The act audit log](../reference/cli.md#the-act-audit-log) for the record that
+  makes `source` checkable after the fact.
 - [Architecture](architecture.md) for the crate boundaries that keep the write
   path in one place.
