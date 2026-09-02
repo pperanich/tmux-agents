@@ -432,7 +432,7 @@ mod tests {
     /// writer emits NONE: an installed entry with no `matcher` key fires for every occurrence, so
     /// every `notification_type` reaches `tma event` and the manifest's `[[hooks.map]]` matchers are
     /// the only filter. Mapping a new `Notification` type (the `quota_auto_resume_*` trio) therefore
-    /// needs no config rewrite — but only while this holds. A `matcher` written here would silently
+    /// needs no config rewrite, but only while this holds. A `matcher` written here would silently
     /// narrow what an installed config delivers, and the manifest would keep claiming otherwise.
     #[test]
     fn the_installed_notification_hook_carries_no_matcher() {

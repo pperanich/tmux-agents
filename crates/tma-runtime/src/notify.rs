@@ -823,7 +823,7 @@ mod tests {
         assert!(n.repo.is_empty() && n.branch.is_empty());
     }
 
-    /// The pending-call summary is agent-supplied text — a command line, a path — and it must not
+    /// The pending-call summary is agent-supplied text, a command line, a path, and it must not
     /// take the route the pane title took before v0.5.0: the notify payload flows to `[notify]
     /// command` sinks, third-party push carriers, and the 0644 audit log. The stamp lives on the
     /// pane and on `tma ls --json`, both of which stay on the machine, and this pins that the

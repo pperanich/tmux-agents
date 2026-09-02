@@ -209,7 +209,7 @@ where a prompt offers numbered choices, "approve" means option 1 by convention.
 a tool call needs a decision, carries the pending call in its payload
 (`tool_name`, `tool_input`, `tool_use_id`), and tma writes no decision back:
 the hook exits 0 with nothing on stdout, so Claude Code draws its normal prompt.
-The hook is deliberately **not** installed with `async: true` — the point is to
+The hook is deliberately **not** installed with `async: true`, the point is to
 stamp the pane before the dialog draws, and a backgrounded hook would race it.
 
 The `Notification permission_prompt|elicitation_dialog` entry stays as the

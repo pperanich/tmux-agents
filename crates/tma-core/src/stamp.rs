@@ -77,7 +77,7 @@ pub mod opt {
     pub const PENDING_CALL: &str = "@agent_pending_call";
     /// A one-line, 120-byte summary of the pending call derived from `tool_input`: the command for
     /// Bash, the path for Edit/Write/Read, else the first string field. **Agent-supplied text**, so
-    /// it is deliberately confined to this option and the JSON rows — it never enters the
+    /// it is deliberately confined to this option and the JSON rows, it never enters the
     /// notification payload, the notify audit line, or any env var handed to `sh -c`. Pane scope.
     pub const PENDING_SUMMARY: &str = "@agent_pending_summary";
     /// The OpenCode server base URL: stamped at registration by the plugin from its

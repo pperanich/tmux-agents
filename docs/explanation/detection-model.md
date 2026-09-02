@@ -30,7 +30,7 @@ onto two other axes so the state token stays stable:
 
   That `rate_limit` split is implemented, not hypothetical. Claude Code waits out
   a usage limit in the open session and continues on its own, which is
-  `working/rate_limit` — and when the wait ends without continuing (the reset
+  `working/rate_limit`, and when the wait ends without continuing (the reset
   landed while the machine slept, or automatic continue was off) it sits there
   until you act, which is `blocked/rate_limit`. Both the hook claims and the
   screen rules carry it, per [agent coverage](../reference/agent-coverage.md#claude-code-mapping).

@@ -694,7 +694,7 @@ fn no_false_blocked_from_conversation_text() {
 // Both fixtures are SYNTHESIZED whole (see `fixtures/README.md`): a usage limit cannot be
 // exhausted on demand, so the bodies carry the lines Claude Code's documentation prints
 // verbatim, dropped into an otherwise ordinary pane. The rules match the stable substrings,
-// not the whole line — the reset time in the middle (`at 3:45pm`) varies per wait.
+// not the whole line, the reset time in the middle (`at 3:45pm`) varies per wait.
 
 /// The auto-continue wait is the agent's move, not the human's: Claude Code resumes the task on
 /// its own at the reset. Before this rule the line carried no working chrome at all, so the pane
@@ -723,7 +723,7 @@ fn synthesized_auto_continue_line_is_working_rate_limit() {
 }
 
 /// The halted variant: after a long sleep Claude Code waits for `Enter` rather than continuing,
-/// so the ball IS with the human. Same detail token, different state — that split is the whole
+/// so the ball IS with the human. Same detail token, different state, that split is the whole
 /// point of `rate_limit` (`wait --until blocked` sees it; `--until working` does not).
 #[test]
 fn synthesized_stale_reset_line_is_blocked_rate_limit() {

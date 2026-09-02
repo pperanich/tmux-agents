@@ -157,7 +157,7 @@ fn write_row_fields(j: &mut JsonWriter, r: &AgentRow, origin: &Origin) {
     }
     // Additive (schema stays 1): the permission decision the pane is waiting on, from Claude's
     // `PermissionRequest` payload. All three keys are null together (nothing pending, or an agent
-    // whose hooks carry none). `pending_summary` is AGENT-SUPPLIED text — a command line, a path —
+    // whose hooks carry none). `pending_summary` is AGENT-SUPPLIED text, a command line, a path,
     // so it is deliberately confined to this document and the pane options: it is in no
     // notification payload, no audit line, and no `TMA_*` env var.
     match &r.pending {

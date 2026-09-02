@@ -70,7 +70,7 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   beside it says whether the pane needs a decision from you or only needs the clock.
 
 - **Claude's `blocked` claim arrived about six seconds late.** It rode the `Notification` hook,
-  which Claude Code fires only after a permission prompt has already been waiting — so for those six
+  which Claude Code fires only after a permission prompt has already been waiting, so for those six
   seconds `tma ls` said `working`, `tma jump --blocked` skipped the pane, and the notification you
   had configured for exactly this moment had not gone out. tma now installs Claude's
   `PermissionRequest` hook, which fires the instant a tool call needs a decision. It writes no
