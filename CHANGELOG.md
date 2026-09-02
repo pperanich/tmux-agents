@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.5.10] - 2026-09-02
+
 ### Added
 
 - **An audit line per action fire, with the surface that asked for it.** `[act] log` points at a
@@ -892,7 +894,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.9...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.10...HEAD
+[0.5.10]: https://github.com/pperanich/tmux-agents/compare/v0.5.9...v0.5.10
 [0.5.9]: https://github.com/pperanich/tmux-agents/compare/v0.5.8...v0.5.9
 [0.5.8]: https://github.com/pperanich/tmux-agents/compare/v0.5.7...v0.5.8
 [0.5.7]: https://github.com/pperanich/tmux-agents/compare/v0.5.6...v0.5.7
