@@ -234,6 +234,12 @@ That ring is daemon memory: it needs a running daemon and starts empty after a
 restart. The log file is the durable one. Use the ring to answer "what did tma
 observe", the log to answer "what did it tell me about".
 
+**What you did about it.** The third record is the act audit log: one line per
+`tma act` fire, with the surface that asked for it. It is configured separately
+(`[act] log`) and follows the same rules as this one, `0600` and append-only, so
+the natural place for it is the same directory. See [The act audit
+log](../reference/cli.md#the-act-audit-log).
+
 ## Notifying from a remote host
 
 `notify.command` runs on the machine running tmux. Over ssh that is the remote

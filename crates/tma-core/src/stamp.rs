@@ -111,6 +111,11 @@ pub mod opt {
     /// nonce-conditionally, self-healing via the embedded expiry. Written only by the action broker
     /// (`tma-tmux`'s lock module), never part of the [`super::StampedState`] tuple. Pane scope.
     pub const ACTION: &str = "@agent_action";
+    /// The action broker's consecutive-fire run, `<episode_ms>:<action>:<count>`. Written under the
+    /// held [`ACTION`] lock on the path that is about to have an effect, so it counts deliveries and
+    /// not refusals; a new episode or a different action starts the run over. Read by the `[act] log`
+    /// line and by the mis-tap warning, never by the gate. Pane scope.
+    pub const ACT_REPEAT: &str = "@agent_act_repeat";
     /// User-set escape hatch: any non-empty value takes the pane out of detection entirely, so a
     /// dev server that a title-narrowed manifest mistakes for an agent stops being one without
     /// disabling the agent type. Written only by the user (`tmux set-option -p @agent_ignore 1`),
@@ -677,6 +682,7 @@ mod tests {
         opt::PENDING_SUMMARY,
         opt::API_ENDPOINT,
         opt::ACTION,
+        opt::ACT_REPEAT,
         opt::SUMMARY,
         opt::SESSION_SUMMARY,
         opt::WATCH_PID,

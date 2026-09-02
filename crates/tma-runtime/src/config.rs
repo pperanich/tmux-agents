@@ -29,6 +29,8 @@ pub struct Config {
     #[serde(default)]
     pub notify: NotifySection,
     #[serde(default)]
+    pub act: ActSection,
+    #[serde(default)]
     pub focus: FocusSection,
     #[serde(default)]
     pub install: InstallSection,
@@ -511,6 +513,30 @@ impl NotifySection {
             done: self.done.as_ref().and_then(|t| t.command.clone()),
             context_high: self.context_high.as_ref().and_then(|c| c.command.clone()),
         }
+    }
+}
+
+// ---- [act] -------------------------------------------------------------------------------
+
+/// `[act]` posture. One key today: the audit log every [`crate::broker::fire`] appends a line to.
+/// Opt-in like `[notify] log`, and the natural place for it is beside that file: both are `0600`
+/// JSONL written by whichever process did the thing.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ActSection {
+    /// Append one JSON line per fired action to this path (default unset). Records every outcome,
+    /// refusals included, with the surface that asked for it.
+    #[serde(default)]
+    pub log: Option<String>,
+}
+
+impl ActSection {
+    /// The configured audit path, `None` when unset or empty. `~` is expanded at write time.
+    pub fn log_path(&self) -> Option<PathBuf> {
+        self.log
+            .as_ref()
+            .filter(|p| !p.is_empty())
+            .map(PathBuf::from)
     }
 }
 

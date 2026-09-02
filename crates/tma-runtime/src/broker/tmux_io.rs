@@ -104,6 +104,14 @@ impl BrokerIo for TmuxBroker<'_> {
         )
     }
 
+    fn set_act_repeat(&self, pane_id: &str, value: &str) {
+        // Discarded like the permission-request clear below: the counter is a signal, and a pane
+        // that went away between the effect and this write has nothing left to count.
+        let _ = self
+            .tmux
+            .apply(&[render::set_pane_option(pane_id, opt::ACT_REPEAT, value)]);
+    }
+
     fn clear_permission_request(&self, pane_id: &str) {
         // Discarded like the event path's own clear (`event::permission`): a pane that went away
         // between the reply and this write has nothing left to unset.
@@ -159,6 +167,7 @@ fn build_facts(
     api_endpoint: Option<String>,
 ) -> PaneFacts {
     let opt = |k: &str| rec.options.get(k).filter(|v| !v.is_empty()).cloned();
+    let num = |k: &str| opt(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
     PaneFacts {
         agent: opt(opt::NAME),
         state: opt(opt::STATE)
@@ -183,6 +192,12 @@ fn build_facts(
         // hostile stamp with whitespace/control bytes must decode as absent, never as smuggled bytes.
         permission_request: opt(opt::PERMISSION_REQUEST).filter(|s| valid_session(s)),
         api_endpoint: api_endpoint.filter(|e| valid_endpoint(e)),
+        // The same instant `AgentRow::episode_at` reports: the turn end wins inside an unchanged
+        // idle run, where `@agent_since` alone would pin the episode to the first completion.
+        episode_ms: num(opt::SINCE).max(num(opt::TURN_AT)),
+        pending_tool: opt(opt::PENDING_TOOL),
+        pending_call: opt(opt::PENDING_CALL),
+        act_repeat: opt(opt::ACT_REPEAT),
     }
 }
 

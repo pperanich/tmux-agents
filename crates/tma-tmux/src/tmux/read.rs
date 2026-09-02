@@ -60,6 +60,13 @@ const EXTRA_PANE_OPTIONS: &[&str] = &[
     opt::MODEL,
     opt::PERMISSION_REQUEST,
     opt::API_ENDPOINT,
+    // The pending-call trio. Every consumer already read these off `options` (`cycle`'s
+    // `RowCompanions`, so the `ls --json` `pending_*` keys, and the act audit line); nothing put
+    // them there, so those keys read `null` on a pane that plainly had a call pending.
+    opt::PENDING_TOOL,
+    opt::PENDING_CALL,
+    opt::PENDING_SUMMARY,
+    opt::ACT_REPEAT,
 ];
 
 /// Which focus hook is asking [`Tmux::departed_pane`], which decides where "the pane I just left"

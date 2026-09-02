@@ -1,13 +1,14 @@
-//! The opt-in `[notify] log` sink: one JSON line per fired notification, appended where both fire
-//! paths already meet ([`fire`](super::fire)). It is the daemonless answer to the daemon's transition
-//! ring — durable, survives a restart, and records what was actually SENT rather than every state
-//! change. Best-effort throughout: a log that cannot be written must never fail or delay a hook.
+//! The JSONL audit sink both opt-in records write through: `[notify] log` (one line per fired
+//! notification, appended where both fire paths meet in [`crate::notify::fire`]) and `[act] log`
+//! (one line per broker fire, [`crate::broker::audit`]). One writer so the two files cannot drift on
+//! the rule that matters, the `0600` create mode. Best-effort throughout: a log that cannot be
+//! written must never fail or delay a hook, and must never turn a delivered action into a failure.
 
 use std::path::{Path, PathBuf};
 
 /// Append one line to `path`, creating parent directories and the file as needed. `O_APPEND`, so two
 /// concurrent firers (a hook and the daemon) interleave whole lines rather than overwriting.
-pub(super) fn append(path: &Path, line: &str) {
+pub(crate) fn append(path: &Path, line: &str) {
     let path = expand_tilde(path);
     if let Some(dir) = path.parent() {
         if !dir.as_os_str().is_empty() {
@@ -82,13 +83,33 @@ mod tests {
 
     #[test]
     fn append_creates_the_parent_and_adds_lines() {
-        let dir = std::env::temp_dir().join(format!("tma-notify-log-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("tma-audit-log-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         let path = dir.join("nested/fires.jsonl");
         append(&path, r#"{"a":1}"#);
         append(&path, r#"{"a":2}"#);
         let body = std::fs::read_to_string(&path).expect("the log was created");
         assert_eq!(body, "{\"a\":1}\n{\"a\":2}\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The mode is the whole point of the explicit `mode(0o600)`: without it the file lands at
+    /// `0666 & ~umask`, which is group-readable under the common `umask 002` and world-WRITABLE
+    /// under `umask 000`. Both audit records hold a fleet's activity, so this is pinned.
+    #[cfg(unix)]
+    #[test]
+    fn a_created_log_is_private_to_its_owner() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("tma-audit-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("fires.jsonl");
+        append(&path, "{}");
+        let mode = std::fs::metadata(&path).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "the log must not be readable by anyone else"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

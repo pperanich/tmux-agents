@@ -59,6 +59,31 @@ the single-flight lock: `requires` is a correctness precondition rather than a
 staleness guard, and a forced action with an empty `TMA_SESSION_ID` is exactly
 the half-run it exists to prevent.
 
+## Why `--all` is a fan-out and not an inbox
+
+`tma act --all` fires one action on every pane a selector matched. It exists for
+the two things you genuinely mean across a whole fleet at once: interrupt them,
+or deny them. It is not a unified permission inbox, and it is not going to become
+one.
+
+The reason is not squeamishness about scale. Batch approval is a documented
+attack surface. WorkOS wrote it up on 2026-08-05: adversaries embed a dangerous
+operation inside a batch of benign ones and add language discouraging individual
+review, phrases like "don't bother reviewing each one"
+(<https://workos.com/blog/approval-fatigue-agent-governance>). A safeguard that
+fires often enough to become a rhythm is a safeguard that trains you to defeat
+it. The local version of the same failure is smaller and better attested: an
+action delivers the key sequence its manifest declares, and one mis-typed dialog
+turns an approve into something else. tma has shipped that bug and fixed it. A
+fan-out multiplies whichever one you have by the number of panes that matched.
+
+So `--all` stays, the guards stay per pane (its own lock, its own gate
+re-verification, N independent fires), and every line it writes to the [act audit
+log](../reference/cli.md#the-act-audit-log) carries `all: true` and a shared
+`batch` id, which is what makes a bulk fire visible afterwards rather than
+indistinguishable from a burst of typing. Approving a prompt is a decision you
+make one prompt at a time; that is what the picker and the action menu are for.
+
 ## Why action context arrives as environment
 
 An exec action's `command` string is handed to `sh -c` verbatim. tma substitutes

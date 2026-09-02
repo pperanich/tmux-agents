@@ -12,6 +12,10 @@ use tma_runtime::{escape_menu_label, MenuItem, Server, Tmux, TmuxError};
 /// invoking server's `--socket-name` is forwarded so a menu on a named socket fires on that server.
 /// The first nine entries get a `1`..`9` quick-select mnemonic; the rest have none. `bin` is
 /// single-quoted and the label escaped, as in [`act_menu_command`] and the jump menu.
+///
+/// Each entry sets `TMA_ACT_SOURCE=menu` on the command line, which is what puts `menu` in the act
+/// audit line's `source`: the entry runs the same `tma act` a person types, so without it the
+/// keyboard-only surface would be indistinguishable from a shell invocation after the fact.
 pub fn action_menu_items(
     bin: &str,
     server: &Server,
@@ -34,7 +38,9 @@ pub fn action_menu_items(
                 // string that may hold a `#`, which tmux would read as a format marker.
                 label: escape_menu_label(label),
                 key,
-                command: format!("run-shell \"'{bin}' act {name} --pane {pane_id}{socket}\""),
+                command: format!(
+                    "run-shell \"TMA_ACT_SOURCE=menu '{bin}' act {name} --pane {pane_id}{socket}\""
+                ),
             }
         })
         .collect()
@@ -75,10 +81,13 @@ mod tests {
         assert_eq!(items[0].key, "1");
         assert_eq!(
             items[0].command,
-            "run-shell \"'tma' act approve --pane %5\""
+            "run-shell \"TMA_ACT_SOURCE=menu 'tma' act approve --pane %5\""
         );
         assert_eq!(items[1].key, "2");
-        assert_eq!(items[1].command, "run-shell \"'tma' act deny --pane %5\"");
+        assert_eq!(
+            items[1].command,
+            "run-shell \"TMA_ACT_SOURCE=menu 'tma' act deny --pane %5\""
+        );
     }
 
     #[test]
@@ -87,7 +96,7 @@ mod tests {
         let items = action_menu_items("/opt/my tools/tma", &Server::default(), "%5", &fireable);
         assert_eq!(
             items[0].command,
-            "run-shell \"'/opt/my tools/tma' act approve --pane %5\""
+            "run-shell \"TMA_ACT_SOURCE=menu '/opt/my tools/tma' act approve --pane %5\""
         );
     }
 
@@ -106,7 +115,7 @@ mod tests {
         let items = action_menu_items("/usr/bin/tma", &named, "%1", &fireable);
         assert_eq!(
             items[0].command,
-            "run-shell \"'/usr/bin/tma' act approve --pane %1 --socket-name scratch\""
+            "run-shell \"TMA_ACT_SOURCE=menu '/usr/bin/tma' act approve --pane %1 --socket-name scratch\""
         );
 
         // A socket-path server forwards `--socket-path` instead, quoted so a space survives.
@@ -117,7 +126,7 @@ mod tests {
         let items = action_menu_items("tma", &by_path, "%1", &fireable);
         assert_eq!(
             items[0].command,
-            "run-shell \"'tma' act approve --pane %1 --socket-path '/tmp/tmate-501/sock'\""
+            "run-shell \"TMA_ACT_SOURCE=menu 'tma' act approve --pane %1 --socket-path '/tmp/tmate-501/sock'\""
         );
     }
 
