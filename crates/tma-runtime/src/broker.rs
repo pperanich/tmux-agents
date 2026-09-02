@@ -35,10 +35,12 @@ use crate::config::ApiSection;
 use crate::http::HttpOutcome;
 use crate::manifests::LoadedManifest;
 
+pub mod audit;
 mod exec;
 mod surface;
 mod tmux_io;
 
+use audit::{ActObserved, AuditCtx};
 use exec::{assemble_env, run_exec, ExecOutcome};
 pub use exec::{supervise, SuperviseParams};
 pub use surface::{dry_run, list_fireability, ContextValue, DryGate, DryRun, Effect, ListVerdict};
@@ -219,6 +221,17 @@ pub struct PaneFacts {
     /// The resolved API endpoint: the pane-stamped `@agent_api_endpoint`, else the config
     /// `[api.<name>] api_base` fallback. `None` when neither is set (the op refuses `requires-unmet`).
     pub api_endpoint: Option<String>,
+    /// `max(@agent_since, @agent_turn_at)`: the episode this fire lands in, the same instant
+    /// `AgentRow::episode_at` reports. The audit line's `episode_ms` and the repeat counter's key.
+    pub episode_ms: u64,
+    /// `@agent_pending_tool` / `@agent_pending_call`: the pending call's tool name and id. Audit
+    /// material only; the sibling `@agent_pending_summary` is agent-supplied prose and is never read
+    /// here, so it cannot reach the log.
+    pub pending_tool: Option<String>,
+    pub pending_call: Option<String>,
+    /// `@agent_act_repeat`, the stored `<episode_ms>:<action>:<count>` run. Read with the rest of
+    /// the options so the counter costs one write rather than a read and a write.
+    pub act_repeat: Option<String>,
 }
 
 impl PaneFacts {
@@ -296,6 +309,10 @@ pub trait BrokerIo {
         reply: ApiReply,
         timeout_ms: u64,
     ) -> HttpOutcome;
+    /// Write the pane's `@agent_act_repeat` run under the held lock. Best-effort and infallible by
+    /// construction, like [`BrokerIo::clear_permission_request`]: the counter is a mis-tap signal,
+    /// and a failed option write must never turn a delivered action into a reported failure.
+    fn set_act_repeat(&self, pane_id: &str, value: &str);
     /// Unset `@agent_permission_request` after a request has been spent. Best-effort and
     /// infallible by construction: it runs after the answer is already delivered, so a failed
     /// option write must not turn a successful reply into a reported failure.
@@ -340,13 +357,16 @@ pub struct FireArgs<'a> {
     /// value stays data the shell cannot re-parse, exactly as the pane title does. A `keys` action
     /// takes no values — its sequence is manifest-static — and the CLI rejects them before here.
     pub args: &'a [String],
+    /// Where the `[act] log` line goes and which surface asked for the fire. The default writes
+    /// nothing, so a caller that is not the `tma act` CLI stays silent.
+    pub audit: AuditCtx<'a>,
 }
 
-/// Fire an action against `pane_id`. `fire_args` carries `--force` (the `when` gate only) and
-/// the `--arg` values. A synchronous action runs and releases the lock here; a `detach = true`
-/// action hands the lock to a spawned supervisor and returns `spawned`. `detach` carries the
-/// server + notify command forwarded to that supervisor. The ergonomic entry the CLI calls; builds
-/// the real [`TmuxBroker`].
+/// Fire an action against `pane_id`. `fire_args` carries `--force` (the `when` gate only), the
+/// `--arg` values, and the audit context. A synchronous action runs and releases the lock here; a
+/// `detach = true` action hands the lock to a spawned supervisor and returns `spawned`. `detach`
+/// carries the server + notify command forwarded to that supervisor. The ergonomic entry the CLI
+/// calls; builds the real [`TmuxBroker`] and writes the `[act] log` line for whatever came back.
 #[allow(clippy::too_many_arguments)]
 pub fn fire(
     tmux: &Tmux,
@@ -358,19 +378,48 @@ pub fn fire(
     pane_id: &str,
     fire_args: FireArgs,
 ) -> ActResult {
-    act(
-        &TmuxBroker {
-            tmux,
-            manifests,
-            cfg,
-            api_bases,
-            server: detach.server.cloned().unwrap_or_default(),
-            notify_command: detach.notify_command.map(str::to_string),
-        },
-        action,
-        pane_id,
-        fire_args,
-    )
+    let io = TmuxBroker {
+        tmux,
+        manifests,
+        cfg,
+        api_bases,
+        server: detach.server.cloned().unwrap_or_default(),
+        notify_command: detach.notify_command.map(str::to_string),
+    };
+    let (result, observed) = act_observed(&io, action, pane_id, fire_args);
+    write_audit_line(&io, action, pane_id, &result, &observed, &fire_args.audit);
+    result
+}
+
+/// Append the fire's `[act] log` line, or do nothing when `[act] log` is unconfigured. Every
+/// outcome is recorded, refusals included: "it refused" is exactly the fact a later reader needs,
+/// and a log that only holds successes cannot answer why nothing happened.
+fn write_audit_line<T: BrokerIo>(
+    io: &T,
+    action: &ActionManifest,
+    pane_id: &str,
+    result: &ActResult,
+    observed: &ActObserved,
+    ctx: &AuditCtx,
+) {
+    let Some(path) = ctx.log else { return };
+    let api = observed
+        .agent
+        .as_deref()
+        .is_some_and(|a| action.api_for(a).is_some());
+    crate::audit::append(
+        path,
+        &audit::act_log_line(
+            io.now_ms(),
+            pane_id,
+            &action.name,
+            audit::kind_token(action.kind, api),
+            result.outcome.token(),
+            result.reason(),
+            observed,
+            ctx,
+        ),
+    );
 }
 
 /// The broker sequence over any [`BrokerIo`]. Release is guaranteed on every exit path after
@@ -381,23 +430,52 @@ pub fn act<T: BrokerIo>(
     pane_id: &str,
     fire_args: FireArgs,
 ) -> ActResult {
+    act_observed(io, action, pane_id, fire_args).0
+}
+
+/// [`act`] plus what it saw on the way: the pane facts the audit line records, filled in as far as
+/// the sequence got. Split out rather than folded into [`ActResult`] because those facts are audit
+/// material and no surface renders them.
+pub fn act_observed<T: BrokerIo>(
+    io: &T,
+    action: &ActionManifest,
+    pane_id: &str,
+    fire_args: FireArgs,
+) -> (ActResult, ActObserved) {
+    let mut observed = ActObserved::default();
+    let outcome = act_sequence(io, action, pane_id, fire_args, &mut observed);
+    (
+        ActResult {
+            action: action.name.clone(),
+            pane: pane_id.to_string(),
+            outcome,
+        },
+        observed,
+    )
+}
+
+/// The pinned identity → gate → lock → act → release sequence. Every early return is an outcome, and
+/// `observed` accumulates whatever the pane had told us by then.
+fn act_sequence<T: BrokerIo>(
+    io: &T,
+    action: &ActionManifest,
+    pane_id: &str,
+    fire_args: FireArgs,
+    observed: &mut ActObserved,
+) -> Outcome {
     // The gate half is read here; the values ride on to whichever under-lock arm assembles the env.
     let force = fire_args.force;
-    let result = |outcome| ActResult {
-        action: action.name.clone(),
-        pane: pane_id.to_string(),
-        outcome,
-    };
     let now = io.now_ms();
 
     // 1. identity + initial facts.
     let facts = match io.read_pane(pane_id) {
         Ok(Some(f)) => f,
-        Ok(None) => return result(Outcome::Vanished(Gone::Pane)),
-        Err(e) => return result(io_error(e)),
+        Ok(None) => return Outcome::Vanished(Gone::Pane),
+        Err(e) => return io_error(e),
     };
+    observe(observed, &facts);
     let Some(agent) = facts.agent.clone().filter(|a| action.applies_to(a)) else {
-        return result(Outcome::Refused(Refusal::Gate(RefusalReason::WrongAgent)));
+        return Outcome::Refused(Refusal::Gate(RefusalReason::WrongAgent));
     };
 
     // 2. gate. A stale `keys` action re-verifies on-demand first (skipped under `--force`, which
@@ -405,18 +483,21 @@ pub fn act<T: BrokerIo>(
     let facts = if action.kind == ActionKind::Keys && !force && is_stale(now, facts.stamped_at) {
         match io.reverify(pane_id) {
             Ok(()) => {}
-            Err(e) => return result(io_error(e)),
+            Err(e) => return io_error(e),
         }
         match io.read_pane(pane_id) {
-            Ok(Some(f)) => f,
-            Ok(None) => return result(Outcome::Vanished(Gone::Pane)),
-            Err(e) => return result(io_error(e)),
+            Ok(Some(f)) => {
+                observe(observed, &f);
+                f
+            }
+            Ok(None) => return Outcome::Vanished(Gone::Pane),
+            Err(e) => return io_error(e),
         }
     } else {
         facts
     };
     if let Some(refusal) = gate_refusal(action, &facts, &agent, force) {
-        return result(Outcome::Refused(refusal));
+        return Outcome::Refused(refusal);
     }
 
     // 3. acquire the single-flight lock (expiry = deadline + slack, broker pid). A detached action's
@@ -429,24 +510,51 @@ pub fn act<T: BrokerIo>(
     let expiry = now.saturating_add(bound).saturating_add(SLACK_MS);
     let lock = match io.acquire(pane_id, now, expiry, &action.name) {
         Ok(Acquire::Acquired(v)) => v,
-        Ok(Acquire::Contended) => return result(Outcome::Refused(Refusal::Locked)),
-        Err(LockError::Tmux(e)) => return result(io_error(e)),
-        Err(e) => return result(Outcome::Error(e.to_string())),
+        Ok(Acquire::Contended) => return Outcome::Refused(Refusal::Locked),
+        Err(LockError::Tmux(e)) => return io_error(e),
+        Err(e) => return Outcome::Error(e.to_string()),
     };
 
     // 4. act under the held lock. Detached: hand the lock to the supervisor and DO NOT clear it on the
     // spawn path (the supervisor owns it now); every refusal / vanish / spawn failure still clears.
     // Synchronous: 5. release on every exit path.
     if action.detach {
-        let outcome = spawn_detached_under_lock(io, action, pane_id, fire_args, &agent, &lock);
+        let outcome =
+            spawn_detached_under_lock(io, action, pane_id, fire_args, &agent, &lock, observed);
         if !matches!(outcome, Outcome::Spawned) {
             report_release_failure(pane_id, io.clear(pane_id, &lock.nonce));
         }
-        return result(outcome);
+        return outcome;
     }
-    let outcome = act_under_lock(io, action, pane_id, fire_args, &agent, facts);
+    let outcome = act_under_lock(io, action, pane_id, fire_args, &agent, facts, observed);
     report_release_failure(pane_id, io.clear(pane_id, &lock.nonce));
-    result(outcome)
+    outcome
+}
+
+/// Copy the audit-visible half of a pane read into the accumulator. The later read wins: the line
+/// should describe the world the effect landed in, not the one the gate first saw.
+fn observe(observed: &mut ActObserved, facts: &PaneFacts) {
+    observed.agent = facts.agent.clone();
+    observed.episode_ms = Some(facts.episode_ms);
+    observed.pending_tool = facts.pending_tool.clone();
+    observed.pending_call = facts.pending_call.clone();
+}
+
+/// Advance the pane's consecutive-fire run for this action and warn once it reaches
+/// [`audit::REPEAT_WARN`]. Called under the held lock, only on the path that is about to have an
+/// effect: a refusal changed nothing and must not extend a run. This never refuses. The agent that
+/// keeps re-asking, and the finger that keeps answering, are both things a person should be told
+/// about rather than things the broker should decide for them.
+fn bump_repeat<T: BrokerIo>(io: &T, action: &str, pane_id: &str, facts: &PaneFacts) -> u32 {
+    let (value, count) = audit::next_repeat(facts.act_repeat.as_deref(), facts.episode_ms, action);
+    io.set_act_repeat(pane_id, &value);
+    if count >= audit::REPEAT_WARN {
+        eprintln!(
+            "tma: {count} consecutive {action} on {pane_id} in this episode; \
+             the agent may be re-asking"
+        );
+    }
+    count
 }
 
 /// The detached handoff: re-assert identity + gate under the held lock (the same residual-race
@@ -454,6 +562,7 @@ pub fn act<T: BrokerIo>(
 /// `Spawned` when the lock has been handed off, or a refusal/error the caller clears the lock for. A
 /// `detach` action is always `exec` (a `keys` action cannot set `detach`, enforced at parse), so there
 /// is no keys arm here.
+#[allow(clippy::too_many_arguments)]
 fn spawn_detached_under_lock<T: BrokerIo>(
     io: &T,
     action: &ActionManifest,
@@ -461,19 +570,22 @@ fn spawn_detached_under_lock<T: BrokerIo>(
     fire_args: FireArgs,
     agent: &str,
     lock: &LockValue,
+    observed: &mut ActObserved,
 ) -> Outcome {
-    let FireArgs { force, args } = fire_args;
+    let FireArgs { force, args, .. } = fire_args;
     let facts = match io.read_pane(pane_id) {
         Ok(Some(f)) => f,
         Ok(None) => return Outcome::Vanished(Gone::Pane),
         Err(e) => return io_error(e),
     };
+    observe(observed, &facts);
     if facts.agent.as_deref() != Some(agent) || !action.applies_to(agent) {
         return Outcome::Refused(Refusal::Gate(RefusalReason::WrongAgent));
     }
     if let Some(refusal) = gate_refusal(action, &facts, agent, force) {
         return Outcome::Refused(refusal);
     }
+    observed.repeat = bump_repeat(io, &action.name, pane_id, &facts);
     let spec = SupervisorSpec {
         pane_id: pane_id.to_string(),
         nonce: lock.nonce.clone(),
@@ -493,6 +605,7 @@ fn spawn_detached_under_lock<T: BrokerIo>(
 /// Re-assert the gate under the held lock (one option read, shrinks the residual
 /// window), then deliver keys or spawn the command. The lock is released by the caller regardless of
 /// which arm this returns.
+#[allow(clippy::too_many_arguments)]
 fn act_under_lock<T: BrokerIo>(
     io: &T,
     action: &ActionManifest,
@@ -500,8 +613,9 @@ fn act_under_lock<T: BrokerIo>(
     fire_args: FireArgs,
     agent: &str,
     prior: PaneFacts,
+    observed: &mut ActObserved,
 ) -> Outcome {
-    let FireArgs { force, args } = fire_args;
+    let FireArgs { force, args, .. } = fire_args;
     // Re-read once under the lock and re-assert (a state flip between step 2 and now refuses here,
     // bounding the residual race to milliseconds). `--force` did not gate on state, so it re-asserts
     // only identity + requires.
@@ -510,12 +624,14 @@ fn act_under_lock<T: BrokerIo>(
         Ok(None) => return Outcome::Vanished(Gone::Pane),
         Err(e) => return io_error(e),
     };
+    observe(observed, &facts);
     if facts.agent.as_deref() != Some(agent) || !action.applies_to(agent) {
         return Outcome::Refused(Refusal::Gate(RefusalReason::WrongAgent));
     }
     if let Some(refusal) = gate_refusal(action, &facts, agent, force) {
         return Outcome::Refused(refusal);
     }
+    observed.repeat = bump_repeat(io, &action.name, pane_id, &facts);
     let _ = prior; // the pre-lock facts are superseded by the re-read; kept for a clear signature.
 
     match action.kind {
@@ -679,6 +795,10 @@ mod tests {
             context_covered: false,
             permission_request: None,
             api_endpoint: None,
+            episode_ms: 900_000,
+            pending_tool: None,
+            pending_call: None,
+            act_repeat: None,
         }
     }
 
@@ -717,6 +837,8 @@ mod tests {
         api_call: RefCell<Option<(String, String, ApiReply)>>,
         /// The panes whose `@agent_permission_request` the broker asked to unset.
         request_cleared: RefCell<Vec<String>>,
+        /// Every `@agent_act_repeat` value the broker wrote, in order.
+        repeat_writes: RefCell<Vec<String>>,
     }
 
     impl MockIo {
@@ -735,6 +857,7 @@ mod tests {
                 api_result: HttpOutcome::Ok,
                 api_call: RefCell::new(None),
                 request_cleared: RefCell::new(Vec::new()),
+                repeat_writes: RefCell::new(Vec::new()),
             }
         }
         /// The API lane returns `outcome` instead of the default 2xx.
@@ -798,6 +921,9 @@ mod tests {
                 Some((endpoint.to_string(), request_id.to_string(), reply));
             self.api_result.clone()
         }
+        fn set_act_repeat(&self, _pane: &str, value: &str) {
+            self.repeat_writes.borrow_mut().push(value.to_string());
+        }
         fn clear_permission_request(&self, pane_id: &str) {
             self.request_cleared.borrow_mut().push(pane_id.to_string());
         }
@@ -821,6 +947,46 @@ mod tests {
         fn lock_held(&self, _pane: &str, _now: u64) -> Result<bool, TmuxError> {
             Ok(self.lock_held)
         }
+    }
+
+    /// The counter tracks *deliveries*, so a refusal must leave the run where it was. A counter
+    /// that ticked on refusals would reach the warning threshold on a pane nothing was ever sent
+    /// to, which is the opposite of the signal it exists to give.
+    #[test]
+    fn a_refusal_writes_no_repeat_and_records_no_run() {
+        let mut facts = blocked_claude(1_000_000);
+        facts.state = AgentState::Idle; // `approve`'s `when` no longer holds
+        let io = MockIo::new(vec![Some(facts)], acquired());
+        let action = keys_action("when = { state = [\"blocked\"] }", "claude = [\"1\"]");
+        let (r, obs) = act_observed(&io, &action, "%9", FireArgs::default());
+        assert!(matches!(r.outcome, Outcome::Refused(_)));
+        assert_eq!(obs.repeat, 0, "a refusal is not part of a run");
+        assert!(io.repeat_writes.borrow().is_empty(), "and writes nothing");
+    }
+
+    /// A delivered fire records the pane facts the audit line needs, read under the lock, and
+    /// advances the run. The pending summary is deliberately not among them: it is never read.
+    #[test]
+    fn a_delivered_fire_records_the_run_and_the_pending_call() {
+        let mut facts = blocked_claude(1_000_000);
+        facts.pending_tool = Some("Bash".to_string());
+        facts.pending_call = Some("toolu_01".to_string());
+        facts.act_repeat = Some("900000:approve:2".to_string());
+        let io = MockIo::new(vec![Some(facts)], acquired());
+        let action = keys_action("when = { state = [\"blocked\"] }", "claude = [\"1\"]");
+        let (r, obs) = act_observed(&io, &action, "%9", FireArgs::default());
+        assert_eq!(r.outcome, Outcome::Sent);
+        assert_eq!(obs.agent.as_deref(), Some("claude"));
+        assert_eq!(obs.episode_ms, Some(900_000));
+        assert_eq!(obs.pending_tool.as_deref(), Some("Bash"));
+        assert_eq!(
+            obs.repeat, 3,
+            "the third consecutive approve in this episode"
+        );
+        assert_eq!(
+            *io.repeat_writes.borrow(),
+            vec!["900000:approve:3".to_string()]
+        );
     }
 
     #[test]

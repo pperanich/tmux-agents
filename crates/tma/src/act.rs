@@ -17,6 +17,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use tma_core::{ActionKind, ActionManifest, AgentRow, FoldConfig, Selector, When};
+use tma_runtime::broker::audit::{ActSource, AuditCtx};
 use tma_runtime::broker::{self, ActResult, Gone, Outcome, TmuxBroker};
 use tma_runtime::json::{JsonWriter, JSON_SCHEMA};
 use tma_runtime::{actions, cycle, manifests, MenuItem};
@@ -146,6 +147,16 @@ pub(crate) fn run(opts: ActOpts) -> ExitCode {
         server: Some(&opts.server),
         notify_command: opts.config.notify.command.as_deref(),
     };
+    // One batch id across the fan-out, so a reader can tell N lines of one `--all` from N separate
+    // invocations that happened to land in the same second. A single fire carries none.
+    let log = opts.config.act.log_path();
+    let batch = opts.all.then(batch_id);
+    let audit = AuditCtx {
+        log: log.as_deref(),
+        source: fire_source(opts.yes),
+        all: opts.all,
+        batch: batch.as_deref(),
+    };
     // Sequential, one full broker sequence per pane: each target takes its own single-flight lock
     // and re-verifies its own gate, so a fan-out is exactly N independent fires, never a shortcut.
     let results: Vec<ActResult> = panes
@@ -162,11 +173,46 @@ pub(crate) fn run(opts: ActOpts) -> ExitCode {
                 broker::FireArgs {
                     force: opts.force,
                     args: &opts.args,
+                    audit,
                 },
             )
         })
         .collect();
     emit_all(&results, opts.json, opts.all)
+}
+
+// ---- audit context -----------------------------------------------------------------------------
+
+/// The `TMA_ACT_SOURCE` seam: the menu entry sets it on its own `run-shell` command line, which is
+/// the only way a fire can tell it came from the menu (the entry runs the same `tma act` a person
+/// types). An unset or unrecognized value falls back to what this process can prove about itself.
+const SOURCE_ENV: &str = "TMA_ACT_SOURCE";
+
+/// Which surface asked for this fire. `cli` is a person at an interactive terminal; `cli-yes` is
+/// everything that answered the confirmation without being asked, which is a script, a hook, or an
+/// agent. The distinction is the whole point of the field, so it is derived from facts about the
+/// process rather than taken on trust: only the menu token is honored from the environment.
+fn fire_source(yes: bool) -> ActSource {
+    if matches!(
+        std::env::var(SOURCE_ENV)
+            .ok()
+            .as_deref()
+            .and_then(ActSource::parse),
+        Some(ActSource::Menu)
+    ) {
+        return ActSource::Menu;
+    }
+    if yes || !io::stdin().is_terminal() {
+        ActSource::CliYes
+    } else {
+        ActSource::Cli
+    }
+}
+
+/// An id for one `--all` invocation: this process, and when it started firing. Not a nonce and not
+/// meant to be one; it groups a batch's lines in a file only this user can read.
+fn batch_id() -> String {
+    format!("{:x}-{:x}", std::process::id(), tma_runtime::now_ms())
 }
 
 // ---- target resolution (mirrors `wait`) --------------------------------------------------------

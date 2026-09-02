@@ -8,7 +8,7 @@
 //! newline-joined (a legacy single-entry value with no newline parses as a one-deep stack).
 
 use tma_core::stamp::opt;
-use tma_core::{sort_rank, AgentRow, AgentState, FoldConfig, Selector};
+use tma_core::{row_rank, AgentRow, AgentState, FoldConfig, Selector};
 use tma_runtime::{escape_menu_label, ui, MenuItem, Server, Tmux, TmuxError};
 
 use tma_runtime::config::PickerStyles;
@@ -336,10 +336,10 @@ pub fn run_jump_menu(
     if let Some(pane) = &self_pane {
         report.rows.retain(|r| &r.pane_id != pane);
     }
-    // The picker's order: blocked → working → idle → unknown, longest-in-state first.
+    // The picker's order: blocked → done → working → idle → unknown, longest-in-state first.
     report.rows.sort_by(|a, b| {
-        sort_rank(a.state)
-            .cmp(&sort_rank(b.state))
+        row_rank(a)
+            .cmp(&row_rank(b))
             .then_with(|| a.since.cmp(&b.since))
     });
     if report.rows.is_empty() {

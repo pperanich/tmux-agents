@@ -328,6 +328,10 @@ mod tests {
             context_covered: false,
             permission_request: None,
             api_endpoint: None,
+            episode_ms: 0,
+            pending_tool: None,
+            pending_call: None,
+            act_repeat: None,
         };
         let get = |env: &[(String, String)], key: &str| {
             env.iter().find(|(k, _)| k == key).map(|(_, v)| v.clone())

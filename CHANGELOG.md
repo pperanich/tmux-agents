@@ -10,6 +10,46 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **An audit line per action fire, with the surface that asked for it.** `[act] log` points at a
+  JSONL file every `tma act` appends one line to, whatever the outcome: `at`, `pane`, `agent`,
+  `action`, `kind`, `outcome`, `reason`, `source`, `episode_ms`, `repeat`, `pending_tool`,
+  `pending_call`, `all`, `batch`. Created `0600` and appended to, never rewritten, the same
+  discipline `notify.log` follows. The field that earns the file is `source`: `cli` for a person at
+  a TTY, `cli-yes` for `--yes` or no TTY (a script, a hook, an agent), `menu` for the tmux action
+  menu. tma has several fire surfaces and no way to tell them apart after the fact; "which surface
+  approved this pane, and when" was unanswerable even locally. Claude Code's
+  `claude_code.tool_decision` and Codex's `codex.tool_decision` both record a decision source, for
+  the same reason.
+
+  The line names the pending call (`pending_tool`, `pending_call`) and never quotes it:
+  `@agent_pending_summary` is agent-supplied text and stays out, as it already does from every
+  notify carrier.
+
+- **A repeat warning at three.** Three consecutive fires of one action on one pane inside one
+  episode print `tma: 3 consecutive approve on %5 in this episode; the agent may be re-asking` and
+  land as `repeat: 3` in the audit line. It never refuses. The number is the vendors': Claude Code's
+  auto mode pauses when its classifier blocks three times in a row, and Codex's auto-review aborts
+  at three consecutive denials. A new episode or a different action starts the run over; it is
+  stored on the pane as `@agent_act_repeat`.
+
+- **Why `tma act --all` is a fan-out and not a permission inbox**, written down in
+  [`tma act`](docs/reference/cli.md#fan-out---all) and [the security
+  model](docs/explanation/security-model.md). `--all` is not going away; bulk approval is not
+  arriving.
+
+### Changed
+
+- **The fleet is ordered by who needs you first: blocked, done, working, idle, unknown.** `done` is
+  the pseudo-state tma already had, a finished agent with output nobody has reviewed
+  (`@agent_state` stays `idle`, the attention flag is what makes it done), and it used to sort as
+  plain idle. That put the rows a user can clear in one keypress underneath every row they can do
+  nothing about: a working pane is waiting on itself, a done pane is waiting on a person, exactly as
+  a blocked one is. Applies to `tma ls` (plain and `--json`), the picker, `tma jump --menu`, and
+  `tma watch`, whose repo groups now lead on a done row the same way they lead on a blocked one.
+  `tma jump --attention` already walked blocked-then-done and is unchanged.
+
 ### Fixed
 
 - **A quit agent left its pane on the status line for another half minute.** When an agent exits and
@@ -23,6 +63,12 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   sweep remains the backstop for a pane no edge arrives on, and the 30 second dead-registration
   reaper is untouched: a hook-registered pane with no walkable process is not an exit the edge path
   may act on, since that is also what a live agent the process walk momentarily misses looks like.
+
+- **`ls --json`'s `pending_tool` / `pending_call` / `pending_summary` were always `null`.** The trio
+  shipped in 0.5.9 was written to the pane and read back by the row builder, but the three options
+  were never in the `list-panes -F` set that fills the map the row builder reads from. A status line
+  could see them, because tmux expands the option itself, and the JSON could not, which is the one
+  place the two are supposed to agree.
 
 ## [0.5.9] - 2026-09-02
 

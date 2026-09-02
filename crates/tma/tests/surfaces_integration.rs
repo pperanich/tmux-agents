@@ -900,3 +900,41 @@ fn tmux_bin_comes_from_config_with_the_env_overriding() {
     );
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+/// Regression: the `pending_*` trio shipped in 0.5.9 read `null` on every row, because the
+/// `@agent_pending_*` options were never in the `list-panes -F` set the row builder reads from.
+/// A status line could see them (tmux expands the option itself) and `ls --json` could not, which
+/// is the one place the two are supposed to agree.
+#[test]
+fn ls_json_carries_the_pending_call_stamped_on_the_pane() {
+    if !tma_test_support::tmux_available() {
+        return;
+    }
+    let s = Scratch::new("pending");
+    let rules = "[[rules]]\nstate = \"blocked\"\npriority = 50\n\
+                 region = \"tail_lines(50)\"\nmatch = { contains = \"READY\" }\n";
+    let pane = setup_agent(&s, "READY\\n", rules);
+    assert!(tma(&s, &["status"]).status.success()); // one cycle to stamp
+
+    for (key, value) in [
+        ("@agent_pending_tool", "Bash"),
+        ("@agent_pending_call", "toolu_01ABC"),
+        ("@agent_pending_summary", "cargo test --workspace"),
+    ] {
+        assert!(
+            s.tmux(&["set-option", "-p", "-t", &pane, key, value])
+                .status
+                .success(),
+            "seed {key}"
+        );
+    }
+
+    let ls = tma(&s, &["ls", "--json"]);
+    let json = String::from_utf8_lossy(&ls.stdout);
+    assert!(json.contains("\"pending_tool\":\"Bash\""), "{json}");
+    assert!(json.contains("\"pending_call\":\"toolu_01ABC\""), "{json}");
+    assert!(
+        json.contains("\"pending_summary\":\"cargo test --workspace\""),
+        "{json}"
+    );
+}

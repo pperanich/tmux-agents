@@ -15,7 +15,6 @@ use crate::json::JsonWriter;
 use tma_tmux::tmux::{PaneRecord, Tmux};
 
 pub mod failure;
-mod log;
 mod test_fire;
 
 pub use test_fire::{notify_test, NotifyTest, TestTrigger};
@@ -188,7 +187,7 @@ pub fn fire(
     // Audit line, written before the command so a hung or missing sink cannot cost the record. Both
     // fire paths pass through here, so the log holds every fired notification either way.
     if let Some(path) = &sinks.log {
-        log::append(path, &log_line(n, crate::now_ms(), title));
+        crate::audit::append(path, &log_line(n, crate::now_ms(), title));
     }
 
     command.and_then(|cmd| spawn_command(cmd, n, title))
@@ -490,7 +489,7 @@ pub fn fire_completion(
 
     // Audit line before the command, so a hung or missing hook cannot cost the record.
     if let Some(path) = &sinks.log {
-        log::append(path, &completion_log_line(c, crate::now_ms()));
+        crate::audit::append(path, &completion_log_line(c, crate::now_ms()));
     }
 
     command.and_then(|cmd| spawn_completion_command(cmd, c))

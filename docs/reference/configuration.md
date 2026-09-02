@@ -56,6 +56,9 @@ osc = false                  # also post an OSC 9 desktop notification to the pa
 # blocked = { command = "..." }      # per-trigger routing; unset falls back to `command`
 # done = { command = "..." }
 
+[act]                        # the action broker's audit record
+# log = "~/.local/state/tma/acts.jsonl"  # append one JSON line per fired action
+
 [focus]                      # attention-clear posture
 events = false               # set true to also install a pane-focus-in hook (needs `focus-events on`)
 
@@ -161,6 +164,12 @@ fire on, and any other value (including the empty string) turns it off, so
 exporting `TMA_NOTIFY_FROM_EVENT=0` overrides a `from_event = true` in config.
 Only an unset variable leaves the config value in charge. Like `TMA_NOTIFY_CMD` it
 exists so a test or CI run can flip the fire path without writing a config file.
+
+## `[act]`: the action audit log
+
+| key | default | meaning |
+|---|---|---|
+| `log` | unset | Path to a JSONL file; every `tma act` fire appends one line, refusals included, naming the surface that asked. `~` is expanded and parent directories are created; the file is created `0600`. Errors are silent, never failing an action. Key set and rationale: [The act audit log](cli.md#the-act-audit-log). |
 
 ## `[focus]`: attention-clear posture
 

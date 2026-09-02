@@ -40,7 +40,8 @@ pub use render::{
     unset_pane_option, Guard, Publish, QuotaStamp, StampCommand, SummaryScope,
 };
 pub use row::{
-    is_done, sort_rank, AgentRow, PendingCall, QuotaLabel, RepoLabel, Selector, StateToken,
+    is_done, row_rank, sort_rank, AgentRow, PendingCall, QuotaLabel, RepoLabel, Selector,
+    StateToken,
 };
 pub use seen::{seen_by_input, ClientView};
 pub use snapshot::{PaneSnapshot, ProcInfo};

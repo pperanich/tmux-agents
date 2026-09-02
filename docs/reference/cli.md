@@ -9,7 +9,10 @@ tmux-agents CLI: agent state monitor, picker, jump, and stamping for tmux.
 Usage: tma [OPTIONS] [COMMAND]
 ```
 
-Running `tma` with no subcommand opens the fuzzy picker. Its rows carry a dimmed
+Running `tma` with no subcommand opens the fuzzy picker. Rows arrive in
+attention order, blocked → done → working → idle → unknown, longest-in-state
+first within each rank (`done` is a finished agent nobody has reviewed yet: idle,
+with the attention flag still set). Its rows carry a dimmed
 branch label (after the time column) when a listed pane resolves a git branch;
 the picker itself stays a flat list, ungrouped. The pane you opened the picker
 from is left out of the list (jumping to where you already are does nothing), so
@@ -140,6 +143,11 @@ Usage: tma ls [OPTIONS]
 `--pane` and the selector narrow the same way: no matching agent prints nothing
 and exits `0`. A filtered `--json` is the same document with a shorter `agents`
 array, so a consumer parses it identically.
+
+Rows come back in attention order, blocked → done → working → idle → unknown,
+then by `session:window.pane`. `done` is idle with the attention flag still set,
+a finished agent nobody has read. `--json` emits the same order in its `agents`
+array.
 
 Plain output is one tab-separated line per agent pane, in this column order:
 `pane`, `agent`, `state`, `detail`, `since`, `session:window.pane`, `title`,
@@ -284,7 +292,7 @@ which format-expands it, so the jump switches the client that pressed the key an
 keys its return trail by it.
 
 `--menu` is the tmux-native counterpart of the picker: entries are ordered like
-the picker's list (blocked, working, idle, then longest-in-state first), the first
+the picker's list (blocked, done, working, idle, then longest-in-state first), the first
 nine carry a `1`-`9` quick-select digit, and each one runs `tma jump --pane <id>`
 with the acting client and the invoking server resolved into the command. It is
 what a right-click on a [clickable status
@@ -414,6 +422,99 @@ never a shortcut around the guards. One target's refusal does not abort the rest
   refusal (4), `vanished` (3), `timeout` (124), a failed exec child (its own
   code), a broker error (1). A fan-out exits `0` only if every target acted.
 - A selector that matches no pane is exit 2, not a silent no-op.
+- Every fire in the batch shares one `batch` id in the [act audit
+  log](#the-act-audit-log), so N lines of one fan-out are distinguishable from N
+  separate invocations.
+
+**What `--all` is for, and what it is deliberately not.** It is a fleet
+convenience for the two actions you mean across a whole selection at once:
+`interrupt` and `deny`. It is not a unified permission inbox, and tma will not
+grow one. Batch approval is an exploited surface, not a hypothetical one: WorkOS
+documented attackers embedding a dangerous operation inside a batch of benign
+ones and using phrases like "don't bother reviewing each one" to discourage
+individual review (2026-08-05,
+<https://workos.com/blog/approval-fatigue-agent-governance>), and the same
+pattern is tracked as a threat rule. The local failure mode is smaller and just
+as real: an action fires the keys its manifest declares, and one mis-typed
+dialog turns an approve into something else, which is a bug tma has actually
+shipped and fixed. Multiply that by every pane the selector matched. `--all`
+stays because interrupting a fleet is a real need; approving one is a decision
+you make one prompt at a time, which is what the picker and the action menu are
+for. See [The security model](../explanation/security-model.md).
+
+### The act audit log
+
+`[act] log` appends one JSON line per fired action, whatever the outcome:
+
+```toml
+[act]
+log = "~/.local/state/tma/acts.jsonl"
+```
+
+Unset by default. The parent directory is created for you, `~` is expanded, and
+the file is created `0600` and appended to, never rewritten, exactly like
+[`notify.log`](../how-to/notifications.md#keep-a-history). The natural place for
+it is beside that file. A log that cannot be written is skipped silently: an
+audit record must never turn a delivered action into a failure. Nothing rotates
+it; that is `logrotate`'s job, or `truncate`'s.
+
+The key set, in order:
+
+| key | type | meaning |
+|---|---|---|
+| `schema` | number | act-log schema version (`1`), versioned separately from the `--json` result |
+| `at` | number | epoch **ms** the fire completed |
+| `pane` | string | target pane id |
+| `agent` | string \| null | `@agent_name` as read under the lock; `null` when the pane vanished before any read |
+| `action` | string | the action name |
+| `kind` | string | `keys`, `api`, or `exec`: the transport the fire used, not just the manifest kind |
+| `outcome` | string | the [`--json` outcome vocabulary](pane-options-and-json.md#tma-act-json-result) |
+| `reason` | string \| null | the refusal or vanish token, `null` for every other outcome |
+| `source` | string | which surface asked: `cli` (a person at a TTY), `cli-yes` (`--yes`, or no TTY to prompt on: a script, a hook, an agent), `menu` (the tmux action menu) |
+| `episode_ms` | number \| null | the pane's episode instant (`max(@agent_since, @agent_turn_at)`), read under the lock |
+| `repeat` | number | consecutive fires of this action on this pane in this episode, counting this one; `0` when the fire never reached the effect |
+| `pending_tool` | string \| null | `@agent_pending_tool`: which tool the open prompt is about |
+| `pending_call` | string \| null | `@agent_pending_call`: its call id |
+| `all` | boolean | whether the fire came from `--all` |
+| `batch` | string \| null | the id shared by every fire of one `--all` invocation |
+
+`source` is the field that makes the log worth keeping. Peers agree it is the
+load-bearing one: Claude Code's `claude_code.tool_decision` records a `source`
+alongside the decision (`config`, `hook`, `user_permanent`, …) and Codex's
+`codex.tool_decision` records the configuration source the same way. A line that
+says only "approved" cannot tell a human at a menu from a script from an agent
+shelling out to `tma act`, which is precisely the question a tool with several
+fire surfaces raises.
+
+What the line never carries: no key, no token, no pane title, and no
+agent-supplied prose. `@agent_pending_summary` is a command line or a path that
+an agent chose, so the log names the pending call (`pending_tool`,
+`pending_call`) and never quotes it. That is the same digest rule
+[`notify.log`](../how-to/notifications.md#keep-a-history) follows, for the same
+reason: this is the file most likely to be pasted into an issue.
+
+```sh
+jq -r 'select(.outcome=="sent") | "\(.at) \(.source) \(.action) \(.pane)"' \
+  ~/.local/state/tma/acts.jsonl
+```
+
+### The repeat warning
+
+Three consecutive fires of the same action on one pane inside one episode print a
+line to stderr and land as `repeat: 3` in the audit log:
+
+```
+tma: 3 consecutive approve on %5 in this episode; the agent may be re-asking
+```
+
+It never refuses. The threshold is the vendors': Claude Code's auto mode pauses
+when its classifier "blocks an action 3 times in a row"
+(<https://code.claude.com/docs/en/permission-modes>) and Codex's auto-review
+circuit breaker aborts the turn at three consecutive denials. Both of those stop
+an agent; tma is telling a person something instead, because the thing worth
+noticing is that the same prompt keeps coming back, or that a finger keeps
+answering it. A new episode, or a different action, starts the run over. The run
+lives on the pane as `@agent_act_repeat`.
 
 ### Exit codes
 
@@ -627,11 +728,14 @@ state with detail, context gauge, time-in-state, locator, title, and a model
 column when any visible pane stamps `@agent_model`), and `p` again to swap back.
 The chosen body is session-local (never persisted).
 
-Both wide bodies group rows by repo (worktrees roll up under their origin's
-name), each group under a dimmed `▸ repo-name` header, groups ordered so the
-longest-blocked agent's group leads; every pane with no resolved repo folds into
-one `▸ (no repo)` group. Grouping is the default; press `g` to flatten the list
-to a flat state-sorted view and `g` again to regroup (session-local, like `p`).
+Rows are in attention order, blocked → done → working → idle → unknown, longest-
+in-state first within each rank. Both wide bodies then group them by repo
+(worktrees roll up under their origin's name), each group under a dimmed
+`▸ repo-name` header, groups ordered by their most urgent member so the group
+holding the pane that most needs you leads; every pane with no resolved repo
+folds into one `▸ (no repo)` group. Grouping is the default; press `g` to flatten
+the list to the ungrouped attention order and `g` again to regroup
+(session-local, like `p`).
 Selection and Enter-jump target the agent under the cursor regardless of the
 group headers. A dimmed branch label sits beside each row (table: a `branch`
 column; single list: after the time column), present only when a visible pane

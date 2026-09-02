@@ -142,13 +142,28 @@ impl AgentRow {
     }
 }
 
-/// Surface sort rank: attention-worthy states first.
+/// Surface sort rank for a bare state. Rank `1` is reserved for the `done` pseudo-state, which no
+/// [`AgentState`] carries; [`row_rank`] is what surfaces sort on, and this exists for the callers
+/// that hold a state and no row.
 pub fn sort_rank(state: AgentState) -> u8 {
     match state {
         AgentState::Blocked => 0,
-        AgentState::Working => 1,
-        AgentState::Idle => 2,
-        AgentState::Unknown => 3,
+        AgentState::Working => 2,
+        AgentState::Idle => 3,
+        AgentState::Unknown => 4,
+    }
+}
+
+/// Surface sort rank for a row: blocked, done, working, idle, unknown. The order answers "who needs
+/// you first", which is the only question a fleet list is asked. `done` sits second because a
+/// finished agent nobody has looked at is waiting on a person exactly as a blocked one is, while a
+/// working agent is waiting on itself; ranking `done` below `working` buried the rows a user can
+/// actually clear under the rows they cannot.
+pub fn row_rank(row: &AgentRow) -> u8 {
+    if is_done(row) {
+        1
+    } else {
+        sort_rank(row.state)
     }
 }
 
@@ -311,6 +326,39 @@ mod tests {
             repo: None,
             pending: None,
         }
+    }
+
+    /// The five ranks, in the order every surface presents them. `done` sits between `blocked` and
+    /// `working` because a finished agent nobody has read is waiting on a person, and a working one
+    /// is not; ranking it below `working` buried the rows a user can clear under the rows they
+    /// cannot. `done` is idle plus the attention flag, so the state token alone cannot say it.
+    #[test]
+    fn row_rank_orders_blocked_done_working_idle_unknown() {
+        let plain = |state| row("s", "claude", state);
+        let done = AgentRow {
+            attention: true,
+            ..plain(AgentState::Idle)
+        };
+        let ranks = [
+            row_rank(&plain(AgentState::Blocked)),
+            row_rank(&done),
+            row_rank(&plain(AgentState::Working)),
+            row_rank(&plain(AgentState::Idle)),
+            row_rank(&plain(AgentState::Unknown)),
+        ];
+        assert_eq!(ranks, [0, 1, 2, 3, 4]);
+        assert!(ranks.windows(2).all(|w| w[0] < w[1]), "strictly ordered");
+
+        // An idle row without the flag is plain idle: the flag is the whole difference.
+        assert_eq!(row_rank(&plain(AgentState::Idle)), 3);
+        // A blocked row carrying the flag is still blocked, not promoted twice.
+        assert_eq!(
+            row_rank(&AgentRow {
+                attention: true,
+                ..plain(AgentState::Blocked)
+            }),
+            0
+        );
     }
 
     fn with_repo(mut r: AgentRow, name: &str, branch: &str) -> AgentRow {

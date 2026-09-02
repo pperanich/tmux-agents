@@ -13,6 +13,7 @@
 // --- detection pipeline ----------------------------------------------------------
 // What makes a pane an agent pane, what it is doing, and the inputs that decide: the poll
 // cycle and its capture fallback, the hook-event bridge, and the per-pane metadata they read.
+pub mod audit;
 pub mod capture;
 pub mod config;
 pub mod cycle;
