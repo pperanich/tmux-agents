@@ -283,7 +283,7 @@ impl QuotaWindow {
 }
 
 /// One window's reading: its utilization percent and, when the channel states it, the instant it
-/// resets. `resets_at_ms` is epoch **milliseconds** — the parser converts, never the consumer.
+/// resets. `resets_at_ms` is epoch **milliseconds**, the parser converts, never the consumer.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct QuotaWindowReading {
     pub window: QuotaWindow,
@@ -305,7 +305,7 @@ pub struct QuotaReport {
 }
 
 impl QuotaReport {
-    /// The report for a set of window readings: the highest percent wins. `None` for an empty set —
+    /// The report for a set of window readings: the highest percent wins. `None` for an empty set,
     /// no window parsed is no observation, never a zero.
     fn worst(windows: Vec<QuotaWindowReading>) -> Option<QuotaReport> {
         // `min_by_key` over the reversed percent, not `max_by_key`: `max_by_key` keeps the LAST of
@@ -347,7 +347,7 @@ impl UsageReport {
 /// channel that reports a RELATIVE reset offset (older Codex builds) has no other way to reach an
 /// absolute instant, and this module holds no clock of its own.
 ///
-/// `None` is a deliberate ignore — an unknown format, or a payload carrying no quota, no cost and no
+/// `None` is a deliberate ignore, an unknown format, or a payload carrying no quota, no cost and no
 /// model. As on the context path there is no error case: a fire-and-forget push must never fail.
 pub fn parse_usage(format: &str, payload: &str, now_ms: u64) -> Option<UsageReport> {
     let report = match format {
@@ -383,7 +383,7 @@ const CLAUDE_WINDOWS: [(&str, QuotaWindow); 3] = [
 /// carries in four different objects (the three windows and `context_window`), so an unanchored read
 /// is not a shortcut, it is a wrong answer waiting for a field-order change.
 ///
-/// `None` — no `rate_limits` object, or no window inside it that parses — is an IGNORE, never a
+/// `None`, no `rate_limits` object, or no window inside it that parses, is an IGNORE, never a
 /// clear. The block is absent for API-key auth, absent before the first API response, and dropped
 /// per window once its `resets_at` passes, so a missing block says nothing about the account.
 fn claude_quota(payload: &str) -> Option<QuotaReport> {
@@ -467,7 +467,7 @@ fn codex_line_quota(line: &str, now_ms: u64) -> Option<QuotaReport> {
 /// One Codex window's reset instant in epoch **ms**. Codex has published it two ways across
 /// releases: an absolute `resets_at` in epoch seconds (every rollout observed on this machine,
 /// 2026-09), and a relative `resets_in_seconds` offset that only the caller's clock can resolve.
-/// Absolute wins where both appear — it needs no clock and so cannot drift.
+/// Absolute wins where both appear, it needs no clock and so cannot drift.
 fn codex_resets_at_ms(obj: &str, now_ms: u64) -> Option<u64> {
     if let Some(ms) = epoch_seconds_to_ms(find_number(obj, "resets_at")) {
         return Some(ms);
@@ -562,7 +562,7 @@ fn find_string(payload: &str, key: &str) -> Option<String> {
 
 /// The `{…}` slice of the object at `"<key>":` (first occurrence), brace-balanced and quote-aware so
 /// a nested object or a brace inside a string cannot end it early. `None` when the key is absent or
-/// its value is not an object — `null`, a number, a string — which is what makes it a safe anchor:
+/// its value is not an object, `null`, a number, a string, which is what makes it a safe anchor:
 /// reading a field "inside" `"context_window": null` would otherwise spill into the next object.
 ///
 /// This is the whole reason the parsers below are not one `find_number` each. `used_percentage`
@@ -1003,7 +1003,7 @@ mod tests {
     const CODEX_QUOTA_RELATIVE: &str =
         include_str!("../fixtures/codex_rollout_rate_limits_relative.jsonl");
 
-    /// The parse clock. Any fixed value works — the absolute-reset path must ignore it entirely.
+    /// The parse clock. Any fixed value works, the absolute-reset path must ignore it entirely.
     const NOW_MS: u64 = 1_788_000_000_000;
 
     fn usage(format: &str, payload: &str) -> UsageReport {
@@ -1073,7 +1073,7 @@ mod tests {
     #[test]
     fn a_payload_with_only_a_context_window_reports_no_quota() {
         // The pre-`rate_limits` payload every other fixture uses: a gauge, and nothing to stamp on
-        // the quota lane. NOT a clear — the block is absent for API-key auth and before the first
+        // the quota lane. NOT a clear, the block is absent for API-key auth and before the first
         // API response, so its absence says nothing about the account.
         let u = usage("claude-statusline-json", NORMAL);
         assert_eq!(u.quota, None);

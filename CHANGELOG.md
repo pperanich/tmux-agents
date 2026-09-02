@@ -114,7 +114,7 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 - **`@agent_cost_usd` and a `cost_usd` JSON key** carry Claude's own `cost.total_cost_usd` for the
   current session, two decimals. This is the one exception to "tma stamps no cost", and a narrow
   one: it is the vendor's live figure for one session, stamped as stated, never recomputed and
-  never summed. **tma reports which pane, right now, and aggregates nothing across sessions** —
+  never summed. **tma reports which pane, right now, and aggregates nothing across sessions**,
   [`ccusage`](https://ccusage.com) is the tool that answers "how much since Monday". Codex's rollout
   publishes no cost, so its panes carry none.
 
@@ -127,7 +127,7 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 - **A pane's context gauge could show the account's rate-limit percent instead.** The Claude parser
   looked up `used_percentage` by name anywhere in the payload, and since v2.1.80 that key lives in
-  four different objects — `context_window` and each of the three `rate_limits` windows. Whichever
+  four different objects, `context_window` and each of the three `rate_limits` windows. Whichever
   Claude serialized first won, so on a payload ordering `rate_limits` ahead of `context_window` the
   gauge read the wrong number entirely. Every field is now read from inside its own object, and a
   fixture pins the field order that got it wrong.

@@ -140,7 +140,7 @@ fn write_row_fields(j: &mut JsonWriter, r: &AgentRow, origin: &Origin) {
         Some(t) => j.number("tokens", t as i64),
         None => j.null("tokens"),
     }
-    // Additive (schema stays 1): the account quota, nested because its three values are one fact —
+    // Additive (schema stays 1): the account quota, nested because its three values are one fact,
     // a percent with no window token cannot be read. `null` when the pane's channel reports no
     // rate-limit block (API-key auth, or before the agent's first API response). It is
     // ACCOUNT-wide, not per-pane, so several rows carrying the same numbers is correct and summing
@@ -162,7 +162,7 @@ fn write_row_fields(j: &mut JsonWriter, r: &AgentRow, origin: &Origin) {
     }
     // Additive (schema stays 1): the agent's own reported cost for THIS session, `null` when its
     // channel publishes none. tma reports which pane right now and aggregates nothing across
-    // sessions — a spend total over time is `ccusage`'s job, not this row's.
+    // sessions, a spend total over time is `ccusage`'s job, not this row's.
     match r.cost_usd {
         Some(v) => j.money("cost_usd", v),
         None => j.null("cost_usd"),
@@ -654,7 +654,7 @@ mod tests {
 
     /// The quota is one nested object, not three parallel scalars, and the cost renders with the
     /// same two decimals the `@agent_cost_usd` option carries. Both surfaces emit them, and both
-    /// render an absent reading as `null` — never as a zero, which would read as "no quota used".
+    /// render an absent reading as `null`, never as a zero, which would read as "no quota used".
     #[test]
     fn the_quota_object_and_cost_render_together_or_as_null() {
         for json in [

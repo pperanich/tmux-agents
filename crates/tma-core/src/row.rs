@@ -46,15 +46,15 @@ pub struct PendingCall {
 
 /// The resolved account-quota annotation for one pane: present exactly when the pane carries a
 /// stamped `@agent_quota_pct`, absent otherwise. A cluster rather than three parallel `Option`s
-/// because a percent with no window token is unreadable — 80% of five hours and 80% of a week are
-/// different facts — so the two are set together or not at all. `resets_at_ms` stays optional inside
+/// because a percent with no window token is unreadable, 80% of five hours and 80% of a week are
+/// different facts, so the two are set together or not at all. `resets_at_ms` stays optional inside
 /// it: a channel can state the utilization without stating when it clears.
 #[derive(Clone, Debug)]
 pub struct QuotaLabel {
     /// Utilization percent `0..=100` of the window closest to exhausted.
     pub pct: u8,
     /// Which window that was: `5h` / `7d` / `spend` / `primary` / `secondary`. A stored token, read
-    /// defensively — the vocabulary grows with the channels tma parses.
+    /// defensively, the vocabulary grows with the channels tma parses.
     pub window: String,
     /// Epoch **ms** at which that window resets, `None` when the channel stated none.
     pub resets_at_ms: Option<u64>,

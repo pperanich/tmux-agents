@@ -103,7 +103,7 @@ fn fire_context_high(
 /// quota/cost trio on its own, and the model label as a plain set. Only the owning `@agent_session`
 /// may stamp: a foreign session (a subagent running its own statusline) is dropped so it cannot
 /// clobber the parent pane's values. A pane with no recorded owner, or a payload carrying no
-/// session, is unattributable and proceeds — the same posture as the hook path's subagent guard.
+/// session, is unattributable and proceeds, the same posture as the hook path's subagent guard.
 ///
 /// The two chains are independent and each guards on its own marker, so a payload carrying only one
 /// of them touches only that lane; one `list_panes` serves both.

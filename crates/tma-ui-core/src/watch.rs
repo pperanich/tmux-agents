@@ -724,7 +724,7 @@ fn context_span(r: &AgentRow, now: u64) -> Span<'static> {
     }
 }
 
-/// The account-quota cell, right-aligned in [`QUOTA_W`]: `63%7d` — the percent with its window
+/// The account-quota cell, right-aligned in [`QUOTA_W`]: `63%7d`, the percent with its window
 /// token, since the percent alone does not say what it is a percent of. Grey throughout: it is an
 /// account-wide reading rather than this pane's state, and it is never the reason to look at a row.
 /// A blank cell when the pane carries no quota.

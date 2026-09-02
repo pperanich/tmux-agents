@@ -1550,7 +1550,7 @@ mod tests {
 
     #[test]
     fn quota_write_guards_every_field_on_its_own_marker_with_at_last() {
-        // Five writes, `@agent_quota_at` last, each wrapping the quota chain's OWN suppress expr —
+        // Five writes, `@agent_quota_at` last, each wrapping the quota chain's OWN suppress expr,
         // it must compare against `@agent_quota_at`, never the context chain's marker, or a quiet
         // gauge would gate a fresh quota push.
         let q = QuotaStamp {

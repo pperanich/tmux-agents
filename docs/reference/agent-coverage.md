@@ -114,7 +114,7 @@ Claude also publishes `cost.total_cost_usd`, which tma stamps as
 `@agent_cost_usd`. This is the one exception to the no-cost posture and it is a
 narrow one: the figure is the vendor's own live estimate for the **current
 session**, stamped as stated and never recomputed. tma reports which pane, right
-now. It does not aggregate cost across sessions or over time —
+now. It does not aggregate cost across sessions or over time,
 [`ccusage`](https://ccusage.com) is the tool that answers "how much since
 Monday". Gemini, OpenCode, pi and Cursor publish no cost figure, so their panes
 carry none.

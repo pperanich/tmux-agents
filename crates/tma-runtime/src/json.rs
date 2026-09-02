@@ -73,7 +73,7 @@ impl JsonWriter {
         self.buf.push_str(&v.to_string());
         self.mark();
     }
-    /// Write a money amount as a JSON number with exactly two decimals — the same rendering the
+    /// Write a money amount as a JSON number with exactly two decimals, the same rendering the
     /// `@agent_cost_usd` option carries, so the row and the pane option can never disagree. Only
     /// finite values reach this (the parser rejects the rest), so no `NaN`/`Infinity` can escape.
     pub fn money(&mut self, k: &str, v: f64) {

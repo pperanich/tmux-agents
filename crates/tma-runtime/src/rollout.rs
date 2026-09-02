@@ -36,7 +36,7 @@ pub const SCAN_CAP: u64 = 1024 * 1024;
 const CODEX_FORMAT: &str = "codex-rollout-jsonl";
 
 /// The newest reading from one tail poll: the context percent (`None` = no `token_count` record in the
-/// scanned window), the newest `rate_limits` reading (`None` = no record carried one — older Codex
+/// scanned window), the newest `rate_limits` reading (`None` = no record carried one, older Codex
 /// builds, or a session before its first response), and a best-effort model name.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct TailResult {
@@ -150,7 +150,7 @@ impl RolloutTail {
 }
 
 /// Read the bounded end-anchored window and parse the newest reading, quota and best-effort model.
-/// A read failure yields an empty result (nothing to stamp) — the tail must never error the cycle.
+/// A read failure yields an empty result (nothing to stamp), the tail must never error the cycle.
 /// `now_ms` is only consulted for a relative `resets_in_seconds` offset (older Codex builds); it is
 /// read here rather than at the stamp because a memoized result must carry the clock it was parsed
 /// against, and a memo hit performs no read at all.
