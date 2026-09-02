@@ -356,7 +356,7 @@ Each `agents` element carries this exact key set:
 | `model` | string or null | the best-effort `@agent_model` label |
 | `window_covered` | boolean or null | whether `[telemetry.windows]` names that model; `null` when there is no model to check |
 | `endpoint_ok` | boolean or null | whether the pane's API endpoint answered; `null` when the agent has no API lane |
-| `hook_demoted` | boolean | registered through a hook but currently running on capture evidence |
+| `hook_demoted` | boolean | registered through a hook but currently running on capture evidence: output kept arriving that its hooks did not account for. A `working` hook claim accounts for output until capture contradicts it, so a long tool call does not set this |
 | `tier` | number | the effective tier (`3` / `2` / `1`) |
 | `tier_reason` | string or null | why it is not higher; `null` at the top of what its manifest supports |
 

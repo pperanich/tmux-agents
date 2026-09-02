@@ -219,8 +219,10 @@ pub struct DaemonSection {
     /// Liveness recheck cadence while the control pool is clientless (zero-member recovery).
     #[serde(default = "default_zero_member_recheck_secs")]
     pub zero_member_recheck_secs: u64,
-    /// Hook-liveness demotion threshold: activity edges with no fresh hook claim after which a
-    /// hook-capable pane's coverage goes suspect (default 5; see [`crate::capture`]).
+    /// Hook-liveness demotion threshold: activity edges unaccounted for by the pane's hooks after
+    /// which its coverage goes suspect (default 5; see [`crate::capture`]). An edge landing on a
+    /// fresh hook claim, or on a pane whose hooks last said `working` and have not been
+    /// contradicted, is accounted for and does not count.
     #[serde(default = "default_demote_edges")]
     pub demote_edges: u32,
     /// Opt-in auto-start: when `true`, the user-invoked surfaces run `tma daemon --ensure` before

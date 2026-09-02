@@ -349,13 +349,22 @@ captured evidence (see D10, X3).
   hook-capable that emits zero hook events across N daemon-observed activity edges
   (default 5) has its hook coverage treated as suspect — the daemon then writes
   subsequent capture verdicts unguarded (its writes bypass the F13a source guard
-  for that pane until hook events resume). Edges observed while the stored claim
-  is still hook-fresh (source `hook` with `evidence_at` inside the F8 decay
-  window) do not count: a live hook claim is direct evidence the wiring works, so
-  a single long tool call's output pauses cannot demote a healthy pane. Demotion
-  for genuinely dead wiring is therefore bounded by the decay window plus N
-  non-corroborating edges. Daemonless tiers rely on
-  `install-hooks --check` for broken-wiring detection. Rationale (round-2): hook
+  for that pane until hook events resume). Two classes of edge do not count.
+  First, edges observed while the stored claim is still hook-fresh (source `hook`
+  with `evidence_at` inside the F8 decay window): a live hook claim is direct
+  evidence the wiring works. Second, edges observed while the pane's LAST HOOK
+  CLAIM was `working` and no verdict has since moved the pane off `working`: an
+  agent that reported working is expected to keep painting for as long as its
+  tool call runs, and hooks fire at the call's edges, not mid-stream, so that
+  output is not evidence against the wiring (issue #10). Output arriving while
+  the hooks claim `idle` or `blocked`, or after a capture verdict has
+  contradicted a `working` claim, is a contradiction and does count. Demotion for
+  genuinely dead wiring is therefore bounded by the decay window (or, for a hook
+  that died mid-call, the moment capture contradicts its `working` claim) plus N
+  non-corroborating edges. The last hook claim is daemon memory on the
+  hook-liveness entry, not a re-read of `@agent_source`, which a demoting or
+  decayed capture write flips to `capture` while the hook claim still stands.
+  Daemonless tiers rely on `install-hooks --check` for broken-wiring detection. Rationale (round-2): hook
   wiring dies
   silently by design (F28 wrapper exits 0 when the binary is missing; users
   reinstall agent configs), and without demotion a broken-wiring pane holds wrong

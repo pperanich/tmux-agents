@@ -581,6 +581,89 @@ fn hook_liveness_demotion_unguards_then_hook_resumes() {
     );
 }
 
+// ---------------------------------------------------------------------------------------------
+// 4b. The working-claim carve-out (issue #10): the same stale-hook setup as test 4, except the
+//     hook's last claim is `working` and the stored state still agrees. Those edges are a working
+//     agent's own output, so they must NOT demote however many arrive, and `@agent_source` must
+//     stay `hook` (the option pair `tma doctor` reads for its `hook_demoted` warning).
+// ---------------------------------------------------------------------------------------------
+
+/// Comfortably past the default `demote_edges` of 5, which is what the old rule would have taken.
+const WORKING_CARVE_OUT_EDGES: usize = 7;
+
+#[test]
+fn a_stale_working_hook_claim_survives_a_long_tool_call() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("t20b");
+    let (pane, pid) = new_shell_session(&s, "s1");
+    let names = process_names_toml(&s, "s1", pid);
+    write_manifest(
+        &s,
+        &format!(
+            "min_engine_version = \"0.1\"\n\
+         [identity]\nprocess_names = [{names}]\n\
+         [hooks]\ncovers = [\"working\", \"idle\", \"blocked\", \"lifecycle\"]\n\
+         [[hooks.map]]\nevent = \"UserPromptSubmit\"\nclaim = {{ state = \"working\" }}\n\
+         [capture]\nvisible = [\"working\", \"idle\", \"blocked\"]\n\
+         [[rules]]\nstate = \"idle\"\npriority = 100\n\
+         region = \"tail_lines(50)\"\nmatch = {{ contains = \"tma-idle-marker\" }}\n",
+        ),
+    );
+
+    let _daemon = spawn_daemon(&s, PINNED_SWEEP);
+    s.expect_status("clients", "1");
+    wait_quiescent(&s);
+
+    fire(
+        &s,
+        "agent",
+        "UserPromptSubmit",
+        &pane,
+        r#"{"session_id":"sess-1"}"#,
+    );
+    assert!(
+        wait_opt(&s, &pane, "@agent_state", "working"),
+        "hook stamps working{}",
+        s.forensics(&[&pane])
+    );
+    let demotions0 = s.status_u64("demotions");
+    wait_quiescent(&s);
+
+    // Age the claim past `hook_decay_secs` WITHOUT settling it: this is minute two of one tool
+    // call, so the hooks' last word is still `working` and so is the stored state.
+    let stale = now_secs() - 1000;
+    s.set_opt(&pane, "@agent_evidence_at", &stale.to_string());
+    s.set_opt(&pane, "@agent_since", &stale.to_string());
+    s.set_opt(&pane, "@agent_stamped_at", &stale.to_string());
+
+    // Feed well past `demote_edges` output bursts with no hook in between. None matches the `idle`
+    // rule, so every capture holds and the counter is the only thing that could move. The
+    // contradiction capture each edge triggers is what makes the edge count observable.
+    let mut captures = s.status_u64("on_demand_captures");
+    for _ in 0..WORKING_CARVE_OUT_EDGES {
+        burst(&s, &pane, "echo tma-work-marker");
+        captures = wait_captures_ge(&s, captures + 1);
+    }
+    wait_quiescent(&s);
+
+    assert_eq!(
+        s.status_u64("demotions"),
+        demotions0,
+        "a working agent's own output must not demote it{}",
+        s.forensics(&[&pane])
+    );
+    s.expect_status("demoted", "0");
+    assert_eq!(
+        s.get(&pane, "#{@agent_source}"),
+        "hook",
+        "the hook stamp is still guarded, so doctor reports hook_demoted: false"
+    );
+}
+
 // --- 5. skip_state_update freeze: a capture of a history-overlay pane must NOT read `blocked`. ---
 
 /// Generic mechanism (a synthetic `skip_state_update` rule): a screen with both a blocked marker and

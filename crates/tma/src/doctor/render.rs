@@ -322,8 +322,9 @@ pub(super) fn render_text(r: &Report) -> String {
         if a.hook_demoted {
             out.push_str(
                 "       demoted: this pane registered through a hook but its current state came \
-                 from capture — its hooks have stopped firing (agent restarted without the \
-                 wiring, or the wrapper is gone)\n",
+                 from capture: output kept arriving while its hooks claimed idle or blocked (or \
+                 while capture had contradicted a working claim), with no hook event across \
+                 `[daemon] demote_edges` edges. Check the wiring with `tma install-hooks --check`\n",
             );
         }
         if let Some(model) = &a.model {
@@ -621,8 +622,8 @@ mod tests {
         let mut report = sample_report();
         let text = render_text(&report);
         assert!(
-            text.contains("demoted:") && text.contains("stopped firing"),
-            "the demotion is named per pane: {text}"
+            text.contains("demoted:") && text.contains("tma install-hooks --check"),
+            "the demotion is named per pane, with what to run about it: {text}"
         );
         report.agents[0].hook_demoted = false;
         assert!(!render_text(&report).contains("demoted:"));

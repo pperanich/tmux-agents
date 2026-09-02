@@ -24,8 +24,8 @@ use crate::debug::fnv1a64;
 use crate::identity::{self, PaneIdentity, Registration};
 use crate::manifests::LoadedManifest;
 
-/// Default demotion threshold (config `[daemon] demote_edges`): consecutive activity edges with no
-/// hook-fresh stored claim (see [`CaptureState::note_edge`]) after which a hook-capable pane's
+/// Default demotion threshold (config `[daemon] demote_edges`): consecutive COUNTING activity edges
+/// (see [`CaptureState::note_edge`] for the two that do not count) after which a hook-capable pane's
 /// coverage goes suspect. Five, not three, because one long tool call legitimately emits several
 /// active→quiet edges (streaming pauses) with no hook between (hooks fire at Pre/PostToolUse, not
 /// mid-stream); a lower threshold would falsely demote a live pane.
@@ -43,6 +43,13 @@ struct PaneHook {
     edges_since_hook: u32,
     /// `true` once `edges_since_hook >= DEMOTE_EDGES`: capture verdicts write unguarded.
     demoted: bool,
+    /// The state the pane's most recent hook event claimed, `None` until one arrives. Held here
+    /// rather than read off `@agent_source`, which a demoting or decayed capture write flips to
+    /// `capture` while the hook's claim is still the newest thing the hooks said.
+    last_hook_claim: Option<AgentState>,
+    /// `true` once a non-`working` verdict landed over a `working` hook claim: the wiring said
+    /// working, the screen says otherwise, so output is evidence again. Cleared by every hook event.
+    working_claim_contradicted: bool,
     /// A monotone touch stamp for the [`MAX_TRACKED`] eviction (loop-iteration counter).
     touched: u64,
 }
@@ -126,12 +133,19 @@ impl CaptureState {
         self.demote_edges = demote_edges;
     }
 
-    /// A hook event arrived for `pane` (proof its hooks are live): reset the edge counter and restore
-    /// guarded behaviour. Called from the socket handler after the shared stamp applies.
-    pub fn on_hook_event(&mut self, pane: &str) {
-        if let Some(h) = self.hooks.get_mut(pane) {
-            h.edges_since_hook = 0;
-            h.demoted = false;
+    /// A hook event arrived for `pane` (proof its hooks are live): reset the edge counter, restore
+    /// guarded behaviour, and record what the event claimed. `claimed` is the mapped state when the
+    /// caller's manifests resolve one, `None` for an event that carries no state claim (a subagent
+    /// edge, an agent this daemon has no manifest for), which leaves the previous claim standing.
+    /// The claim drives [`CaptureState::note_edge`]'s working-agent carve-out, so it is tracked even
+    /// for a pane no edge has been seen on yet. Called from the socket handler per hook event.
+    pub fn on_hook_event(&mut self, pane: &str, claimed: Option<AgentState>) {
+        let entry = self.entry_mut(pane);
+        entry.edges_since_hook = 0;
+        entry.demoted = false;
+        entry.working_claim_contradicted = false;
+        if claimed.is_some() {
+            entry.last_hook_claim = claimed;
         }
     }
 
@@ -239,8 +253,14 @@ impl CaptureState {
             // event (inside the `hook_decay` window) is proof the wiring is alive (a streaming pause,
             // not a dead hook), so it must not count. `prev` is already in hand, so no round-trip.
             let hook_fresh = is_hook_fresh(prev.as_ref(), now, self.cfg.hook_decay_ms());
+            // The second mitigation (issue #10): the stored state, which the counter reads as the
+            // standing verdict on a `working` hook claim. Anything but `working` means some
+            // producer has already contradicted that claim, so output counts again.
+            let stored_working = prev
+                .as_ref()
+                .is_some_and(|p| p.state == AgentState::Working);
             let demoted = if hook_capable {
-                self.note_edge(&edge.pane, hook_fresh)
+                self.note_edge(&edge.pane, hook_fresh, stored_working)
             } else {
                 false
             };
@@ -353,13 +373,40 @@ impl CaptureState {
     }
 
     /// Record one activity edge against a hook-capable pane's counter; returns whether it is now
-    /// demoted, and bounds the map. When `hook_fresh` (a still-fresh stored hook claim), the edge
-    /// does NOT advance the counter (the wiring is proven live), but the entry is still touched for
-    /// eviction ranking and its demotion state returned unchanged.
-    fn note_edge(&mut self, pane: &str, hook_fresh: bool) -> bool {
+    /// demoted, and bounds the map. Two carve-outs hold the counter instead of advancing it, both
+    /// leaving the entry touched for eviction ranking and its demotion state unchanged:
+    ///
+    /// - `hook_fresh`: a still-fresh stored hook claim, so the wiring is proven live.
+    /// - the pane's last hook claim was `working` and nothing has contradicted it. A working agent
+    ///   is expected to keep painting for as long as its tool call runs, so its own output is not
+    ///   evidence the wiring died (issue #10). `stored_working` carries this edge's stored state:
+    ///   anything but `working` is the contradiction that ends the carve-out, since only a
+    ///   non-hook producer could have moved the pane off the hook's claim.
+    fn note_edge(&mut self, pane: &str, hook_fresh: bool, stored_working: bool) -> bool {
+        let threshold = self.demote_edges;
+        let entry = self.entry_mut(pane);
+        if !stored_working {
+            entry.working_claim_contradicted = true;
+        }
+        let hook_says_working =
+            entry.last_hook_claim == Some(AgentState::Working) && !entry.working_claim_contradicted;
+        if hook_fresh || hook_says_working {
+            return entry.demoted;
+        }
+        entry.edges_since_hook = entry.edges_since_hook.saturating_add(1);
+        if entry.demoted || entry.edges_since_hook < threshold {
+            return entry.demoted;
+        }
+        entry.demoted = true;
+        self.demotions += 1;
+        true
+    }
+
+    /// The pane's hook-liveness entry, created if absent, touched for eviction ranking, and evicting
+    /// the least-recently-touched entry when a new pane would push the map past [`MAX_TRACKED`].
+    fn entry_mut(&mut self, pane: &str) -> &mut PaneHook {
         self.clock += 1;
         let clock = self.clock;
-        // Evict the least-recently-touched entry if inserting a new pane would exceed the cap.
         if !self.hooks.contains_key(pane) && self.hooks.len() >= MAX_TRACKED {
             if let Some(oldest) = self
                 .hooks
@@ -372,21 +419,13 @@ impl CaptureState {
         }
         let entry = self.hooks.entry(pane.to_string()).or_default();
         entry.touched = clock;
-        if hook_fresh {
-            // A live hook claim: this edge is not evidence of dead wiring. Hold the counter.
-            return entry.demoted;
-        }
-        entry.edges_since_hook = entry.edges_since_hook.saturating_add(1);
-        if !entry.demoted && entry.edges_since_hook >= self.demote_edges {
-            entry.demoted = true;
-            self.demotions += 1;
-        }
-        entry.demoted
+        entry
     }
 
-    /// The number of panes currently demoted: the daemon's live broken-hook-wiring signal (hooks
-    /// stopped firing while output continued). `tma install-hooks --check` is the static detector for
-    /// the daemonless tiers.
+    /// The number of panes currently demoted: the daemon's live suspect-hook-wiring signal (output
+    /// kept arriving on a pane whose hooks are not claiming to be working, with no hook event across
+    /// `demote_edges` edges). `tma install-hooks --check` is the static detector for the daemonless
+    /// tiers.
     fn demoted_now(&self) -> usize {
         self.hooks.values().filter(|h| h.demoted).count()
     }
@@ -503,28 +542,33 @@ fn is_hook_fresh(prev: Option<&StampedState>, now: u64, decay_ms: u64) -> bool {
 mod tests {
     use super::*;
 
+    /// A stale edge on a pane whose hooks are not claiming `working`: the counting kind.
+    fn stale_edge(cs: &mut CaptureState, pane: &str) -> bool {
+        cs.note_edge(pane, false, false)
+    }
+
     #[test]
     fn demotes_after_n_edges_and_hook_event_resets() {
         let mut cs = CaptureState::new(FoldConfig::default(), DEMOTE_EDGES);
-        // The first DEMOTE_EDGES-1 edges do not demote (default DEMOTE_EDGES = 5). None is
-        // hook-fresh, so every edge counts.
+        // The first DEMOTE_EDGES-1 edges do not demote (default DEMOTE_EDGES = 5). No hook claim
+        // at all and none hook-fresh, so every edge counts.
         for _ in 0..DEMOTE_EDGES - 1 {
-            assert!(!cs.note_edge("%1", false));
+            assert!(!stale_edge(&mut cs, "%1"));
         }
         assert_eq!(cs.demoted_now(), 0);
         // The DEMOTE_EDGES-th edge crosses the threshold.
-        assert!(cs.note_edge("%1", false));
+        assert!(stale_edge(&mut cs, "%1"));
         assert_eq!(cs.demoted_now(), 1);
         assert_eq!(cs.demotions, 1);
         // A hook event resets the counter and restores guarded behaviour.
-        cs.on_hook_event("%1");
+        cs.on_hook_event("%1", Some(AgentState::Idle));
         assert_eq!(cs.demoted_now(), 0);
         // The counter restarts: a full DEMOTE_EDGES fresh edges are needed to re-demote (no
         // double count off the pre-reset accrual).
         for _ in 0..DEMOTE_EDGES - 1 {
-            assert!(!cs.note_edge("%1", false));
+            assert!(!stale_edge(&mut cs, "%1"));
         }
-        assert!(cs.note_edge("%1", false));
+        assert!(stale_edge(&mut cs, "%1"));
         assert_eq!(cs.demotions, 2, "re-demotion counted once, not per-edge");
     }
 
@@ -536,7 +580,10 @@ mod tests {
         // count.
         let mut cs = CaptureState::new(FoldConfig::default(), DEMOTE_EDGES);
         for _ in 0..DEMOTE_EDGES * 3 {
-            assert!(!cs.note_edge("%1", true), "a hook-fresh edge never demotes");
+            assert!(
+                !cs.note_edge("%1", true, false),
+                "a hook-fresh edge never demotes"
+            );
         }
         assert_eq!(cs.demoted_now(), 0);
         assert_eq!(cs.demotions, 0);
@@ -545,10 +592,98 @@ mod tests {
         // Once the hook claim goes stale (edges arrive non-fresh), counting resumes from zero and
         // the pane demotes after the full threshold — the fresh edges left no residue.
         for _ in 0..DEMOTE_EDGES - 1 {
-            assert!(!cs.note_edge("%1", false));
+            assert!(!stale_edge(&mut cs, "%1"));
         }
-        assert!(cs.note_edge("%1", false));
+        assert!(stale_edge(&mut cs, "%1"));
         assert_eq!(cs.demoted_now(), 1);
+    }
+
+    #[test]
+    fn a_working_hook_claim_holds_the_counter_through_a_long_tool_call() {
+        // Issue #10: one tool call longer than the decay window repaints the pane for minutes with
+        // no hook in between (they fire at Pre/PostToolUse). The hook's last word is `working` and
+        // the stored state still agrees, so none of that output counts against the wiring.
+        let mut cs = CaptureState::new(FoldConfig::default(), DEMOTE_EDGES);
+        cs.on_hook_event("%1", Some(AgentState::Working));
+        for _ in 0..DEMOTE_EDGES * 3 {
+            assert!(
+                !cs.note_edge("%1", false, true),
+                "a working agent's own output never demotes it"
+            );
+        }
+        assert_eq!(cs.demoted_now(), 0);
+        assert_eq!(cs.demotions, 0);
+        assert_eq!(cs.hooks.get("%1").map(|h| h.edges_since_hook), Some(0));
+    }
+
+    #[test]
+    fn an_idle_hook_claim_still_demotes_on_stale_edges() {
+        // The other half of the rule: output arriving on a pane the hooks call idle IS a
+        // contradiction, so the counter runs exactly as it did before issue #10.
+        let mut cs = CaptureState::new(FoldConfig::default(), DEMOTE_EDGES);
+        cs.on_hook_event("%1", Some(AgentState::Idle));
+        for _ in 0..DEMOTE_EDGES - 1 {
+            assert!(!stale_edge(&mut cs, "%1"));
+        }
+        assert!(stale_edge(&mut cs, "%1"));
+        assert_eq!(cs.demoted_now(), 1);
+    }
+
+    #[test]
+    fn a_capture_verdict_contradicting_the_working_claim_resumes_counting() {
+        // The dead-hook case the carve-out must not hide: the agent finishes, capture publishes a
+        // non-working verdict over the `working` hook claim, and the hooks stay silent. From that
+        // edge on, output counts again and the pane demotes on the full threshold.
+        let mut cs = CaptureState::new(FoldConfig::default(), DEMOTE_EDGES);
+        cs.on_hook_event("%1", Some(AgentState::Working));
+        for _ in 0..DEMOTE_EDGES * 2 {
+            assert!(!cs.note_edge("%1", false, true));
+        }
+        for _ in 0..DEMOTE_EDGES - 1 {
+            assert!(!stale_edge(&mut cs, "%1"), "counting restarts from zero");
+        }
+        assert!(stale_edge(&mut cs, "%1"));
+        assert_eq!(cs.demoted_now(), 1);
+        // The contradiction sticks: a later edge that again sees `working` does not re-arm the
+        // carve-out, since only a hook event may vouch for the wiring.
+        assert!(cs.note_edge("%1", false, true));
+    }
+
+    #[test]
+    fn a_hook_event_clears_the_counter_demotion_and_the_contradiction() {
+        let mut cs = CaptureState::new(FoldConfig::default(), DEMOTE_EDGES);
+        cs.on_hook_event("%1", Some(AgentState::Working));
+        for _ in 0..DEMOTE_EDGES {
+            stale_edge(&mut cs, "%1");
+        }
+        assert_eq!(cs.demoted_now(), 1);
+        cs.on_hook_event("%1", Some(AgentState::Working));
+        let entry = cs.hooks.get("%1").expect("tracked");
+        assert_eq!(entry.edges_since_hook, 0);
+        assert!(!entry.demoted);
+        assert!(!entry.working_claim_contradicted);
+        // And the carve-out is armed again for the next tool call.
+        for _ in 0..DEMOTE_EDGES * 2 {
+            assert!(!cs.note_edge("%1", false, true));
+        }
+        assert_eq!(cs.demoted_now(), 0);
+    }
+
+    #[test]
+    fn an_event_with_no_state_claim_leaves_the_previous_one_standing() {
+        // A subagent edge (or an agent this daemon has no manifest for) proves the wiring runs but
+        // asserts no state: it resets the counter without forgetting that the agent is working.
+        let mut cs = CaptureState::new(FoldConfig::default(), DEMOTE_EDGES);
+        cs.on_hook_event("%1", Some(AgentState::Working));
+        cs.on_hook_event("%1", None);
+        assert_eq!(
+            cs.hooks.get("%1").and_then(|h| h.last_hook_claim),
+            Some(AgentState::Working)
+        );
+        for _ in 0..DEMOTE_EDGES * 2 {
+            assert!(!cs.note_edge("%1", false, true));
+        }
+        assert_eq!(cs.demoted_now(), 0);
     }
 
     /// A minimal stored claim for the decay-window decision: only source + evidence_at matter here.
@@ -600,18 +735,23 @@ mod tests {
     }
 
     #[test]
-    fn hook_event_for_untracked_pane_is_a_noop() {
+    fn hook_event_for_untracked_pane_records_its_claim() {
+        // A pane can take its first hook before its first edge (the tool call that follows is what
+        // draws one), so the claim has to be recorded even with nothing tracked yet.
         let mut cs = CaptureState::new(FoldConfig::default(), DEMOTE_EDGES);
-        cs.on_hook_event("%99"); // never edged; must not panic or create an entry
+        cs.on_hook_event("%99", Some(AgentState::Working));
         assert_eq!(cs.demoted_now(), 0);
-        assert!(cs.hooks.is_empty());
+        assert_eq!(
+            cs.hooks.get("%99").and_then(|h| h.last_hook_claim),
+            Some(AgentState::Working)
+        );
     }
 
     #[test]
     fn tracked_map_is_bounded() {
         let mut cs = CaptureState::new(FoldConfig::default(), DEMOTE_EDGES);
         for i in 0..(MAX_TRACKED + 100) {
-            cs.note_edge(&format!("%{i}"), false);
+            stale_edge(&mut cs, &format!("%{i}"));
         }
         assert!(
             cs.hooks.len() <= MAX_TRACKED,

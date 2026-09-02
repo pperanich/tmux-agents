@@ -11,9 +11,10 @@ use std::time::{Duration, Instant};
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
 use rustix::io::Errno;
 
+use tma_core::{AgentState, Manifest};
 use tma_runtime::capture::CaptureState;
 use tma_runtime::config::{self, Config};
-use tma_runtime::event::EventOutcome;
+use tma_runtime::event::{map_event, EventOutcome, Mapped};
 use tma_runtime::ipc::{self, Inbound, ACK, NAK};
 use tma_runtime::manifests::LoadedManifest;
 use tma_tmux::control::{self, ControlPool, ProbeOutcome};
@@ -547,10 +548,13 @@ fn apply_hook_event(
     capture: &mut CaptureState,
     ev: &ipc::Frame,
 ) -> bool {
-    // The hook fired for this pane: its wiring is alive, so clear any demotion before the manifest
-    // lookup (even an event for an unknown agent proves the pane's hooks run).
-    capture.on_hook_event(&ev.pane);
-    let Some(lm) = manifests.iter().find(|m| m.name == ev.agent) else {
+    // The hook fired for this pane: its wiring is alive, so clear any demotion before anything else
+    // (even an event for an unknown agent proves the pane's hooks run). The claimed state rides
+    // along so the edge counter can tell a working agent's own output from silent wiring.
+    let found = manifests.iter().find(|m| m.name == ev.agent);
+    let claimed = found.and_then(|lm| hook_claimed_state(&ev.kind, &ev.payload, &lm.manifest));
+    capture.on_hook_event(&ev.pane, claimed);
+    let Some(lm) = found else {
         return false; // agent unknown to THIS daemon: NAK so the client direct-stamps
     };
     let now = tma_runtime::now_ms();
@@ -571,6 +575,17 @@ fn apply_hook_event(
         now,
     );
     outcome == EventOutcome::Applied
+}
+
+/// The state a hook event claims, for the hook-liveness counter: the mapped state when the manifest
+/// maps this event to one, `Idle` for a registration (which stamps idle), and `None` for an event
+/// that asserts no state, which leaves the pane's previous claim standing.
+fn hook_claimed_state(kind: &str, payload: &str, manifest: &Manifest) -> Option<AgentState> {
+    match map_event(kind, payload, manifest) {
+        Mapped::State { state, .. } => Some(state),
+        Mapped::Register => Some(AgentState::Idle),
+        _ => None,
+    }
 }
 
 /// Server-restart check (on the reconcile path): `true` only when the live `#{pid}` differs from the

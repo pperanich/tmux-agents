@@ -10,6 +10,24 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **A pane running one long tool call is no longer reported as having lost its hook wiring**
+  ([#10](https://github.com/pperanich/tmux-agents/issues/10)). Hooks fire at the edges of a tool
+  call, not during it, so a `cargo test` that runs for minutes leaves the daemon with an aging
+  `working` claim while the spinner keeps drawing. Past the `[fold] hook_decay_secs` window those
+  repaints counted as activity the hooks had failed to explain, and five of them demoted the pane:
+  `tma doctor` printed `demoted:` and claimed the wiring was gone, `--exit-code` failed, and the
+  status line went red until the tool call returned. An activity edge no longer advances the
+  demotion counter while the pane's last hook claim is `working`, because a working agent's own
+  output is the expected shape of a working agent. Output still counts when the hooks claim `idle`
+  or `blocked`, when they have claimed nothing, and from the moment a capture verdict contradicts a
+  `working` claim, which is what a hook that dies mid-call looks like as soon as the agent settles.
+  Genuinely dead wiring is still caught, one decay window later than before at worst. The
+  `demoted:` line no longer asserts that hooks have stopped firing, since the daemon cannot tell
+  that apart from a long tool call, and it now names `tma install-hooks --check` as the thing to
+  run.
+
 ## [0.5.8] - 2026-09-01
 
 ### Changed
