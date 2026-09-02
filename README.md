@@ -155,14 +155,3 @@ Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or
 [MIT license](LICENSE-MIT) at your option. Unless you explicitly state
 otherwise, any contribution intentionally submitted for inclusion in this work
 shall be dual licensed as above, without any additional terms or conditions.
-
-## Credits
-
-`tma` is an independent design, but two MIT-licensed projects validated the
-approach and are worth crediting for the ideas they demonstrate: `tmux-agent`
-(`ta`) by Trent Davies, for the layered hook-then-screen evidence model and the
-picker ergonomics; and `tmux-agent-sidebar` by hiroppy, for tmux pane options as
-the public state bus, the stable hook-wrapper pattern, the subagent
-pane-ownership guard, and focus-hook signal nudges. No code, manifests, or
-fixtures were copied from either; all detection rules are authored from
-first-party captured evidence.

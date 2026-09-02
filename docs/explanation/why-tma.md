@@ -5,8 +5,9 @@ than one hits the same failure: an agent goes blocked on a permission prompt in
 some background window and sits there for twenty minutes while you work in
 another session, unaware. The state you need is on a screen nobody is looking at.
 
-Three designs answer that, and tma is the third. This page is the comparison and
-the one architectural choice that follows from it.
+There are two ways to answer that: replace the multiplexer, or read the one you
+already run. tma takes the second. This page is the comparison and the one
+architectural choice that follows from it.
 
 ## Replace the multiplexer
 
@@ -27,39 +28,14 @@ through declarative per-agent rules, and arbitrate between evidence sources.
 Everything built to support that (PTY ownership, session persistence, pane
 management) tmux already provides.
 
-## Two projects that each solved half
-
-Two MIT-licensed projects kept tmux and each demonstrated one half of what tma
-needs.
-
-**`tmux-agent` (`ta`, by Trent Davies)** is a one-shot stateless CLI with an
-embedded fuzzy picker, invoked from a keybinding. It shows
-that the layered evidence model works with no resident process at all: a
-hook-stamped tmux option beats a screen scrape, which beats a pane title. Its
-hook installer writes Claude Code hooks that shell out to stamp a tmux option
-directly, which is the daemonless path running in the wild. Its detection rules
-live in Rust source, so tuning one is a recompile, and its hooks are wired for a
-single agent with no notion of what a given agent's hooks do and do not cover.
-
-**`tmux-agent-sidebar` (by hiroppy)** is a tmux plugin plus a persistent sidebar.
-It shows hook-driven ingress with tmux pane
-options as the public bus, and several patterns tma adopts outright: a stable
-wrapper script the agent config points at, so the agent's config never names the
-binary and a missing binary is quiet rather than broken; one tested resolver for
-state priority; a guard against an agent's subagents clobbering the parent's row,
-since they share `$TMUX_PANE` and fire hooks carrying a foreign session id; and
-signal nudges from tmux focus hooks for instant refresh without a daemon. Its
-limit is discovery: a pane is an agent only if a hook stamped it, so an agent
-with no hooks to install cannot exist for it.
-
 ## Where tma sits
 
-tma occupies the union neither of those covers. Agent-agnostic discovery, a
-process walk plus per-agent manifests, means a hookless agent is detected anyway
-from its process and its screen. Hook integration means a cooperative agent
-reports state the instant it changes instead of a poll later. Cross-session
-navigation means the picker lists and jumps to agents anywhere on the server, not
-only in the session you are attached to.
+tma keeps tmux and adds three things to it. Agent-agnostic discovery, a process
+walk plus per-agent manifests, means a hookless agent is detected anyway from its
+process and its screen. Hook integration means a cooperative agent reports state
+the instant it changes instead of a poll later. Cross-session navigation means
+the picker lists and jumps to agents anywhere on the server, not only in the
+session you are attached to.
 
 The three tiers stack rather than compete: one-shot commands work alone, hooks
 cut latency to zero for the agents that have them, and the daemon is strictly
