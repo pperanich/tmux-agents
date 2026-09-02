@@ -39,7 +39,9 @@ pub use render::{
     render_quota_advisory, render_remove, render_summary, set_pane_option, summary_string,
     unset_pane_option, Guard, Publish, QuotaStamp, StampCommand, SummaryScope,
 };
-pub use row::{is_done, sort_rank, AgentRow, PendingCall, QuotaLabel, RepoLabel, Selector, StateToken};
+pub use row::{
+    is_done, sort_rank, AgentRow, PendingCall, QuotaLabel, RepoLabel, Selector, StateToken,
+};
 pub use seen::{seen_by_input, ClientView};
 pub use snapshot::{PaneSnapshot, ProcInfo};
 pub use stamp::{ReadResult, StampedState};
