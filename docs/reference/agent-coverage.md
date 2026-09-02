@@ -75,20 +75,53 @@ so the percent is sound, but not a quantity either "tokens in context" or
 "tokens spent" describes. Until a live `token_count` reading settles it
 (ACTIONS.md open question 6), Codex panes carry a gauge and no count.
 
-Nothing here is a spend or cost figure. tma stamps no cumulative usage and ships
-no pricing table; `@agent_tokens` is a level, not a total, and adding it up
-across turns means nothing.
+`@agent_tokens` is a level, not a total, and adding it up across turns means
+nothing. tma still computes no usage total and ships no pricing table.
 
 tma also records each pane's model name in `@agent_model`, taken from the hook
 registration payload where the agent sends one: Claude's `SessionStart`, Codex's
 session hooks (a common `model` input field), and Cursor's `sessionStart` each
 carry `model` as a top-level string, stamped last-write-wins on the
 registration-class event (a pane's model changes only via the agent's own
-switcher). Codex additionally keeps `@agent_model` fresh from the rollout tail's
-`turn_context` record as a fallback; the hook and tail write the same value and do
-not fight. Gemini, OpenCode, and pi send no model in their hook payloads, so their
-panes carry no `@agent_model`. The label feeds `tma doctor`'s recognized-model
-line: a model no `[telemetry.windows]` entry names is reported, not warned about.
+switcher). Two context channels keep it fresh from a payload they already read:
+Codex's rollout tail from its `turn_context` record, and Claude's statusline from
+`model.id` (which is nested in an object, so the registration path's top-level
+read cannot reach it). All of them write the same value and do not fight. Gemini,
+OpenCode, and pi send no model in their hook payloads, so their panes carry no
+`@agent_model`. The label feeds `tma doctor`'s recognized-model line: a model no
+`[telemetry.windows]` entry names is reported, not warned about.
+
+## Account quota, and the one cost figure
+
+Beside the per-pane gauge, two channels publish an **account-wide** rate-limit
+reading in a payload tma already receives: Claude's statusline
+`rate_limits.{five_hour,seven_day,spend_limit}` and Codex's rollout
+`rate_limits.{primary,secondary}`. tma stamps the window closest to exhausted as
+`@agent_quota_pct` with its `@agent_quota_window` token, plus
+`@agent_quota_resets_at` where the channel states one. Context is per-pane and a
+`/compact` away from recoverable; the quota is shared by every pane on the
+account and is not, which is what makes it the number that decides whether
+starting a sixth agent is worth it.
+
+The absence rules are the context lane's, reused verbatim: a missing
+`rate_limits` block is IGNORED, never treated as a clear. It is absent for
+API-key auth, absent before the agent's first API response, and dropped per
+window once that window's `resets_at` passes, so a payload without one says
+nothing about the account. The stored reading stays and ages via
+`@agent_quota_at`.
+
+Claude also publishes `cost.total_cost_usd`, which tma stamps as
+`@agent_cost_usd`. This is the one exception to the no-cost posture and it is a
+narrow one: the figure is the vendor's own live estimate for the **current
+session**, stamped as stated and never recomputed. tma reports which pane, right
+now. It does not aggregate cost across sessions or over time —
+[`ccusage`](https://ccusage.com) is the tool that answers "how much since
+Monday". Gemini, OpenCode, pi and Cursor publish no cost figure, so their panes
+carry none.
+
+Anthropic's own note applies to the number and travels with it: on a Max or Pro
+subscription the session cost "isn't relevant for billing purposes", and it is an
+estimate at list price rather than the bill.
 
 ## OpenCode API lane
 
