@@ -378,20 +378,76 @@ pub fn daemon_answers(paths: &Paths) -> bool {
     UnixStream::connect(&paths.socket).is_ok()
 }
 
+/// How long [`lock_is_free`] keeps retrying an open that failed for want of a file descriptor,
+/// and how long it waits between tries. A full `cargo test --workspace` run, or a box under real
+/// fd pressure, can push a process to its `RLIMIT_NOFILE` ceiling for a few milliseconds at a time;
+/// that is a fact about this process, not about the lock, so it is worth waiting out rather than
+/// answering from.
+const LOCK_OPEN_RETRIES: u32 = 10;
+const LOCK_OPEN_RETRY_DELAY: Duration = Duration::from_millis(20);
+
+/// Whether an `open` failure describes a temporary shortage of file descriptors rather than
+/// anything about the lock file. Those are worth retrying; every other error is an answer.
+///
+/// `EMFILE`/`ENFILE` have no stable [`std::io::ErrorKind`] of their own (they arrive as the
+/// unmatchable `Uncategorized`), so they are recognised by errno. `EINTR` and `EAGAIN` do map to
+/// stable kinds, and mean the same thing here: ask again.
+fn is_transient_open_error(err: &std::io::Error) -> bool {
+    if matches!(
+        err.kind(),
+        std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+    ) {
+        return true;
+    }
+    match err.raw_os_error() {
+        Some(code) => {
+            let errno = Errno::from_raw_os_error(code);
+            errno == Errno::MFILE || errno == Errno::NFILE
+        }
+        None => false,
+    }
+}
+
 /// Whether the single-instance flock is currently unheld — the "no daemon owns this server" test a
-/// respawn needs. Takes the lock only to drop it again, and never creates the file.
+/// respawn needs. Takes the lock only to release it again, and never creates the file.
 ///
 /// A MISSING lock file is the only trivially-free case: nothing can hold an flock on a file that is
-/// not there. Every other open failure (a directory in the lock's place, a permission the 0700
-/// runtime dir should never have) says the state is unknown, and unknown reads as HELD — a false
-/// "free" makes [`stop_daemon_at`] report a stop that did not happen and race a replacement against
-/// a daemon still owning the server.
+/// not there. A transient want of file descriptors ([`is_transient_open_error`]) is retried for up
+/// to [`LOCK_OPEN_RETRIES`] × [`LOCK_OPEN_RETRY_DELAY`] before being answered at all: it says
+/// nothing about the lock, and under fd pressure treating it as an answer made [`stop_daemon_at`]
+/// wait out its whole budget and report a stop timeout for a daemon that had already gone. Every
+/// other open failure (a directory in the lock's place, a permission the 0700 runtime dir should
+/// never have) says the state is unknown, and unknown reads as HELD: a false "free" makes
+/// [`stop_daemon_at`] report a stop that did not happen and race a replacement against a daemon
+/// still owning the server.
+///
+/// A lock this function took is released EXPLICITLY rather than by dropping the fd. Both do release
+/// it, but `LOCK_UN` releases at a point in the program rather than at a point in the runtime's
+/// cleanup, and this function is a PROBE: every caller expects it to have left no trace by the time
+/// it returns. `stop_daemon_at` polls it in a loop and `lock_is_free` is the only place in the tree
+/// that takes a flock it does not intend to keep, so paying one syscall to make the release
+/// unambiguous is worth it. The suite already carries one macOS observation of a close-release not
+/// being seen as free by an immediate retry (see `stop_daemon_at`'s polling, and the test below).
 fn lock_is_free(lock: &Path) -> bool {
-    let file = match std::fs::OpenOptions::new().write(true).open(lock) {
-        Ok(f) => f,
-        Err(err) => return err.kind() == std::io::ErrorKind::NotFound,
+    let mut retries_left = LOCK_OPEN_RETRIES;
+    let file = loop {
+        match std::fs::OpenOptions::new().write(true).open(lock) {
+            Ok(f) => break f,
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => return true,
+            Err(err) if retries_left > 0 && is_transient_open_error(&err) => {
+                retries_left -= 1;
+                std::thread::sleep(LOCK_OPEN_RETRY_DELAY);
+            }
+            Err(_) => return false,
+        }
     };
-    rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok()
+    let free =
+        rustix::fs::flock(&file, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok();
+    if free {
+        // Ours for the moment; hand it back before the fd closes (see above).
+        let _ = rustix::fs::flock(&file, rustix::fs::FlockOperation::Unlock);
+    }
+    free
 }
 
 // ---- the upgrade-restart decision -------------------------------------------------------
@@ -1235,22 +1291,34 @@ mod tests {
             lock_is_free(&paths.lock),
             "an existing but unflocked lock file is free"
         );
-        assert!(
-            rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive).is_ok()
-        );
+        // THIS is the acquisition that flaked once under `cargo test --workspace` (and has never
+        // flaked standalone). It is not contention: `scratch_paths` keys on pid and nanoseconds, so
+        // no other test or process can name this file, and the only thing that had touched its lock
+        // is the `lock_is_free` probe on the line above, which released by closing its fd.
+        //
+        // The close-release window was the obvious suspect and it does NOT hold up: driving that
+        // exact sequence 960k times across 16 threads on the machine that saw the flake produced
+        // zero failures. So the mechanism is still unidentified, and the errno is the evidence that
+        // was missing the first time. Report it rather than asserting bare `is_ok()`, so the next
+        // occurrence names itself instead of costing another bisect.
+        if let Err(errno) =
+            rustix::fs::flock(&held, rustix::fs::FlockOperation::NonBlockingLockExclusive)
+        {
+            panic!(
+                "could not take a flock on a scratch lock nothing else can name: {errno:?} \
+                 (raw {}). Nothing here holds it but the probe above, which releases explicitly.",
+                errno.raw_os_error()
+            );
+        }
         assert!(
             !lock_is_free(&paths.lock),
             "a held flock is the whole point: this must read as owned"
         );
 
-        // Release EXPLICITLY rather than by dropping the fd. Two reasons, both learned the hard
-        // way. Measured on macOS, an flock released by closing its fd is not always visible as free
-        // to an immediate re-lock in the same process (which is why `stop_daemon_at` polls rather
-        // than probing once). And polling `lock_is_free` to wait that out is not a sound way to
-        // assert release, because this function deliberately reports EVERY non-`NotFound` open
-        // failure as held: under a full-suite run the process can be near its fd ceiling, `open`
-        // fails with EMFILE, and the poll can never satisfy. That combination made this test flake
-        // under `cargo test --workspace` while passing standalone every time.
+        // Release EXPLICITLY rather than by dropping the fd, for the reason above. Polling
+        // `lock_is_free` to wait a close-release out would not be a sound substitute either: it
+        // reports every non-`NotFound`, non-transient open failure as held, so a poll can be
+        // satisfied by nothing at all.
         rustix::fs::flock(&held, rustix::fs::FlockOperation::Unlock)
             .expect("unlock the flock we took");
         assert!(
@@ -1266,6 +1334,40 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&paths.dir);
+    }
+
+    /// The classification [`lock_is_free`] retries on. It is worth pinning directly, because the
+    /// two cases that matter most (`EMFILE`, `ENFILE`) have no [`std::io::ErrorKind`] of their own
+    /// and arrive as `Uncategorized`: written as a `kind()` match they would silently fall through
+    /// to "unknown, therefore held", which is the misreading the retry exists to prevent.
+    #[test]
+    fn only_a_shortage_of_descriptors_is_worth_retrying() {
+        for errno in [Errno::MFILE, Errno::NFILE, Errno::INTR, Errno::AGAIN] {
+            let err = std::io::Error::from_raw_os_error(errno.raw_os_error());
+            assert!(
+                is_transient_open_error(&err),
+                "{errno:?} says nothing about the lock, so it must be retried rather than answered"
+            );
+        }
+        for errno in [Errno::NOENT, Errno::ACCESS, Errno::PERM, Errno::ISDIR] {
+            let err = std::io::Error::from_raw_os_error(errno.raw_os_error());
+            assert!(
+                !is_transient_open_error(&err),
+                "{errno:?} is a fact about the lock path; retrying it would only add latency"
+            );
+        }
+        // The EMFILE/ENFILE half specifically: prove they really do lack a matchable kind, so this
+        // test fails (rather than quietly becoming a tautology) if std ever categorizes them.
+        for errno in [Errno::MFILE, Errno::NFILE] {
+            let err = std::io::Error::from_raw_os_error(errno.raw_os_error());
+            assert!(
+                !matches!(
+                    err.kind(),
+                    std::io::ErrorKind::Interrupted | std::io::ErrorKind::WouldBlock
+                ),
+                "{errno:?} is recognised by errno, not by kind"
+            );
+        }
     }
 
     /// The losing racer in concurrent `--restart` must not report failure on someone else's
