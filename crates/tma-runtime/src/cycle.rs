@@ -123,6 +123,8 @@ pub fn run_cycle_with(
     };
     let mut procs: Option<Vec<ProcInfo>> = None;
     let mut did_produce = false;
+    // The stampede claim, chained onto the first stamp this cycle commits (see that call site).
+    let poll_claim = render::set_server_option(opt::LAST_POLL, &now.to_string());
     // `-F` conditional-write support, probed lazily before the first producer write and cached for
     // the server's life; an unsupported server degrades to advisory plain writes (a clobber race).
     let mut guarded_supported: Option<bool> = None;
@@ -350,7 +352,16 @@ pub fn run_cycle_with(
         // Resolve (and cache) `-F` support once, right before the first producer write.
         let guarded =
             *guarded_supported.get_or_insert_with(|| stamp::guarded_writes_supported(tmux, &panes));
-        match stamp::apply(tmux, &panes, &rec.pane_id, &plan, guarded) {
+        // The stampede claim rides the first stamp that lands, so a producing cycle costs ONE
+        // `set-option` invocation per pane and not one more for the hint (every invocation forces
+        // a full redraw of every attached client). Value and meaning are unchanged: this cycle's
+        // `now`, claimed only once a stamp has actually committed.
+        let trailing: &[render::StampCommand] = if did_produce {
+            &[]
+        } else {
+            std::slice::from_ref(&poll_claim)
+        };
+        match stamp::apply_with(tmux, &panes, &rec.pane_id, &plan, guarded, trailing) {
             Ok(()) => {}
             Err(e) if is_dead_pane(&e) => {
                 // Pane died between its capture and this stamp write: treat as removed, drop no
@@ -437,7 +448,14 @@ pub fn run_cycle_with(
             None => stamp::stored_pane_state(p),
         });
     if !summary_cmds.is_empty() {
-        tmux.apply(&summary_cmds)?;
+        match tmux.apply(&summary_cmds) {
+            Ok(()) => {}
+            // One pane killed since this cycle's `list-panes` fails the whole chained reconcile.
+            // Skip it on the same terms as the per-pane writes: the rollups are convergent, so the
+            // next cycle rewrites them, and aborting here would blank every row over one dead pane.
+            Err(e) if is_dead_pane(&e) => {}
+            Err(e) => return Err(e),
+        }
     }
 
     // Context pull path: tail each Codex `file-tail` pane's rollout and stamp the gauge. The
@@ -470,11 +488,6 @@ pub fn run_cycle_with(
                 SeenClear::Deferred => report.deferred_seen = raised,
             }
         }
-    }
-
-    // Claim the cycle for the stampede guard once we have actually produced.
-    if did_produce {
-        let _ = tmux.set_server_option(opt::LAST_POLL, &now.to_string());
     }
 
     // Deterministic order for surfaces: blocked → working → idle → unknown, then locator.

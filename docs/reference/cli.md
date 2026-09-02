@@ -164,6 +164,16 @@ styling. As `#(tma status)` in `status-right` it is the required ambient
 driver: each `status-interval` run refreshes the stamped pane options and
 renders the counts.
 
+Refreshing is a write, and tmux redraws every attached client in full on any
+option write, even an unchanged one. An idle agent costs nothing (the cycle
+reuses its stamp and writes no option); a working agent costs one redraw per
+cycle. The status string itself is cheaper and independent: tmux writes only the
+status row, and only when the expanded string changes, so a static
+`status-right` costs nothing and a `%H:%M` clock costs one row write per minute.
+[Show agents in your status
+line](../how-to/show-agents-in-your-status-line.md#what-a-refresh-costs) has the
+details and the tmux version note.
+
 ```
 Usage: tma status [OPTIONS]
 ```

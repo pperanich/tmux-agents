@@ -166,6 +166,22 @@ pub fn apply(
     plan: &StampPlan,
     guarded: bool,
 ) -> Result<(), TmuxError> {
+    apply_with(tmux, all_panes, pane_id, plan, guarded, &[])
+}
+
+/// [`apply`] with `trailing` commands chained into the SAME tmux invocation. Every `set-option`
+/// tmux executes ends in an unguarded full redraw of every attached client, so a caller with one
+/// more option to write pays for it here rather than in a second invocation (the poll cycle's
+/// `@tma_last_poll` claim). `trailing` commits last, after the tuple and both rollups, so it never
+/// reorders anything a reader keys on.
+pub fn apply_with(
+    tmux: &Tmux,
+    all_panes: &[PaneRecord],
+    pane_id: &str,
+    plan: &StampPlan,
+    guarded: bool,
+    trailing: &[StampCommand],
+) -> Result<(), TmuxError> {
     let mut cmds = match plan {
         StampPlan::Publish(p) if guarded => render::render_publish(p),
         StampPlan::Publish(p) => {
@@ -187,6 +203,7 @@ pub fn apply(
     };
     cmds.push(window_summary_command(all_panes, pane_id, target_state));
     cmds.push(session_summary_command(all_panes, pane_id, target_state));
+    cmds.extend(trailing.iter().cloned());
 
     tmux.apply(&cmds)
 }

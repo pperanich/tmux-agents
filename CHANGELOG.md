@@ -28,6 +28,33 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   that apart from a long tool call, and it now names `tma install-hooks --check` as the thing to
   run.
 
+- **A working agent made tmux redraw every attached client twice per poll cycle instead of once.**
+  tmux ends any successful `set-option` in an unconditional full redraw of every attached client,
+  including a `@user` option written with the value it already held, and a cycle that stamped a pane
+  issued two separate invocations: the chained pane stamp, then the server-scoped `@tma_last_poll`
+  stampede claim. The claim now rides the stamp chain, so one working agent costs one redraw. Nothing
+  about the hint changed: same key, same epoch-ms value, still claimed only once a stamp has actually
+  committed, still bucketed to seconds by the guard that reads it. An idle fleet was already free and
+  stays free, since a cycle that stamps nothing writes nothing, hint included. This matters because a
+  full redraw re-emits the whole grid (measured at about 4 KB over a live agent TUI, so 8 KB for
+  the pair, against 165 bytes for a status-row tick) and puts every wrapped line back through the
+  terminal's own wrap logic, which is where a terminal that disagrees with tmux about a glyph's
+  width visibly re-wraps a pane. [Show agents in your status
+  line](docs/how-to/show-agents-in-your-status-line.md#what-a-refresh-costs) now states what the
+  driver costs, links the upstream report
+  ([anthropics/claude-code#91182](https://github.com/anthropics/claude-code/issues/91182)), and
+  points at tmux 3.7 for its wide-character redraw fixes. The getting-started tour also had tmux's
+  `status-interval` default wrong: it is 15 s, not 10.
+
+- **A pane killed part-way through a poll cycle could fail the whole cycle.** The end-of-cycle
+  `@agent_summary` reconciliation writes every drifting window and session in one chained tmux
+  invocation, and one dead pane in that chain made tmux exit non-zero, which the cycle passed
+  straight to its caller: `tma wait --pane` on a pane you killed reported that tmux error and exited
+  1 instead of reporting the vanish and exiting 3. Every per-pane write in the same cycle already
+  treated a pane dying between `list-panes` and its own write as one pane lost rather than a reason
+  to abort; the reconciliation now does too. The rollups are convergent, so the next cycle rewrites
+  whatever this one skipped.
+
 ## [0.5.8] - 2026-09-01
 
 ### Changed
