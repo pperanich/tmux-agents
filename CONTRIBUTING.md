@@ -22,6 +22,14 @@ CI runs.
 | `mise run lint` | clippy with warnings denied, `cargo fmt --check`, and a `cargo doc` build so a dead rustdoc link fails here. |
 | `mise run fmt` | `cargo fmt --all`. |
 
+One trap if you narrow that to a single package. The integration suites outside the
+`tma` package spawn the built `tma` binary rather than linking it, and `cargo test -p
+tma-daemon` rebuilds the test binary but not `tma`: run it after editing `tma-runtime`
+and you are testing the previous build. The harness compares the binary's mtime against
+every source under `crates/` and panics on a stale one, so this reports itself instead of
+passing green. Run `cargo build --workspace` first, or just use the whole-workspace
+command above. `TMA_TEST_BIN_NO_STALE_CHECK` skips the scan.
+
 ## Where things live
 
 Eight crates under `crates/`, stacked so the dependency graph enforces the

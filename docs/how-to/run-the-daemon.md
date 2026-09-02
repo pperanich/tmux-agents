@@ -144,7 +144,7 @@ daemon:  running (<tmpdir>/tma/<server>.sock)
          version 0.1.0 differs from this CLI (0.2.0) — `tma reload` only re-reads config and manifests; run `tma daemon --restart` to put this build in its place
 ```
 
-The fix is one verb:
+With the automatic restart turned off, the fix is one verb:
 
 ```
 $ tma daemon --restart
@@ -161,19 +161,25 @@ clean exit), and it starts a daemon even when none was running.
 resident daemon of another build, on the same confirm-before-changing terms as
 their config writes.
 
-To have it happen without being asked, opt in:
+Most of the time you will not have to run it at all. `[daemon]
+restart_on_upgrade` is on by default, so an older resident daemon is replaced
+before your next surface (`ls`, `status`, the picker, `watch`, `wait`,
+`subscribe`), on the next `tma event` a hook fires, and on `tma daemon --ensure`.
+It never starts a daemon that was not running: that is `autostart`'s job, and it
+is still off.
+
+**Strictly newer replaces older**: equal never restarts, and an older `tma` never
+touches a newer daemon, so two installs sharing a server cannot take turns
+evicting each other's daemon. See
+[Configuration](../reference/configuration.md#restart_on_upgrade) for the full
+rule and its fail-safes.
+
+To turn it off and replace daemons by hand instead:
 
 ```toml
 [daemon]
-restart_on_upgrade = true
+restart_on_upgrade = false
 ```
-
-Then the `--ensure` that your keybindings launcher (and `autostart`) already runs
-replaces an older resident daemon with the newer build. **Strictly newer replaces
-older**: equal never restarts, and an older `tma` never touches a newer daemon, so
-two installs sharing a server cannot take turns evicting each other's daemon. See
-[Configuration](../reference/configuration.md#restart_on_upgrade) for the full
-rule and its fail-safes.
 
 ### What a restart costs, and what a skewed daemon costs
 

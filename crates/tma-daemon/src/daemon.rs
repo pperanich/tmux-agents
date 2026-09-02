@@ -1,8 +1,9 @@
 //! The event-hub daemon: socket, single-instance lock, wire protocol, control-mode client pool,
 //! on-demand capture, and notification dispatch. Strictly additive: with none running `tma event`
 //! direct-stamps and every one-shot works unchanged. `tma daemon` runs the loop; `--ensure` is the
-//! idempotent launcher and `--restart` puts THIS build in a resident daemon's place (the opt-in
-//! `[daemon] restart_on_upgrade` does that automatically, but only ever from a strictly newer build). Socket + lock are keyed by a hash of the server's `#{socket_path}`, which
+//! idempotent launcher and `--restart` puts THIS build in a resident daemon's place (`[daemon]
+//! restart_on_upgrade`, on by default, does that automatically, but only ever from a strictly newer
+//! build). Socket + lock are keyed by a hash of the server's `#{socket_path}`, which
 //! `tma event` recomputes identically, so two servers never share a daemon; an `flock` enforces
 //! single-instance. Events apply through the *same* guarded-stamp adapter the direct path uses; a
 //! same-`#{socket_path}` restart is caught by a startup-`#{pid}` recheck and exits rather than
@@ -29,7 +30,9 @@ mod serve;
 mod subscribers;
 mod sys;
 
-use lifecycle::{ensure_running, restart_running, run_foreground, run_intermediate, stop_running};
+use lifecycle::{
+    ensure_running, evict_only, restart_running, run_foreground, run_intermediate, stop_running,
+};
 use sys::ensure_dir;
 
 /// Report the user manifests the load skipped. The daemon's log is its stderr (the detached stages
@@ -61,6 +64,9 @@ pub struct DaemonOpts {
     pub restart: bool,
     /// `true` for `--stop`: stop the daemon for this server and leave it stopped.
     pub stop: bool,
+    /// Suppress the eviction path's stderr. Set on the `tma event` route only: a hook's stderr can
+    /// surface inside the agent's own UI, so nothing may be written there.
+    pub quiet: bool,
     pub server: tma_tmux::tmux::Server,
     pub manifest_dir: Option<PathBuf>,
     /// The loaded config, used by the foreground loop for the fold + daemon knobs + notify command
@@ -92,6 +98,22 @@ pub struct DaemonOpts {
     pub shutdown_delay_ms: Option<u64>,
 }
 
+/// The replace-only upgrade check (`[daemon] restart_on_upgrade`), against a server socket path the
+/// CALLER has already resolved. Replaces a live, strictly older daemon with this build and starts
+/// nothing when none is running.
+///
+/// It takes `socket_path` rather than resolving it because the bin runs this before `tma event`,
+/// which needs the same path for its own daemon delivery: resolving is a `tmux display-message`
+/// round trip, and a hook fires on every tool call. `run_cli`'s own resolution is deliberately not
+/// reused here for that reason. The decision itself stays in one place ([`lifecycle::evict_only`],
+/// which `--ensure` also reaches).
+///
+/// No `ensure_dir`: with no runtime dir there is no lock, and with no lock there is nothing to
+/// replace. Best-effort throughout; the caller discards the code.
+pub fn evict_older_daemon(socket_path: &str, opts: &DaemonOpts) -> ExitCode {
+    evict_only(&ipc::paths_for(socket_path), opts)
+}
+
 /// Dispatch `tma daemon`. `--ensure` is the idempotent launcher; without it we run the
 /// foreground loop.
 pub fn run_cli(opts: DaemonOpts) -> ExitCode {
@@ -107,10 +129,12 @@ pub fn run_cli(opts: DaemonOpts) -> ExitCode {
     };
     let paths = ipc::paths_for(&socket_path);
     if let Err(err) = ensure_dir(&paths.dir) {
-        eprintln!(
-            "tma: cannot create daemon dir {}: {err}",
-            paths.dir.display()
-        );
+        if !opts.quiet {
+            eprintln!(
+                "tma: cannot create daemon dir {}: {err}",
+                paths.dir.display()
+            );
+        }
         return ExitCode::FAILURE;
     }
 

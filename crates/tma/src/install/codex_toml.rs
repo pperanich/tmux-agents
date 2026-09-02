@@ -83,13 +83,32 @@ pub(super) fn edit_codex_uninstall(old: &str) -> Result<String, String> {
     Ok(doc.to_string())
 }
 
-/// Whether Codex's `notify` is installed AND references the current wrapper (used by `--check`).
-/// A missing key, a foreign program, or a stale wrapper path is drift.
+/// Whether Codex's `notify` is installed AND reaches the current wrapper (used by `--check`). A
+/// missing key, a foreign program, or a reference that resolves to a different file (or to nothing)
+/// is drift. Unlike [`codex_notify_matches`], which asks whether a re-install would be a no-op,
+/// this asks whether the wiring WORKS: an absolute path an older tma wrote and the bare name this
+/// build would write are the same file, and reporting that as stale is noise.
 pub(super) fn codex_notify_ok(text: &str, wrapper: &Path) -> bool {
-    text.parse::<toml_edit::DocumentMut>()
-        .ok()
-        .and_then(|doc| doc.get("notify").map(|i| codex_notify_matches(i, wrapper)))
-        .unwrap_or(false)
+    let Ok(doc) = text.parse::<toml_edit::DocumentMut>() else {
+        return false;
+    };
+    let Some(item) = doc.get("notify") else {
+        return false;
+    };
+    if codex_notify_matches(item, wrapper) {
+        return true;
+    }
+    let Some(arr) = item.as_array() else {
+        return false;
+    };
+    let tail_ok = arr.len() == 3
+        && arr.get(1).and_then(|v| v.as_str()) == Some(CODEX_AGENT)
+        && arr.get(2).and_then(|v| v.as_str()) == Some(CODEX_NOTIFY_EVENT);
+    tail_ok
+        && arr
+            .get(0)
+            .and_then(|v| v.as_str())
+            .is_some_and(|prog| super::paths::same_wrapper_file(prog, wrapper))
 }
 
 /// Read Codex's `config.toml`: absent ⇒ empty text (an empty TOML document), unreadable ⇒ an error
@@ -113,7 +132,9 @@ pub(super) fn codex_hooks_events(manifest: &tma_core::Manifest) -> Vec<String> {
 pub(super) const CODEX_TRUST_NOTICE: &str =
     "codex trust gate: the hooks.json entries stay INERT until \
 you open codex, run /hooks, and trust the tma-hook entries (codex silently skips untrusted \
-hooks). The notify signal works without this step.";
+hooks). Codex pins that trust to the exact command string, so an install that CHANGES it (an \
+[install] wrapper_ref switch, a moved wrapper) has to be trusted again. The notify signal works \
+without this step.";
 
 #[cfg(test)]
 mod tests {

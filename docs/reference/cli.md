@@ -669,11 +669,13 @@ Usage: tma daemon [OPTIONS]
 | `--stop` | Stop the daemon for this server and leave it stopped. Detection falls back to the poll tier, which is strictly additive. Exit 0 when nothing was running. Mutually exclusive with `--ensure` and `--restart`. |
 
 A resident daemon keeps the detection code it started with, so `--restart` is how
-an upgraded `tma` takes effect ([`reload`](#tma-reload) re-reads config and
-manifests, not the binary). It is unconditional in both directions: run it from
-the older binary to go deliberately back. The opt-in
-[`[daemon] restart_on_upgrade`](configuration.md#restart_on_upgrade) does the
-same automatically, but only ever from a strictly newer build.
+an upgraded `tma` takes effect on demand ([`reload`](#tma-reload) re-reads config
+and manifests, not the binary). It is unconditional in both directions: run it
+from the older binary to go deliberately back.
+[`[daemon] restart_on_upgrade`](configuration.md#restart_on_upgrade), on by
+default, does the same automatically before every surface and every `tma event`,
+but only ever from a strictly newer build and only when a daemon is already
+running.
 
 The daemon is stopped with SIGTERM and never escalated to SIGKILL: it reaps its
 `tmux -C` control clients only on a clean exit, so a killed daemon would leave one
@@ -681,7 +683,8 @@ behind per monitored session. A daemon that will not take SIGTERM is reported
 rather than killed, and `--restart` exits nonzero without starting a replacement.
 That report is not "nothing changed": the SIGTERM has been delivered and stands,
 so the daemon exits as soon as it unwedges. Start one again with `--ensure` once
-it has gone (with the default `autostart = false`, nothing else will).
+it has gone: with the default `autostart = false` nothing else will, since
+`restart_on_upgrade` only ever replaces a daemon and never starts one.
 
 `--restart` also exits nonzero when the replacement was spawned but never
 answered on the socket, which means it failed to come up — the usual cause is

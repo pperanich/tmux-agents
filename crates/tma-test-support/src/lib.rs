@@ -105,6 +105,16 @@ fn short_hash(s: &str) -> String {
 /// still own `<target>/<profile>/.cargo-lock`; a nested `cargo build` can then wait on its parent
 /// forever. `cargo test --workspace` builds the `tma` package before running tests. A single-package
 /// test must build it explicitly once.
+///
+/// Because nothing here can rebuild, a STALE binary is the hazard: `cargo test -p tma-daemon` after
+/// editing `tma-runtime` recompiles the test binary and not `tma`, so the suite spawns yesterday's
+/// build and passes against code that is no longer there. That is a false green, and worse than a
+/// failure. So the binary's mtime is compared against the newest source in the workspace and a
+/// stale one panics with the command that fixes it, the same way a missing one does.
+///
+/// Set `TMA_TEST_BIN_NO_STALE_CHECK` (to anything) to skip the scan: a CI job that has just built
+/// the workspace already knows the answer, and a `mtime`-less or read-only checkout should not be
+/// blocked by it.
 pub fn tma_bin() -> String {
     static PATH: OnceLock<String> = OnceLock::new();
     PATH.get_or_init(find_tma_bin).clone()
@@ -122,14 +132,70 @@ fn find_tma_bin() -> String {
     p.push("tma");
     let bin = p.to_string_lossy().into_owned();
 
+    let profile = if release { " --release" } else { "" };
     if !Path::new(&bin).is_file() {
-        let profile = if release { " --release" } else { "" };
         panic!(
             "tma integration-test binary is missing at {bin}.\n\
              Build it first: `cargo build -p tma{profile}`, or run `cargo test --workspace`."
         );
     }
+    if let Some(newer) = newer_source_than(&bin) {
+        panic!(
+            "tma integration-test binary at {bin} is STALE: {} is newer than it.\n\
+             This suite spawns that binary, so it would test a build your sources no longer \
+             describe.\n\
+             Rebuild first: `cargo build --workspace{profile}`, or run `cargo test --workspace`.\n\
+             (Set TMA_TEST_BIN_NO_STALE_CHECK to skip this check.)",
+            newer.display()
+        );
+    }
     bin
+}
+
+/// The first workspace source found newer than `bin`, or `None` when the binary is current.
+///
+/// One directory walk over `crates/*/`, counting `*.rs` and `Cargo.toml` only. Deliberately not a
+/// Cargo invocation: see [`tma_bin`] for why nothing here may shell out to Cargo. Anything
+/// unreadable (a missing mtime, a permission) yields `None` rather than a panic, so this can only
+/// ever report a staleness it positively observed.
+fn newer_source_than(bin: &str) -> Option<PathBuf> {
+    if std::env::var_os("TMA_TEST_BIN_NO_STALE_CHECK").is_some() {
+        return None;
+    }
+    let built = std::fs::metadata(bin).ok()?.modified().ok()?;
+    // `CARGO_MANIFEST_DIR` is `<workspace>/crates/tma-test-support`; two levels up is the root.
+    let crates = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .to_path_buf();
+    let mut stack = vec![crates];
+    while let Some(dir) = stack.pop() {
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            if kind.is_dir() {
+                // `target/` under a crate dir is build output, never a source of truth.
+                if path.file_name().map(|n| n == "target").unwrap_or(false) {
+                    continue;
+                }
+                stack.push(path);
+                continue;
+            }
+            let is_source = path.extension().map(|e| e == "rs").unwrap_or(false)
+                || path.file_name().map(|n| n == "Cargo.toml").unwrap_or(false);
+            if !is_source {
+                continue;
+            }
+            if entry.metadata().ok().and_then(|m| m.modified().ok()) > Some(built) {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// The fail-closed gate: `TMA_REQUIRE_TMUX=1` flips a missing tmux/python3 from a green skip into a

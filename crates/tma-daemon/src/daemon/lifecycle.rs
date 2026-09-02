@@ -43,9 +43,9 @@ pub(super) fn ensure_running(paths: &Paths, opts: &DaemonOpts) -> ExitCode {
                     return ExitCode::FAILURE;
                 }
             } else if opts.config.daemon.restart_on_upgrade {
-                // A daemon holds the lock. Opt-in only: replace it if this build is strictly newer.
+                // A daemon holds the lock. Replace it if and only if this build is strictly newer.
                 drop(lock);
-                evict_older(paths, opts);
+                evict_older(paths, opts, opts.quiet);
             }
             // else: lock held ⇒ a daemon is already up ⇒ idempotent no-op.
             ExitCode::SUCCESS
@@ -55,13 +55,39 @@ pub(super) fn ensure_running(paths: &Paths, opts: &DaemonOpts) -> ExitCode {
     }
 }
 
+/// The replace-only half of the upgrade check on its own, behind [`super::evict_older_daemon`].
+/// The bin's dispatch runs it before every user surface and before `tma event`, so an upgraded tma
+/// is picked up on the next command instead of at the next tmux server restart.
+///
+/// It never spawns a daemon where none was running: bringing one up unasked is [`ensure_running`]'s
+/// job, gated on `[daemon] autostart`. With no daemon holding the lock this is a no-op.
+pub(super) fn evict_only(paths: &Paths, opts: &DaemonOpts) -> ExitCode {
+    match std::fs::OpenOptions::new()
+        .create(false)
+        .write(true)
+        .open(&paths.lock)
+    {
+        // Taking the lock means nothing is running, and starting one is not this path's job.
+        Ok(lock) if flock_nb(&lock) => ExitCode::SUCCESS,
+        Ok(lock) => {
+            drop(lock);
+            evict_older(paths, opts, opts.quiet);
+            ExitCode::SUCCESS
+        }
+        // No lock file at all (this server never had a daemon), or an unreadable one. Nothing to do.
+        Err(_) => ExitCode::SUCCESS,
+    }
+}
+
 /// `[daemon] restart_on_upgrade`: on the branch where a daemon already holds the lock, replace it if
 /// and only if this build is STRICTLY NEWER than the one it recorded. The whole rule (and the
 /// reasoning behind its asymmetry) lives in [`ipc::restart_decision`]; this is the effecting half.
 ///
-/// Best-effort and silent when it declines: `--ensure` runs on every hook and, with autostart on,
-/// before every surface, so it must stay a no-op that costs one lock read.
-fn evict_older(paths: &Paths, opts: &DaemonOpts) {
+/// Best-effort and silent when it declines. It runs from `--ensure` (a tmux server start, or
+/// `autostart` before a surface) and, since the knob became opt-out, from the bin's dispatch before
+/// every user surface and every `tma event`, so it must stay a no-op costing one lock read and one
+/// liveness probe. `quiet` is set on the hook route, whose stderr can surface inside an agent's UI.
+fn evict_older(paths: &Paths, opts: &DaemonOpts, quiet: bool) {
     let RestartDecision::Evict { pid } =
         ipc::upgrade_restart_decision(paths, ipc::VERSION, tma_runtime::now_ms())
     else {
@@ -71,12 +97,13 @@ fn evict_older(paths: &Paths, opts: &DaemonOpts) {
     // against the cooldown, which is exactly the case the cooldown exists for.
     ipc::note_restart(paths, tma_runtime::now_ms());
     match ipc::stop_daemon_at(paths) {
-        StopOutcome::Failed(err) => {
+        StopOutcome::Failed(err) if !quiet => {
             eprintln!("tma: cannot replace the older daemon (pid {pid}): {err}");
         }
+        StopOutcome::Failed(_) => {}
         // Stopped, or it had already gone on its own; either way nothing holds this server now.
         StopOutcome::Stopped | StopOutcome::NotRunning => {
-            if !spawn_detached(opts) {
+            if !spawn_detached(opts) && !quiet {
                 eprintln!("tma: stopped the older daemon but could not spawn its replacement");
             }
         }
@@ -171,6 +198,10 @@ fn await_daemon_up(paths: &Paths) -> bool {
 fn build_daemon_command(opts: &DaemonOpts) -> Option<std::process::Command> {
     let exe = std::env::current_exe().ok()?;
     let mut cmd = std::process::Command::new(exe);
+    // The daemon serves the whole server, and the upgrade check can now spawn it from inside an
+    // agent's hook process, so an inherited `$TMUX_PANE` would name one arbitrary pane for the
+    // daemon's whole life (and for every notify command it runs, which inherit its environment).
+    cmd.env_remove("TMUX_PANE");
     cmd.arg("daemon");
     opts.server.forward_to(&mut cmd);
     if let Some(dir) = &opts.manifest_dir {

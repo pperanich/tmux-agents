@@ -26,7 +26,7 @@ mod watch_session;
 use tma_tmux::{stamp, tmux};
 // Re-import the tier-2 pipeline modules the bin drives (`identity`/`capture` have no bin consumer);
 // the tier-3 `tma daemon` subcommand dispatches into the separate `tma_daemon` crate.
-use tma_runtime::{config, cycle, debug, event, json, manifests};
+use tma_runtime::{config, cycle, debug, event, ipc, json, manifests};
 // The display layer (picker, jump, ls/status surfaces) lives in `tma-ui`; `ansi` is internal to it.
 use tma_ui::{jump, picker, surfaces, watch};
 
@@ -76,6 +76,34 @@ fn main() -> ExitCode {
             cli.config.clone(),
             DaemonMode::Ensure,
         );
+    }
+    // The target server's `#{socket_path}`, resolved AT MOST ONCE for this invocation. Two things
+    // below key on it (the upgrade check, and `tma event`'s daemon delivery) and resolving it is a
+    // `tmux display-message` round trip. A hook fires on every tool call, so the second one is a
+    // cost worth removing; `None` here means no server, which both consumers already handle.
+    let is_event = matches!(cli.command, Some(Command::Event(_)));
+    // `tma event --kind context` is the exception among hook events: that lane stamps the gauge
+    // directly and never speaks to the daemon, so it wants no socket path of its own.
+    let event_delivers = matches!(
+        &cli.command,
+        Some(Command::Event(args)) if args.kind != event::CONTEXT_KIND
+    );
+    let runs_upgrade_check =
+        config.daemon.restart_on_upgrade && upgrade_check_eligible(&cli.command);
+    let server_socket = (runs_upgrade_check || event_delivers)
+        .then(|| ipc::resolve_socket_path(&tmux::Tmux::connect(&server)))
+        .flatten();
+    // The upgrade check (`[daemon] restart_on_upgrade`, on by default), independent of `autostart`:
+    // an upgraded tma replaces the older daemon it finds rather than leaving a stale build serving
+    // until the tmux server next restarts. Replace-only (a user with no daemon running sees
+    // nothing change) and best-effort, so the exit code is discarded like autostart's.
+    if runs_upgrade_check {
+        if let Some(socket_path) = server_socket.as_deref() {
+            let _ = tma_daemon::evict_older_daemon(
+                socket_path,
+                &daemon_opts_for_check(&config, &server, &manifest_dir, &cli.config, is_event),
+            );
+        }
     }
     match cli.command {
         // No subcommand → the picker is the default.
@@ -192,6 +220,7 @@ fn main() -> ExitCode {
             pane: args.pane,
             payload: args.payload,
             server: server.clone(),
+            server_socket,
             manifest_dir,
             notify_from_event: config.notify.from_event,
             notify_commands: config.notify.commands(),
@@ -204,6 +233,8 @@ fn main() -> ExitCode {
             ensure: args.ensure,
             restart: args.restart,
             stop: args.stop,
+            // A typed `tma daemon` always has a terminal to report to.
+            quiet: false,
             server: server.clone(),
             manifest_dir,
             config_path: cli.config,
@@ -360,6 +391,18 @@ fn autostart_eligible(command: &Option<Command>) -> bool {
     )
 }
 
+/// Which subcommands run the replace-only upgrade check: everything [`autostart_eligible`] covers,
+/// plus `event`.
+///
+/// `event` is included precisely because it is not a surface. It is the one tma command a hook
+/// fires unprompted, so on a machine where nobody types `tma` it is the only thing that ever
+/// notices the daemon is a build behind. The management and diagnostic verbs stay out for the same
+/// reason autostart excludes them: `tma daemon` owns the daemon's lifecycle explicitly, and
+/// `doctor` must report what is running rather than change it.
+fn upgrade_check_eligible(command: &Option<Command>) -> bool {
+    autostart_eligible(command) || matches!(command, Some(Command::Event(_)))
+}
+
 /// Run one of the daemon management verbs, reusing the one launcher the `Daemon` arm dispatches so
 /// a chained step cannot diverge from the same command typed by hand. Auto-start discards the exit
 /// code (a spawn failure must never reach the surface); `tma init --daemon` and the restart offers
@@ -377,6 +420,7 @@ fn run_daemon_verb(
         restart: mode == DaemonMode::Restart,
         // The injected launcher exists for the skew-restart offers; stopping is never delegated.
         stop: false,
+        quiet: false,
         server,
         manifest_dir,
         config_path,
@@ -389,6 +433,38 @@ fn run_daemon_verb(
         fake_version: None,
         shutdown_delay_ms: None,
     })
+}
+
+/// The [`tma_daemon::DaemonOpts`] the upgrade check spawns a replacement daemon from. Only the
+/// fields [`tma_daemon::evict_older_daemon`] reaches are meaningful: the target server and the
+/// forwarded `--manifest-dir`/`--config`, which the replacement re-reads for itself, and `quiet`.
+///
+/// `quiet` is set on the `tma event` route and nowhere else: a hook's stderr can surface inside the
+/// agent's own UI, so a failed eviction there must say nothing. A surface keeps its message.
+fn daemon_opts_for_check(
+    config: &config::Config,
+    server: &tmux::Server,
+    manifest_dir: &Option<PathBuf>,
+    config_path: &Option<PathBuf>,
+    quiet: bool,
+) -> tma_daemon::DaemonOpts {
+    tma_daemon::DaemonOpts {
+        ensure: false,
+        restart: false,
+        stop: false,
+        quiet,
+        server: server.clone(),
+        manifest_dir: manifest_dir.clone(),
+        config_path: config_path.clone(),
+        config: config.clone(),
+        status_file: None,
+        probe_cross_session: false,
+        sweep_ms: None,
+        detach_stage2: false,
+        detach_session: false,
+        fake_version: None,
+        shutdown_delay_ms: None,
+    }
 }
 
 /// The [`DaemonLauncher`] handed to the chained steps (`init`, `install-hooks`), with the target
@@ -415,6 +491,64 @@ fn daemon_launcher(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The parsed subcommand for an argv, so the eligibility tests key on what a real invocation
+    /// produces rather than on hand-built variants.
+    fn command_of(argv: &[&str]) -> Option<Command> {
+        let mut args = vec!["tma"];
+        args.extend_from_slice(argv);
+        Cli::try_parse_from(args)
+            .unwrap_or_else(|e| panic!("parse {argv:?}: {e}"))
+            .command
+    }
+
+    /// The upgrade check runs everywhere autostart does, plus `event`, the one tma command a hook
+    /// fires unprompted, and therefore the only thing that notices a stale daemon on a machine
+    /// where nobody types `tma`. The verbs that manage or inspect the daemon stay out of both:
+    /// `tma daemon` owns the lifecycle explicitly, and `doctor` reports rather than changes.
+    #[test]
+    fn the_upgrade_check_covers_the_surfaces_and_the_hook_path() {
+        for argv in [
+            vec![],
+            vec!["ls"],
+            vec!["status"],
+            vec!["jump"],
+            vec!["wait", "--any", "--until", "idle"],
+            vec!["watch"],
+            vec!["subscribe"],
+        ] {
+            let c = command_of(&argv);
+            assert!(autostart_eligible(&c), "{argv:?} is a surface");
+            assert!(upgrade_check_eligible(&c), "{argv:?} runs the check");
+        }
+
+        let event = command_of(&["event", "--agent", "claude", "--kind", "Notification"]);
+        assert!(
+            !autostart_eligible(&event),
+            "a hook must never start a daemon"
+        );
+        assert!(
+            upgrade_check_eligible(&event),
+            "but it may replace one that is a build behind"
+        );
+
+        for argv in [
+            vec!["daemon", "--ensure"],
+            vec!["doctor"],
+            vec!["init"],
+            vec!["install-hooks", "--check"],
+            vec!["install-keys", "--check"],
+            vec!["completions", "bash"],
+            vec!["version"],
+            vec!["reload"],
+        ] {
+            let c = command_of(&argv);
+            assert!(
+                !upgrade_check_eligible(&c),
+                "{argv:?} manages or inspects the daemon; it must not restart one"
+            );
+        }
+    }
 
     /// A `--client` value that is empty or still carries an unexpanded tmux format is not a client
     /// name: it reaches us verbatim from a binding whose context does not format-expand (an

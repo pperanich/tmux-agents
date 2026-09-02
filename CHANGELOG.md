@@ -10,6 +10,50 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.5.8] - 2026-09-01
+
+### Changed
+
+- **An upgraded `tma` now replaces the older daemon it finds, instead of leaving it running until
+  the tmux server restarts.** `[daemon] restart_on_upgrade` defaults to `true`, and the check no
+  longer rides only on `tma daemon --ensure`: it runs before every user surface
+  (`ls`/`status`/`jump`/picker/`watch`/`wait`/`subscribe`) and from `tma event`, independent of
+  `[daemon] autostart`. A daemon keeps the detection code it started with, and a package upgrade
+  touches no running process, so the old arrangement could leave a build from days ago serving a
+  CLI you upgraded this morning, with nothing to tell you. The rule that makes this safe to leave
+  on is unchanged and one-directional: strictly newer replaces older, equal never restarts, both
+  versions must parse, the recorded pid must be alive, and no automatic restart may have fired for
+  this server in the last 60 seconds. It only ever REPLACES: with no daemon running it does
+  nothing, since starting one unasked is still `[daemon] autostart`'s job and that is still off by
+  default. On the `tma event` path it is completely silent, because a hook's stderr can surface
+  inside the agent's own UI. When versions already match it costs one file read and one liveness
+  probe. Opt out with `[daemon] restart_on_upgrade = false`.
+
+- **`[install] wrapper_ref` defaults to `"bare"`,** so `tma install-hooks` writes `tma-hook` into
+  your agent configs rather than the wrapper's absolute path, and one `~/.claude/settings.json`
+  works on every machine you sync it to. The two postures fail very differently, which is what
+  decided this: a bare name that `$PATH` cannot answer is caught at install time, where install
+  refuses and tells you how to fix it, while an absolute path pointing at another machine's home
+  produces no error anywhere and simply never fires. Loud beats silent. Choose
+  `[install] wrapper_ref = "absolute"` (or `--wrapper-ref absolute` for one run) when an agent is
+  launched with a `$PATH` you cannot widen, such as an editor started from the desktop.
+
+  Existing installs are unaffected and need no action. `tma install-hooks --check` and `tma doctor`
+  now judge drift by what a reference RESOLVES to rather than by how it is spelled, so
+  absolute-path entries that still reach the wrapper read as installed, not as stale. Only a
+  reference that resolves to a different file, or to nothing, is reported. If you do run
+  `tma install-hooks --all` to move to the bare form, note that codex pins its `hooks.json` trust
+  to the exact command string: rewritten entries stay inert until you open codex, run `/hooks`, and
+  trust them again. Codex's `notify` channel and every other agent are unaffected.
+
+### Fixed
+
+- **`scripts/release.sh` left `Cargo.lock` at the old version when `RELEASE_SKIP_CHECKS=1` was
+  set.** The step meant to refresh the lock ran `cargo metadata`, which reads the lock and never
+  rewrites it; only the test build the flag skips had been doing the rewrite. The script now runs
+  `cargo update --workspace --offline` and refuses to commit if the lock still names the old
+  version.
+
 ## [0.5.7] - 2026-09-01
 
 ### Changed
@@ -644,7 +688,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.7...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.8...HEAD
+[0.5.8]: https://github.com/pperanich/tmux-agents/compare/v0.5.7...v0.5.8
 [0.5.7]: https://github.com/pperanich/tmux-agents/compare/v0.5.6...v0.5.7
 [0.5.6]: https://github.com/pperanich/tmux-agents/compare/v0.5.5...v0.5.6
 [0.5.5]: https://github.com/pperanich/tmux-agents/compare/v0.5.4...v0.5.5

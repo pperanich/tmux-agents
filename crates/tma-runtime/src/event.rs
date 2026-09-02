@@ -40,6 +40,13 @@ pub struct EventArgs {
     /// `-` reads stdin; a path reads that file; `None` means no payload.
     pub payload: Option<String>,
     pub server: tma_tmux::tmux::Server,
+    /// The target server's `#{socket_path}`, resolved ONCE by the caller. `None` means there is no
+    /// server (or it could not be read), so the daemon-delivery attempt is skipped.
+    ///
+    /// Resolving it costs a `tmux display-message` round trip, and the bin's dispatch already pays
+    /// for one before this call (the upgrade check keys on the same path). A hook fires on every
+    /// tool call, so paying twice is not free.
+    pub server_socket: Option<String>,
     pub manifest_dir: Option<PathBuf>,
     /// `notify.from_event`: daemonless direct-fire opt-in (`TMA_NOTIFY_FROM_EVENT` overrides it).
     pub notify_from_event: bool,
@@ -97,10 +104,10 @@ pub fn run(args: EventArgs) -> ExitCode {
     let tmux = Tmux::connect(&args.server);
 
     // Daemon delivery first: hand the raw event to a running daemon over its per-server socket,
-    // keyed by the same `#{socket_path}` `tma daemon` bound.
-    if let Some(socket_path) = ipc::resolve_socket_path(&tmux) {
+    // keyed by the same `#{socket_path}` `tma daemon` bound and the caller already resolved.
+    if let Some(socket_path) = args.server_socket.as_deref() {
         let sink = DaemonSink {
-            path: ipc::paths_for(&socket_path).socket,
+            path: ipc::paths_for(socket_path).socket,
         };
         if sink.deliver(&pane, &args.agent, &args.kind, &payload) {
             return ExitCode::SUCCESS;

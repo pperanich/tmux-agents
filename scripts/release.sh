@@ -96,8 +96,11 @@ done
 
 stamp_changelog "$version" "$old"
 
-# Rewrites Cargo.lock's workspace entries without building anything.
-cargo metadata --format-version 1 --no-deps >/dev/null
+# Rewrites Cargo.lock's workspace entries to the new version without building anything. This has
+# to be `cargo update`: `cargo metadata` reads the lock but never rewrites it, which left the lock
+# at the old version whenever the test build below was skipped.
+cargo update --workspace --offline --quiet
+grep -q "^version = \"$version\"\$" Cargo.lock || die 'the Cargo.lock bump did not take'
 
 if [ "${RELEASE_SKIP_CHECKS:-0}" = "1" ]; then
 	say 'release.sh: skipping lint and test (RELEASE_SKIP_CHECKS=1)'
