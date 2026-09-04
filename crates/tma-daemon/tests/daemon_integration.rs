@@ -325,10 +325,12 @@ fn wait_for(s: &Scratch, pane: &str, fmt: &str, want: &str, timeout: Duration) -
     }
 }
 
+/// Wait until the daemon socket accepts a connection. A crashed daemon can leave its socket path
+/// behind, so file existence alone is not readiness.
 fn wait_for_socket(s: &Scratch, timeout: Duration) -> Option<PathBuf> {
     let deadline = Instant::now() + timeout;
     loop {
-        if let Some(p) = socket_file(s) {
+        if let Some(p) = socket_file(s).filter(|p| UnixStream::connect(p).is_ok()) {
             return Some(p);
         }
         if Instant::now() >= deadline {
