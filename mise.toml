@@ -27,8 +27,8 @@ run = "cargo fmt --all"
 description = "Draft the CHANGELOG entry for the commits since the last tag (prints; does not write)."
 run = "git cliff --unreleased"
 
-# The release workflow refuses a tag that disagrees with the workspace version, so the bump, the
-# commit and the tag are one step. It stops before the push.
+# The release workflow refuses a tag that disagrees with the workspace version, so setting or
+# verifying the version, committing the release, and tagging are one step. It stops before push.
 [tasks.release]
-description = "Bump the workspace version to <version>, commit it, and tag it (does not push)."
+description = "Set or verify the workspace version, commit release <version>, and tag it (does not push)."
 run = "scripts/release.sh"

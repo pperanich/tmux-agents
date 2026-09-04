@@ -104,9 +104,10 @@ tag and refuses to build a tag that has none, so nothing ships with an empty rel
    subjects. It is a starting point — write the entry from it under `## [Unreleased]`, in terms of
    what a user of tma sees. Machinery commits (`ci`, `chore`, `test`, `refactor`) are dropped from
    the draft on purpose, and a breaking change earns its own entry saying what to re-run.
-2. `mise run release <version>` bumps the workspace version, stamps `[Unreleased]` into
-   `## [<version>] - <date>`, opens a fresh `[Unreleased]`, runs lint and test, then commits and
-   tags. It refuses to start when `[Unreleased]` is empty. Nothing is pushed.
+2. `mise run release <version>` sets the workspace version (or accepts that exact version when a
+   feature already staged its release floor), stamps `[Unreleased]` into `## [<version>] - <date>`,
+   opens a fresh `[Unreleased]`, runs lint and test, then commits and tags. It refuses to start when
+   `[Unreleased]` is empty. Nothing is pushed.
 3. `git push --follow-tags` builds the tarballs and publishes the release.
 
 While the major version is 0, a breaking change bumps the minor.

@@ -1,11 +1,12 @@
 #!/bin/sh
-# Cut a release: bump the workspace version, commit it, and tag it.
+# Cut a release: set the workspace version, commit the release, and tag it.
 #
 #   mise run release 0.1.2
 #
 # The tag is what the release workflow builds from, and it refuses a tag that disagrees with the
-# workspace version — so the bump and the tag belong in one step. Nothing is pushed: this leaves
-# `git push --follow-tags` as the deliberate last move.
+# workspace version. The version may already be staged by a feature that needs to declare its
+# release floor. Nothing is pushed: this leaves `git push --follow-tags` as the deliberate last
+# move.
 #
 # Honours RELEASE_SKIP_CHECKS=1 (skip `mise run lint` and `mise run test`) and RELEASE_BRANCH
 # (default: main).
@@ -62,6 +63,12 @@ workspace_version() {
 	     in_section && /^version = / { gsub(/[",]/, "", $3); print $3; exit }' Cargo.toml
 }
 
+latest_release_version() {
+	tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*.[0-9]*.[0-9]*' 2>/dev/null) ||
+		die 'no prior release tag found'
+	printf '%s\n' "${tag#v}"
+}
+
 [ $# -eq 1 ] || die "usage: release.sh <version>   (e.g. 0.1.2)"
 version=${1#v}
 case "$version" in
@@ -77,24 +84,30 @@ git rev-parse -q --verify "refs/tags/v$version" >/dev/null && die "tag v$version
 
 old=$(workspace_version)
 [ -n "$old" ] || die 'no version found under [workspace.package] in Cargo.toml'
-[ "$old" != "$version" ] || die "the workspace is already at $version"
 
 # Before touching anything: the release workflow refuses a tag whose CHANGELOG section is empty, so
 # find that out here rather than after the commit and tag are already made.
 ./scripts/changelog-section.sh Unreleased >/dev/null ||
 	die 'CHANGELOG.md has nothing under [Unreleased]; write the entry first'
 
-say "release.sh: $old -> $version"
-sed_i "/^\[workspace\.package\]/,/^\[/ s/^version = \"$old\"\$/version = \"$version\"/" Cargo.toml
-[ "$(workspace_version)" = "$version" ] || die 'the Cargo.toml bump did not take'
+if [ "$old" = "$version" ]; then
+	previous=$(latest_release_version)
+	[ "$previous" != "$version" ] || die "v$version is already the latest release"
+	say "release.sh: $previous -> $version (workspace version already staged)"
+else
+	previous=$old
+	say "release.sh: $old -> $version"
+	sed_i "/^\[workspace\.package\]/,/^\[/ s/^version = \"$old\"\$/version = \"$version\"/" Cargo.toml
+	[ "$(workspace_version)" = "$version" ] || die 'the Cargo.toml bump did not take'
+fi
 
 # The docs quote `tma --version` output and the install snippet's tag; a stale sample there reads
 # as the current release to anyone following the page.
 for doc in docs/tutorial/getting-started.md docs/how-to/install-tma.md; do
-	sed_i "s/^tma $old\$/tma $version/; s/TMA_VERSION=v$old/TMA_VERSION=v$version/" "$doc"
+	sed_i "s/^tma $previous\$/tma $version/; s/TMA_VERSION=v$previous/TMA_VERSION=v$version/" "$doc"
 done
 
-stamp_changelog "$version" "$old"
+stamp_changelog "$version" "$previous"
 
 # Rewrites Cargo.lock's workspace entries to the new version without building anything. This has
 # to be `cargo update`: `cargo metadata` reads the lock but never rewrites it, which left the lock

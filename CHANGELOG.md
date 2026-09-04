@@ -19,6 +19,9 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   bottommost Claude activity row. A completion below stale spinner history reads `idle`, while a
   new spinner below an older completion still reads `working`. Custom manifests can use the new
   `last_matching_line` matcher starting in tma 0.5.11 and must declare that engine floor.
+- **`mise run release` rejected a version that a schema change had already staged.** The release
+  task now accepts that exact workspace version and derives the changelog comparison from the
+  latest release tag, while retaining the normal version-bump path.
 
 ## [0.5.10] - 2026-09-02
 
