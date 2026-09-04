@@ -241,8 +241,10 @@ impl<'de> Deserialize<'de> for Region {
     }
 }
 
-/// A screen matcher — leaf text predicates composed via `any`/`all`/`not`. Externally tagged in
-/// TOML (`{ contains = "x" }`, `{ not = { ... } }`); regexes compile at match time, not in the loader.
+/// A screen matcher: leaf text predicates compose via `any`/`all`/`not`, while
+/// `last_matching_line` selects one ordered line before applying another matcher tree. Externally
+/// tagged in TOML (`{ contains = "x" }`, `{ not = { ... } }`); regexes compile at match time, not in
+/// the loader.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Matcher {

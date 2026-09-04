@@ -505,8 +505,12 @@ Live checks against a running fleet of 7 Claude Code panes:
   (`✻ Sautéed for 5m 34s`). Chrome text wraps at narrow widths (drives D4).
 - The body spinner sits at column 0 above the prompt box, cycling the frames `· ✢ ✳ ✶ ✻ ✽`:
   `· Actioning… (4m 16s · ↓ 16.8k tokens)` while working, or a wait line with no gerund
-  (`✻ Waiting for 1 background agent to finish`, `… 1 dynamic workflow to finish`). A finished
-  turn reuses the same glyphs without the ellipsis (`✻ Cogitated for 4m 23s · done 11:34 AM`),
-  which is the only thing separating the two. A background-agent tree renders *below* the status
-  chrome line and pushes the spinner up, so the read window cannot be the mode line's six lines.
+  (`✻ Waiting for 1 background agent to finish`, `… 1 dynamic workflow to finish`). Re-verified
+  2026-09-03: a long turn can leave an old spinner above a newer completion such as
+  `✻ Worked for 12m 8s · done 10:42 AM`, and truncation can put `…` on the completion too. The
+  bottommost activity row decides, and the textual ` · done ` marker excludes a completion. ANSI
+  color cannot decide because capture matching strips it and no-color terminals omit it. Older
+  bare completion rows such as `✻ Sautéed for 5m 34s` remain excluded by their missing ellipsis.
+  A background-agent tree renders *below* the status chrome line and pushes the spinner up, so the
+  read window cannot be the mode line's six lines.
 - Pane user options round-trip: `set-option -p @x v` / `#{@x}` / `-u` all work.
