@@ -10,6 +10,19 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **A completed Claude turn could remain `working` when its old spinner row stayed on screen.**
+  Long turns can leave the orange `✻ Actioning…` row in the capture after Claude appends the gray
+  `✻ Worked for 12m 8s · done 10:42 AM` row. The manifest scanned 30 lines and treated any spinner
+  as live, so the older row beat the idle title and composer forever. It now classifies only the
+  bottommost Claude activity row. A completion below stale spinner history reads `idle`, while a
+  new spinner below an older completion still reads `working`. Custom manifests can use the new
+  `last_matching_line` matcher starting in tma 0.5.11 and must declare that engine floor.
+- **`mise run release` rejected a version that a schema change had already staged.** The release
+  task now accepts that exact workspace version and derives the changelog comparison from the
+  latest release tag, while retaining the normal version-bump path.
+
 ## [0.5.10] - 2026-09-02
 
 ### Added

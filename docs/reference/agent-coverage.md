@@ -178,12 +178,15 @@ Two properties are shared by all six and are the reason the rules are safe:
 
 Codex and cursor anchor on a streaming footer, gemini on its own chrome. Claude used to be the
 exception: it animated a braille spinner in its OSC title, and the title was cheaper to read than
-the screen. That stopped at 2.1.246 — the title is now a static `✳ <task>` in every state, and
+the screen. That stopped at 2.1.246: the title is now a static `✳ <task>` in every state, and
 since the `✳` also drives claude's idle rule, the two states became indistinguishable from the
-title alone. Claude's working anchor is now the body spinner (`· Actioning… (4m 16s · ↓ 16.8k
-tokens)`, or the gerund-less `✻ Waiting for 1 background agent to finish`); the ellipsis is what
-separates it from the completion line, which reuses the same glyphs. The title rule is retained
-for older builds, at a lower priority.
+title alone. Claude now reads the bottommost body row that starts with one of its activity glyphs.
+A live spinner such as `· Actioning… (4m 16s · ↓ 16.8k tokens)` needs an ellipsis and must lack the
+textual ` · done ` marker; a gerund-less `✻ Waiting for 1 background agent to finish` has its own
+predicate. A completion below an old spinner therefore stops the working claim, while a newer
+spinner below completion history remains working. Orange and gray ANSI colors are not signals:
+capture matching strips them, and no-color terminals omit them. The title rule is retained for
+older builds, at a lower priority.
 
 This only ever mattered on capture tier. A hook-wired pane reports `working` directly — but hooks
 fire on tool calls, so a long tool-free stretch (extended thinking, a single long response) leaves

@@ -686,6 +686,14 @@ fn skip_state_update_freezes_and_does_not_read_blocked() {
     }
     let s = Scratch::new_daemon("t20");
     let (pane, pid) = new_shell_session(&s, "s1");
+    // Keep one process in the foreground for both the baseline and target captures. An
+    // interactive shell can transiently report the command it just ran as the foreground; that
+    // correctly invokes the fold's foreground cap, but it is unrelated to history-view freezing.
+    burst(&s, &pane, "exec cat");
+    assert!(
+        common::wait_until(common::POLL_CEILING, || comm_of(pid) == "cat"),
+        "the fixture pane never exec'd cat"
+    );
     let names = process_names_toml(&s, "s1", pid);
     let comm = comm_of(pid);
     write_manifest(

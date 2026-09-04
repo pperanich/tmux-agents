@@ -679,8 +679,9 @@ collision would be permanent (RD4).
 tweak). Sidebar: hook adapters in Rust, no screen rules at all. herdr: screen-rule TOML
 only, identity separate.
 
-**Decision.** One TOML manifest per agent is the complete description of that agent —
-the single registration table D13 demands, drift-tested against parser and docs:
+**Decision.** One TOML manifest per agent is the complete description of that agent: the single
+registration table D13 demands. The parser is drift-tested against the authoritative
+[manifest schema reference](../reference/manifest-schema.md):
 
 ```toml
 min_engine_version = "0.1"            # D11
@@ -716,7 +717,8 @@ state = "blocked"  priority = 100  region = "tail_lines(5)"   # v1 accepts tail_
                                           # bottom_non_empty_lines(N), visible, and title
                                           # (unknown regions are hard-rejected); further
                                           # regions grow from evidence later
-match = { any = [ ... ] }             # contains/regex/line_regex + any/all/not
+match = { any = [ ... ] }             # composable screen matcher; the schema reference owns forms
+                                      # and their engine-version floors
 [details]                             # token spelling/aliases only — state routing is
                                       # normative in AD1 and NOT manifest-overridable
 rate_limit = { aliases = ["ratelimited"] }   # example: alternate spellings an agent's

@@ -553,6 +553,50 @@ fn completed_turn_with_a_spinner_glyph_stays_idle() {
     assert_eq!(fold_verdict(name, None).state, AgentState::Idle);
 }
 
+/// A long turn can leave its orange spinner row in the captured tail after Claude has appended the
+/// gray completion row. The bottommost activity row is the live one: `done HH:MM AM/PM` closes the
+/// turn, while a later orange spinner means a new turn has started. Looking for any spinner in the
+/// 30-line window makes the first screen read working forever and a region-wide `not done` would
+/// break the second.
+#[test]
+fn bottommost_activity_row_decides_if_claude_is_still_working() {
+    let orange_spinner = "\u{1b}[38;5;178m✻\u{1b}[39m \
+                          \u{1b}[38;5;178mActioning…\u{1b}[39m \
+                          \u{1b}[38;5;246m(12m 7s · ↓ 31.2k tokens)\u{1b}[39m";
+    let gray_completion = "\u{1b}[38;5;246m✻\u{1b}[39m \
+                           \u{1b}[38;5;246mWorked for 12m 8s · done 10:42 AM\u{1b}[39m";
+    let composer = "────────────────────────────────────────\n\
+                    ❯ \n\
+                    ────────────────────────────────────────\n\
+                      ⏵⏵ bypass permissions on (shift+tab to cycle)";
+
+    let completed = PaneSnapshot {
+        tail_text: format!("{orange_spinner}\n{gray_completion}\n{composer}\n"),
+        ..synthetic_snapshot()
+    };
+    let completed_eval = engine().evaluate(&completed);
+    assert!(
+        !matched(&completed_eval, rule::WORKING_SPINNER),
+        "the completed activity row below stale spinner history closes the turn"
+    );
+    assert!(
+        !has_state(&completed_eval, AgentState::Working),
+        "a gray `done` row is not working evidence"
+    );
+    assert!(has_state(&completed_eval, AgentState::Idle));
+
+    let working = PaneSnapshot {
+        tail_text: format!("{gray_completion}\n{orange_spinner}\n{composer}\n"),
+        ..synthetic_snapshot()
+    };
+    let working_eval = engine().evaluate(&working);
+    assert!(
+        matched(&working_eval, rule::WORKING_SPINNER),
+        "a live spinner below an older completion remains working"
+    );
+    assert!(has_state(&working_eval, AgentState::Working));
+}
+
 /// Column 0 is the anchor, and it is doing real work: the spinner fixture also contains an
 /// indented tool-output line truncated with the same `…`. Indent it and the rule must go silent.
 #[test]

@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/tma-core", "crates/tma-tmux", "crates/tma-runtime", "crates/tma-daemon", "crates/tma-ui-core", "crates/tma-ui", "crates/tma", "crates/tma-test-support"]
 
 [workspace.package]
-version = "0.5.10"
+version = "0.5.11"
 edition = "2021"
 # The floor the dependency graph already imposes: ratatui 0.30 and its ratatui-core /
 # ratatui-widgets / instability siblings declare 1.88, the highest in the tree.
@@ -22,7 +22,7 @@ unreachable_pub = "warn"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 thiserror = "2"
-# Screen-rule matching (contains/regex/line_regex). The measured detection need N12
+# Screen-rule matching (contains/regex/line ordering). The measured detection need N12
 # anticipated — a pure-core dep, distinct from the deferred UI stack below.
 regex = "1"
 # Safe syscall layer (policy: no direct libc anywhere; all syscalls go through rustix).

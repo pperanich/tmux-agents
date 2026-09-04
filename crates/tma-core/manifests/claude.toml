@@ -1,4 +1,4 @@
-min_engine_version = "0.1"
+min_engine_version = "0.5.11"
 
 [identity]
 process_names = ["claude"]
@@ -195,10 +195,12 @@ match = { line_regex = '^\s*❯ 1\. Yes, I trust this folder' }
 # leaves is the spinner line: a frame glyph at column 0, the gerund, and its ellipsis —
 # `· Actioning… (4m 16s · ↓ 16.8k tokens)`. Frames captured live: · ✢ ✳ ✶ ✻ ✽.
 #
-# A finished turn reuses the same glyphs (`✻ Cogitated for 4m 23s · done 11:34 AM`, and on
-# pre-2.1.2xx builds a bare `✻ Cooked for 5s`) but never the ellipsis, so `…` is the whole
-# discriminator. It has to be tested per line, not per region: a pane routinely shows a finished
-# line in scrollback above a live spinner, so a region-wide `not` would suppress the match.
+# A finished turn reuses the same glyphs in gray (`✻ Cogitated for 4m 23s · done 11:34 AM`, and on
+# pre-2.1.2xx builds a bare `✻ Cooked for 5s`). Long turns can leave an older orange spinner row in
+# the capture after appending that completion. Conversely, a new live spinner can sit below an old
+# completion. The bottommost activity row therefore decides; its explicit `· done ` marker rejects
+# completion even if Claude truncates some other part of that row with `…`. Color is supporting
+# evidence only because capture matching strips ANSI and must also work in no-color terminals.
 #
 # Column 0 is load-bearing. Claude indents assistant prose and tool output by two spaces, and tool
 # output truncates with this same `…` — `claude_working_spinner_w149` carries such a line, so the
@@ -211,7 +213,7 @@ match = { line_regex = '^\s*❯ 1\. Yes, I trust this folder' }
 state = "working"
 priority = 70
 region = "tail_lines(30)"
-match = { line_regex = '^[·✢✳✶✻✽] \S.*…' }
+match = { last_matching_line = { selector = { regex = '^[·✢✳✶✻✽] ' }, predicate = { all = [ { regex = '^[·✢✳✶✻✽] \S.*…' }, { not = { contains = ' · done ' } } ] } } }
 
 # The main thread parked on backgrounded work. Same glyph set, but no gerund and no ellipsis, so
 # the rule above cannot see it. Observed live: `Waiting for 1 background agent to finish` and
@@ -221,7 +223,7 @@ match = { line_regex = '^[·✢✳✶✻✽] \S.*…' }
 state = "working"
 priority = 70
 region = "tail_lines(30)"
-match = { line_regex = '^[·✢✳✶✻✽] Waiting for \d+ [a-z][a-z ]* to finish' }
+match = { last_matching_line = { selector = { regex = '^[·✢✳✶✻✽] ' }, predicate = { regex = '^[·✢✳✶✻✽] Waiting for \d+ [a-z][a-z ]* to finish' } } }
 
 # --- rate limit: the usage-limit auto-continue line ------------------------------------------------
 # Appended, like the rules above, because `tests/claude_manifest.rs` maps rule indices by
