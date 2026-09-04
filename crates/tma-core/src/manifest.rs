@@ -249,9 +249,22 @@ pub enum Matcher {
     Contains(String),
     Regex(String),
     LineRegex(String),
+    /// Find the bottommost line satisfying `selector`, then apply `predicate` to that line alone.
+    /// This lets a manifest classify ordered status rows without a region-wide negative suppressing
+    /// a newer live row because an older completed row remains above it.
+    LastMatchingLine(LastMatchingLine),
     Any(Vec<Matcher>),
     All(Vec<Matcher>),
     Not(Box<Matcher>),
+}
+
+/// The operands of [`Matcher::LastMatchingLine`]. Both are matcher trees so a caller can compose
+/// the line class and its final predicate from the same leaves as an ordinary region matcher.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct LastMatchingLine {
+    pub selector: Box<Matcher>,
+    pub predicate: Box<Matcher>,
 }
 
 /// A token in `[hooks].covers`: a published state or the `lifecycle` marker.

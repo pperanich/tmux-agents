@@ -151,6 +151,7 @@ A screen matcher composes leaf text predicates. TOML is externally tagged:
 | `{ contains = "x" }` | Substring match. |
 | `{ regex = "..." }` | Regex over the region. |
 | `{ line_regex = "..." }` | Regex applied per line. |
+| `{ last_matching_line = { selector = { ... }, predicate = { ... } } }` | Find the bottommost line matching `selector`, then apply `predicate` to that line alone. |
 | `{ any = [ ... ] }` | Any child matches. |
 | `{ all = [ ... ] }` | All children match. |
 | `{ not = { ... } }` | The child does not match. |

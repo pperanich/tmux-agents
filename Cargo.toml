@@ -22,7 +22,7 @@ unreachable_pub = "warn"
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 thiserror = "2"
-# Screen-rule matching (contains/regex/line_regex). The measured detection need N12
+# Screen-rule matching (contains/regex/line ordering). The measured detection need N12
 # anticipated — a pure-core dep, distinct from the deferred UI stack below.
 regex = "1"
 # Safe syscall layer (policy: no direct libc anywhere; all syscalls go through rustix).

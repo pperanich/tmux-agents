@@ -40,6 +40,10 @@ enum CompiledMatcher {
     Contains(String),
     Regex(Regex),
     LineRegex(Regex),
+    LastMatchingLine {
+        selector: Box<CompiledMatcher>,
+        predicate: Box<CompiledMatcher>,
+    },
     Any(Vec<CompiledMatcher>),
     All(Vec<CompiledMatcher>),
     Not(Box<CompiledMatcher>),
@@ -318,6 +322,14 @@ impl CompiledMatcher {
             CompiledMatcher::Contains(s) => text.contains(s.as_str()),
             CompiledMatcher::Regex(re) => re.is_match(text),
             CompiledMatcher::LineRegex(re) => text.lines().any(|line| re.is_match(line)),
+            CompiledMatcher::LastMatchingLine {
+                selector,
+                predicate,
+            } => text
+                .lines()
+                .rev()
+                .find(|line| selector.matches(line))
+                .is_some_and(|line| predicate.matches(line)),
             CompiledMatcher::Any(v) => v.iter().any(|m| m.matches(text)),
             CompiledMatcher::All(v) => v.iter().all(|m| m.matches(text)),
             CompiledMatcher::Not(m) => !m.matches(text),
@@ -334,6 +346,10 @@ fn compile(matcher: &Matcher) -> Result<CompiledMatcher, (String, regex::Error)>
         Matcher::LineRegex(s) => {
             CompiledMatcher::LineRegex(Regex::new(s).map_err(|e| (s.clone(), e))?)
         }
+        Matcher::LastMatchingLine(spec) => CompiledMatcher::LastMatchingLine {
+            selector: Box::new(compile(&spec.selector)?),
+            predicate: Box::new(compile(&spec.predicate)?),
+        },
         Matcher::Any(v) => CompiledMatcher::Any(compile_all(v)?),
         Matcher::All(v) => CompiledMatcher::All(compile_all(v)?),
         Matcher::Not(b) => CompiledMatcher::Not(Box::new(compile(b)?)),
@@ -523,6 +539,34 @@ mod tests {
         let ev = eng.evaluate(&snap("t", "prompt\n⏵⏵ bypass permissions on\n"));
         assert_eq!(ev.evidence.len(), 1);
         assert_eq!(ev.evidence[0].source, Source::ScreenRule);
+    }
+
+    #[test]
+    fn last_matching_line_applies_the_predicate_only_to_the_bottommost_candidate() {
+        let m = manifest(
+            "[[rules]]\nstate=\"working\"\nregion=\"tail_lines(10)\"\n\
+             match={ last_matching_line={ selector={regex=\"^status: \"}, \
+             predicate={all=[{contains=\"live\"},{not={contains=\"done\"}}]} } }\n",
+        );
+        let eng = RuleEngine::build(&m).unwrap();
+
+        let completed = eng.evaluate(&snap(
+            "t",
+            "status: live\nunrelated row\nstatus: done\ncomposer\n",
+        ));
+        assert!(completed.evidence.is_empty());
+        assert!(!completed.reports[0].matched);
+
+        let working = eng.evaluate(&snap(
+            "t",
+            "status: done\nunrelated row\nstatus: live\ncomposer\n",
+        ));
+        assert_eq!(working.evidence.len(), 1);
+        assert!(working.reports[0].matched);
+
+        let absent = eng.evaluate(&snap("t", "live\ncomposer\n"));
+        assert!(absent.evidence.is_empty());
+        assert!(!absent.reports[0].matched);
     }
 
     #[test]
