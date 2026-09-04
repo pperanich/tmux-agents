@@ -1,4 +1,4 @@
-min_engine_version = "0.1"
+min_engine_version = "0.5.11"
 
 [identity]
 process_names = ["claude"]

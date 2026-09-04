@@ -716,7 +716,8 @@ state = "blocked"  priority = 100  region = "tail_lines(5)"   # v1 accepts tail_
                                           # bottom_non_empty_lines(N), visible, and title
                                           # (unknown regions are hard-rejected); further
                                           # regions grow from evidence later
-match = { any = [ ... ] }             # contains/regex/line_regex/last_matching_line + any/all/not
+match = { any = [ ... ] }             # contains/regex/line_regex/last_matching_line (0.5.11+)
+                                          # + any/all/not
 [details]                             # token spelling/aliases only — state routing is
                                       # normative in AD1 and NOT manifest-overridable
 rate_limit = { aliases = ["ratelimited"] }   # example: alternate spellings an agent's
