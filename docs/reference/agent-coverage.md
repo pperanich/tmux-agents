@@ -202,28 +202,40 @@ first) and `--check` verifies it. For the installer's per-agent caveats
 
 ## Bundled action key sequences
 
-The `keys` actions tma ships send a per-agent key sequence
-through the `tma-tmux` write path. Each element is one `send-keys` argument with
-named-key interpretation on, so `Enter`, `Escape`, and `/compact` mean what tmux
-says. An agent with no cell for an action is not covered by it (the action does
-not apply to that agent's panes).
+The actions tma ships reach each agent through the `tma-tmux` write path. Each
+key element is one `send-keys` argument with named-key interpretation on, so
+`Enter`, `Escape`, and `/compact` mean what tmux says. An agent with no cell for
+an action is not covered by it (the action does not apply to that agent's panes).
 
-| action | claude | codex | gemini |
-|---|---|---|---|
-| `approve` | `1` | `Enter` | — |
-| `deny` | `Escape` | `Escape` | — |
-| `interrupt` | `Escape` | `Escape` | `Escape` |
-| `compact` | `/compact` `Enter` | — | — |
+| action | claude | codex | gemini | opencode |
+|---|---|---|---|---|
+| `approve` | `1` | `y` | - | API `permission-reply` `once` |
+| `deny` | `Escape` | `Escape` | - | API `permission-reply` `reject` |
+| `interrupt` | `Escape` | `Escape` | `Escape` | - |
+| `compact` | `/compact` `Enter` | - | - | - |
+| `steer` | text + `Enter` | text + `Enter` | - | text + `Enter` |
+| `steer_now` | text + `Enter` | text + `Enter` | - | - |
 
 These sequences derive from each agent's captured prompt chrome (the same
 captures the blocked/working screen rules anchor on): `approve` is the confirm
-key of the permission prompt (Claude's `❯ 1. Yes` selection cursor, Codex's
-`Press enter to confirm` footer), `deny` and `interrupt` are the reject/cancel
+key of the permission prompt (Claude's `❯ 1. Yes` selection cursor, Codex's own
+`Yes, proceed (y)` accelerator), `deny` and `interrupt` are the reject/cancel
 key (`esc`). Gemini has no captured confirm/reject key, so it carries only
 `interrupt`; `compact` is Claude-only until other agents' compact commands are
 captured. The sequences are provisional pending per-agent, per-version keystroke
 fixtures, the same discipline detection rules get (ACTIONS.md open question 2):
 where a prompt offers numbered choices, "approve" means option 1 by convention.
+
+The two steering rows are `text` actions: the keys shown are the manifest's
+wrapping, and the message itself is the caller's, delivered literally (see
+[`--text`](cli.md#steering---text)). `steer` fires at an idle pane, `steer_now`
+at a working one, and only for the agents that declared `steer_now`, meaning
+their composer was watched queueing a message typed mid-turn (Claude shows
+`Press up to edit queued messages`, Codex `Messages to be submitted after next
+tool call`). Gemini is excluded from both, permanently: it queues a mid-turn
+message and then returns it to the composer, unsent, when the turn is
+interrupted. OpenCode steers through its pane like the others here; its HTTP API
+carries a prompt too, but that lane is not what this action uses.
 
 ## Per-agent hook mappings
 

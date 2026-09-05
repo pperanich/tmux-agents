@@ -396,7 +396,8 @@ Usage: tma act [OPTIONS] [NAME]
 | [selector flags](#selector-flags) | Scope the target. Alone they must resolve to exactly one pane: none is exit 3, more than one is exit 1 naming the candidates (`--agent <NAME>` is the common form). With `--all` the whole selection is the target set. |
 | `--all` | Fire on EVERY selector-matched pane, one after another. |
 | `--dry-run` | Print the resolved targets and each one's gate verdict; execute nothing, acquire no lock. For a single target it also prints the resolved context (with each value's age) and the would-be keys or command. |
-| `--arg <VALUE>` | Repeatable. Pass a value to an `exec` action's command as environment (`TMA_ARG`, `TMA_ARG_1..N`, `TMA_ARG_COUNT`); never interpolated into the command string. A `keys` action rejects it (exit 2). Under `--all` every target gets the same values. |
+| `--arg <VALUE>` | Repeatable. Pass a value to an `exec` action's command as environment (`TMA_ARG`, `TMA_ARG_1..N`, `TMA_ARG_COUNT`); never interpolated into the command string. Every other kind rejects it (exit 2). Under `--all` every target gets the same values. |
+| `--text <STRING>` | The string a `text` action delivers into the pane, literally and as one line. Required for a `text` action, rejected by every other kind (exit 2). The token after it is always taken as its value, so a message starting with `-` needs no quoting games. |
 | `--force` | Skip the `when` gate only, never `requires` and never the lock. |
 | `--yes` | Satisfy a `confirm` action non-interactively (a non-TTY without `--yes` refuses). Under `--all` it covers the whole batch. |
 | `--json` | Emit schema-1 JSON: the fire result object (the `results` envelope under `--all`), or the `--list` document. |
@@ -406,6 +407,30 @@ Usage: tma act [OPTIONS] [NAME]
 The `--json` result object, the `--all` envelope, and the `--list` document are
 specified in
 [Pane options and JSON contracts](pane-options-and-json.md#tma-act-json-result).
+
+### Steering (`--text`)
+
+```sh
+tma act steer --pane %5 --text "use the existing helper instead of a new one"
+tma act steer_now --pane %5 --text "stop and rebase onto main first"
+```
+
+`steer` sends one line to an **idle** agent; `steer_now` sends the same line to a
+**working** one, where the agent queues it. They are separate actions rather than
+one with a wider gate, because the second is only offered for agents that declared
+they queue a mid-turn message rather than losing it. Neither is `confirm = true`,
+so a script can drive them; neither is offered in the `--menu`, which has nowhere
+to ask for the string.
+
+The string reaches the pane exactly as typed. `--text Enter` types five characters
+and presses nothing; `--text C-c` types three and interrupts nothing. Before any
+tmux command runs, the host refuses a payload that is empty, over 4096 bytes,
+carries a control byte (a steer is one line), or begins with one of the action's
+`sigils` (`/` and `!` by default), so a caller cannot reach `/clear` or `/compact`
+through a message. Each refusal is exit 4 with its own `reason` token (`empty`,
+`too-long`, `control-bytes`, `sigil`), and delivers nothing. The rules and the
+manifest side of steering are in
+[Action manifest schema](action-manifest-schema.md#text-per-agent-text-transports).
 
 ### Fan-out (`--all`)
 
@@ -467,7 +492,7 @@ The key set, in order:
 | `pane` | string | target pane id |
 | `agent` | string \| null | `@agent_name` as read under the lock; `null` when the pane vanished before any read |
 | `action` | string | the action name |
-| `kind` | string | `keys`, `api`, or `exec`: the transport the fire used, not just the manifest kind |
+| `kind` | string | `keys`, `api`, `text`, or `exec`: the transport the fire used, not just the manifest kind |
 | `outcome` | string | the [`--json` outcome vocabulary](pane-options-and-json.md#tma-act-json-result) |
 | `reason` | string \| null | the refusal or vanish token, `null` for every other outcome |
 | `source` | string | which surface asked: `cli` (a person at a TTY), `cli-yes` (`--yes`, or no TTY to prompt on: a script, a hook, an agent), `menu` (the tmux action menu) |
@@ -520,9 +545,9 @@ lives on the pane as `@agent_act_repeat`.
 
 | code | meaning |
 |---|---|
-| `0` | Acted: keys delivered, an API-channel answer delivered (2xx), a synchronous exec child exited `0`, or a detached supervisor spawned. |
+| `0` | Acted: keys or a `text` string delivered, an API-channel answer delivered (2xx), a synchronous exec child exited `0`, or a detached supervisor spawned. |
 | `124` | A synchronous exec child was killed at `timeout_ms`. |
-| `4` | The gate refused: state did not satisfy `when`, `requires` was unmet (including an API `permission-reply` op with no pending request id or no resolvable endpoint), the action does not apply to this agent, or the gated metric has no coverage. The refusing fact goes to stderr. |
+| `4` | The gate refused: state did not satisfy `when`, `requires` was unmet (including an API `permission-reply` op with no pending request id or no resolvable endpoint), the action does not apply to this agent, or the gated metric has no coverage. A `text` action's payload refusal (`empty`, `too-long`, `control-bytes`, `sigil`) lands here too, before any tmux command runs. The refusing fact goes to stderr. |
 | `5` | The pane action lock is held by another invocation. |
 | `3` | The act's target disappeared mid-act: tmux reports the pane gone (`can't find pane` / `no such pane`), `reason` `pane-gone`; or an API permission was answered/withdrawn between the gate and the act (a 404), `reason` `request-gone` — the pane itself is still there. |
 | `2` | Usage error (bad flag combination, selector flags alongside `--pane`, or `--all` whose selector matched no pane). |

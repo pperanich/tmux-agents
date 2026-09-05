@@ -303,8 +303,8 @@ A schema-1 document enumerating the loaded actions from `tma act --list --json`:
 |---|---|---|
 | `name` | string | the action name (also its file stem) |
 | `label` | string | the human label |
-| `kind` | string | `keys` or `exec` |
-| `agents` | array of string | the agents this action applies to (empty means all, for an `exec` action). For a `keys` action this is the union of its `[keys]` and `[api]` transport agents — no per-transport surface in v1, a deck does not care how the answer travels |
+| `kind` | string | `keys`, `text`, or `exec` |
+| `agents` | array of string | the agents this action applies to (empty means all, for an `exec` action). For a `keys` action this is the union of its `[keys]` and `[api]` transport agents (no per-transport surface in v1: a deck does not care how the answer travels), and for a `text` action its `[text]` agents |
 | `when` | object or null | the gate, or `null` when the action is always fireable for its agents |
 | `fireable` | boolean | present only with `--pane`: whether the action can fire on that pane right now |
 | `reason` | string or null | present only with `--pane`: the refusal reason token when not fireable, `null` when fireable |

@@ -1,7 +1,8 @@
 # Action manifest schema
 
-One TOML manifest declares one action: what it fires (`keys` into the pane, or an
-`exec` process), which agents and states it applies to, and how the broker guards
+One TOML manifest declares one action: what it fires (`keys` into the pane, a
+`text` string you supply at the call, or an `exec` process), which agents and
+states it applies to, and how the broker guards
 it. Bundled actions ship as manifests in `crates/tma-core/actions/`; a user
 manifest in `~/.config/tma/actions/` adds a new action or shadows a bundled one by
 filename stem, with no code change. Fire one with [`tma act`](cli.md#tma-act); to
@@ -19,7 +20,7 @@ and `config.toml`.
 | `min_engine_version` | yes | version string | The minimum engine version this action needs (e.g. `"0.1"`). A manifest that needs a newer engine is rejected with an upgrade error. |
 | `name` | yes | string | The action name; must equal the filename stem. Invoked as `tma act <name>`. |
 | `label` | yes | string | The human label shown in `--list` and the menu. |
-| `kind` | yes | `keys` \| `exec` | `keys` sends a guarded key sequence into the pane; `exec` spawns a guarded process with context env. |
+| `kind` | yes | `keys` \| `text` \| `exec` | `keys` sends a guarded key sequence into the pane; `text` delivers one caller-supplied string literally, wrapped in manifest keys; `exec` spawns a guarded process with context env. |
 | `when` | no | table | The gate. Absent means the action is always fireable for its applicable agents. |
 | `agents` | no (exec) | array of string | Which agents an `exec` action applies to; empty (the default) means all agents. A `keys` action derives applicability from its `[keys]` table instead, so this is ignored for `keys`. |
 | `requires` | no | array of token | Context keys that must be non-empty for the gate to pass: `session`, `cwd`, `pid`, `title`. An unknown token is a parse error. |
@@ -30,17 +31,23 @@ and `config.toml`.
 | `command` | yes (exec) | string | The exec command, passed to `sh -c` verbatim with no substitution. Required for `exec`, forbidden for `keys`. |
 | `[keys]` | keys | table | Per-agent key sequences. Forbidden for `exec`. A `keys` action needs at least one entry across `[keys]` and `[api]`. |
 | `[api]` | keys | table | Per-agent API-channel transports (below). Forbidden for `exec`. An agent may appear in `[keys]` or `[api]`, never both. |
+| `[text]` | text | table | Per-agent text transports (below). The only transport table a `text` action may carry, and forbidden for the other two kinds. |
+| `sigils` | no (text) | array of string | Leading characters a `text` payload may not start with, one character each. Defaults to `["/", "!"]`; an explicit `[]` opts out. `text` only. |
 
 Structural rules are enforced at parse: `kind = "keys"` requires at least one
 transport entry across `[keys]` and `[api]` (an api-only action is legal) and
 forbids `command` / `detach`; `kind = "exec"` requires `command` and forbids
-`[keys]` / `[api]`; an agent named in both `[keys]` and `[api]` is a parse error
-(the broker never picks a transport at act time, so there is no silent fallback).
+`[keys]` / `[api]`; `kind = "text"` requires at least one `[text]` entry and
+forbids `command` / `detach` / `agents` / `[keys]` / `[api]`; `[text]` and
+`sigils` are rejected on the other two kinds; and an agent named in both `[keys]`
+and `[api]` is a parse error (the broker never picks a transport at act time, so
+there is no silent fallback).
 
 ## `[when]`: the gate
 
-All present keys are ANDed. A `keys` action re-verifies a stale state stamp with a
-fresh detection cycle before gating.
+All present keys are ANDed. Any action that reaches the pane with keystrokes
+(`keys` and `text`) re-verifies a stale state stamp with a fresh detection cycle
+before gating.
 
 | field | required | type | meaning |
 |---|---|---|---|
@@ -104,6 +111,58 @@ request the plugin stamped. The API path never degrades to keystrokes — firing
 stale key sequence into a pane whose prompt state just proved unknowable is
 exactly what the guard exists to prevent.
 
+## `[text]`: per-agent text transports
+
+A `text` action delivers one string the caller supplies at the call, which is what
+separates it from `keys`. The manifest still owns everything around that string:
+which agents can receive it, when, and the keys that wrap it.
+
+| field | required | type | meaning |
+|---|---|---|---|
+| `prefix` | no | array of key | Keys sent before the string (empty by default: most composers already have focus). |
+| `suffix` | no | array of key | Keys sent after it. `["Enter"]` submits the line. |
+| `steer_now` | no | bool | The agent queues a message typed while it is `working` rather than losing it. Default `false`. |
+
+```toml
+sigils = ["/", "!"]
+
+[text]
+claude = { suffix = ["Enter"] }
+codex = { suffix = ["Enter"], steer_now = true }
+```
+
+The three deliveries (prefix, then the string, then suffix) happen inside one hold
+of the pane's single-flight lock, so nothing else tma drives can land between the
+text and the Enter that submits it. The string itself goes through `send-keys -l
+-- <string>`: `-l` turns off named-key interpretation, so a message containing the
+word `Enter` types five characters rather than pressing Return, and `--`
+terminates the flags, so a message beginning with `-` is data.
+
+`steer_now = false` is not just documentation. A `text` action refuses at a
+`working` pane for any agent that has not declared it, whatever `when` says,
+because tma cannot tell a queued message from a swallowed one: Gemini queues the
+text and then hands it back to the composer, unsent, the moment the turn is
+interrupted. Declare it per agent, from what that agent was watched doing.
+
+### The payload rules
+
+The host checks the caller's string before it runs a single tmux command, so a
+refusal delivers nothing and does not even read the pane. Each has a `reason`
+token, reported like a gate refusal (exit 4):
+
+| token | rule |
+|---|---|
+| `empty` | The string is empty or all whitespace. |
+| `too-long` | Over 4096 bytes. One steer is one message, not a file. |
+| `control-bytes` | Any C0 control, DEL, or C1 control. A steer is one line, so a newline or tab is refused too: a `\r` would submit early and `\x1b` is an escape. |
+| `sigil` | The first non-whitespace character is one of `sigils`. |
+
+The sigils are the point of the set. `/compact`, `/clear`, `/model` and `/exit`
+are the agent's own command plane, tma's own `compact` action is literally
+`claude = ["/compact", "Enter"]`, and a caller holding nothing but the ability to
+send a message must not reach any of it. Widen or narrow the list per action by
+shadowing the manifest.
+
 ## `requires` and the context env
 
 An `exec` action's `command` receives context only as environment variables (never
@@ -134,10 +193,13 @@ repeatable) sets:
 None of the three is set when no `--arg` was passed, so a script can tell "not
 passed" from "passed empty". Values are never interpolated into `command`: they
 cross as environment for the same reason `TMA_TITLE` does, so a value carrying
-`$(...)` or `;` is data the shell has no occasion to re-parse. A `keys` action
-rejects `--arg` (exit 2) — its sequence is manifest-static, which is what makes
-it reviewable — so anything that turns a value into keystrokes is an `exec`
-action whose script decides what to type, and should set `confirm = true`.
+`$(...)` or `;` is data the shell has no occasion to re-parse.
+
+Every kind takes exactly one caller payload flag, or none, and a mismatch is a
+usage error (exit 2) rather than a silently dropped value: `exec` takes `--arg`,
+`text` requires `--text`, and `keys` takes neither. A `keys` action's sequence is
+manifest-static, which is what makes it reviewable; free text belongs in a `text`
+action, where the manifest still owns the wrapping and the payload rules apply.
 
 ## `confirm`: the second factor
 
@@ -156,6 +218,8 @@ script does, so this one bit is the author's honest declaration.
 | `deny` | keys | `state = ["blocked"], detail = ["permission"]` | Negative answer to a permission prompt (`Escape` for Claude/Codex; an API `permission-reply` `reject` for OpenCode). |
 | `interrupt` | keys | `state = ["working"]` | Interrupt a working agent. |
 | `compact` | keys | `state = ["idle"], context_pct_min = 75` | Compact the context window once it is high (`/compact` Enter for Claude). |
+| `steer` | text | `state = ["idle"]` | Send one line of your own text to an idle agent, submitted with Enter (Claude, Codex, OpenCode). |
+| `steer_now` | text | `state = ["working"]` | The same delivery at a working pane, for the agents that declared they queue a mid-turn message (Claude, Codex). |
 
 Shadow any of these by dropping a file of the same stem in
 `~/.config/tma/actions/` (for example, retune `compact`'s threshold).

@@ -97,10 +97,11 @@ once. Identity still applies: an action declaring `agents = ["claude"]` still
 refuses on a codex pane. `--force` is not `--yes`, either; a `confirm` action needs
 both.
 
-One thing `--force` skips that is easy to miss: a `keys` action normally
-re-verifies a stale pane on demand before gating. Under `--force` there is no gate
-to verify for, so no re-verification happens and the keys go out against whatever
-the pane looks like now.
+One thing `--force` skips that is easy to miss: an action that reaches the pane
+with keystrokes (`keys` or `text`) normally re-verifies a stale pane on demand
+before gating. Under `--force` there is no gate to verify for, so no
+re-verification happens and the keys go out against whatever the pane looks like
+now.
 
 ## Pass a value in: `--arg`
 
@@ -138,9 +139,15 @@ builds a command string out of it. Quote it anyway (`"$TMA_ARG"`), as you would
 `TMA_TITLE`.
 
 `keys` actions refuse `--arg` (exit 2) on purpose. A `keys` sequence lives in the
-manifest, which is what makes it reviewable; an action that types caller text into
-a live session is an `exec` action whose script owns that decision — and should
-set `confirm = true`, because it writes.
+manifest, which is what makes it reviewable, so there is nowhere for a value to
+go.
+
+To type a caller's line into a live session, reach for
+[`kind = "text"`](../reference/action-manifest-schema.md#text-per-agent-text-transports)
+before writing a script like the one above. It keeps the wrapping keys, the
+agents and the gate in the manifest, delivers the string with `send-keys -l --`,
+and applies the payload rules (no control bytes, no leading `/` or `!`) that a
+hand-rolled script has to remember for itself. The bundled `steer` action is one.
 
 Driving it from a wait loop is the orchestrator shape:
 
