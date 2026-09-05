@@ -26,7 +26,7 @@ mod mapping;
 mod permission;
 
 use context::run_context;
-use mapping::{decide, json_string_field, parse_session_id, EventPlan};
+use mapping::{decide, json_string_field, parse_session_id, transcript_stamp, EventPlan};
 pub use mapping::{map_event, Mapped};
 use permission::{apply_pending_call, apply_permission_request};
 
@@ -192,6 +192,12 @@ pub fn apply_event(
         .map(ReadResult::into_inner);
 
     let event_session = parse_session_id(payload);
+    // The pane's transcript file, stamped beside the session id from the same envelope. `None`
+    // leaves the stored path alone: an event carrying none says nothing about it.
+    let event_transcript = transcript_stamp(
+        payload,
+        rec.options.get(opt::TRANSCRIPT).map(String::as_str),
+    );
     let mapped = map_event(kind, payload, &manifest.manifest);
     // Model identity: registration-class payloads carry the agent's model as a top-level
     // string (Claude `SessionStart`, Codex/Cursor session-start). Stamp `@agent_model` last-write-wins
@@ -220,6 +226,7 @@ pub fn apply_event(
         &manifest.name,
         stored.as_ref(),
         &plan,
+        event_transcript.as_deref(),
         notify,
         now,
     );
@@ -276,6 +283,7 @@ fn execute(
     agent: &str,
     stored: Option<&StampedState>,
     plan: &EventPlan,
+    transcript: Option<&str>,
     policy: &NotifyPolicy<'_>,
     now: u64,
 ) {
@@ -331,6 +339,16 @@ fn execute(
                     opt::SESSION,
                     publish.guard,
                     sess,
+                ));
+            }
+            // The transcript path rides that same guard: an event that loses arbitration must not
+            // point the pane at its own session's file. Set only when the payload carried a new one.
+            if let Some(path) = transcript {
+                cmds.push(render::set_pane_option_guarded(
+                    pane,
+                    opt::TRANSCRIPT,
+                    publish.guard,
+                    path,
                 ));
             }
             // The turn-end instant, on the same guard as the state tuple: `@agent_since` is
@@ -542,6 +560,69 @@ mod tests {
             );
         }
         assert_eq!(parse_session_id("{}"), None);
+    }
+
+    // ---- transcript path extraction ---------------------------------------------
+
+    /// The `transcript_path` the hook-covered agents put in the same envelope as `session_id`,
+    /// read for `@agent_transcript`. Cursor's `sessionStart` is the captured shape carrying a JSON
+    /// `null` (its file does not exist that early), so the pane gets its path on the first `stop`.
+    #[test]
+    fn extracts_the_transcript_path_from_real_payloads() {
+        for p in [SESSION_START, STOP, CODEX_STOP, GEM_AFTER_AGENT, CUR_STOP] {
+            assert_eq!(
+                transcript_stamp(p, None).as_deref(),
+                Some("<TRANSCRIPT>"),
+                "payload: {p}"
+            );
+        }
+        // Envelopes with no readable path: codex's notify argv, opencode's and pi's forwarded
+        // `{session_id}`, and cursor's null-valued sessionStart.
+        for p in [
+            CODEX_TURN_COMPLETE,
+            OC_SESSION_START,
+            PI_FORWARDED,
+            CUR_SESSION_START,
+        ] {
+            assert_eq!(transcript_stamp(p, None), None, "payload: {p}");
+        }
+    }
+
+    /// Claude's SubagentStop carries the session's `transcript_path` AND the subagent's own
+    /// `agent_transcript_path`. Only the session's is readable, and the event maps to bookkeeping
+    /// that writes no state, so the subagent file never reaches the pane.
+    #[test]
+    fn the_subagent_transcript_is_never_the_pane_transcript() {
+        assert_eq!(
+            transcript_stamp(SUBAGENT_STOP_PAYLOAD, None).as_deref(),
+            Some("<TRANSCRIPT>"),
+            "the session's file, not <AGENT_TRANSCRIPT>"
+        );
+        assert_eq!(
+            map_event("SubagentStop", SUBAGENT_STOP_PAYLOAD, &claude()),
+            Mapped::SubagentStop
+        );
+    }
+
+    /// The write guard, matching `@agent_session`'s discipline: an unchanged path is not rewritten,
+    /// a payload carrying none leaves the stored one alone (this option is never cleared on an
+    /// ordinary edge, only by the SessionEnd removal), and a new session's path replaces it.
+    #[test]
+    fn the_transcript_is_stamped_only_when_the_payload_carries_a_new_one() {
+        assert_eq!(transcript_stamp(STOP, Some("<TRANSCRIPT>")), None);
+        assert_eq!(
+            transcript_stamp(CODEX_TURN_COMPLETE, Some("/old.jsonl")),
+            None
+        );
+        assert_eq!(
+            transcript_stamp(STOP, Some("/old.jsonl")).as_deref(),
+            Some("<TRANSCRIPT>")
+        );
+        // An empty value is not a path, so it never overwrites a stored one either.
+        assert_eq!(
+            transcript_stamp(r#"{"transcript_path":""}"#, Some("/old.jsonl")),
+            None
+        );
     }
 
     // ---- event mapping (against the bundled claude manifest) --------------------
@@ -1365,6 +1446,68 @@ mod tests {
                 summary: "rm -rf /tmp/build".to_string(),
             }
         );
+    }
+
+    /// Claude Code 2.1.261's `PermissionRequest`, captured live and redacted: no `tool_use_id`
+    /// anywhere, though the vendor reference still lists one and `PreToolUse`/`PostToolUse` for the
+    /// same call both send it. Keys and nesting are the capture's, field for field.
+    const CLAUDE_PERMISSION_REQUEST_NO_CALL_ID: &str = r#"{"session_id":"7c74ac42-d330-4c0f-a7b1-ba9a918ba98e","transcript_path":"<TRANSCRIPT>","cwd":"<CWD>","scratchpad_dir":"<SCRATCH>","prompt_id":"20edf0d8-a22b-43de-94ab-4ecce0c78d11","permission_mode":"default","effort":{"level":"xhigh"},"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"touch /tmp/e4t/marker-leg1 && echo leg1-done","description":"Create marker file and print confirmation"},"permission_suggestions":[{"type":"addDirectories","directories":["/tmp/e4t"],"destination":"session"},{"type":"setMode","mode":"acceptEdits","destination":"session"}]}"#;
+
+    fn pending_call_id(payload: &str) -> String {
+        match pending_call_effect("PermissionRequest", &blocked_plan(), None, None, payload) {
+            PendingCall::Set { call, .. } => call,
+            other => panic!("expected a Set, got {other:?}"),
+        }
+    }
+
+    /// C5. A payload with no `tool_use_id` stamped `@agent_pending_call` empty on every claude
+    /// permission, so no consumer could tell one prompt from the next. The id is now minted from
+    /// what identifies the call, and two fires of one call mint the same string.
+    #[test]
+    fn a_permission_request_without_a_tool_use_id_mints_a_stable_id() {
+        let minted = pending_call_id(CLAUDE_PERMISSION_REQUEST_NO_CALL_ID);
+        assert!(!minted.is_empty(), "the stamp is no longer empty");
+        assert_eq!(
+            minted,
+            pending_call_id(CLAUDE_PERMISSION_REQUEST_NO_CALL_ID),
+            "the same call mints the same id"
+        );
+        assert_eq!(
+            minted,
+            pending_call_id(
+                &CLAUDE_PERMISSION_REQUEST_NO_CALL_ID
+                    .replace(r#""tool_name""#, r#""tool_use_id":"","tool_name""#)
+            ),
+            "an empty tool_use_id is treated as absent, not stamped through"
+        );
+        // Key order inside `tool_input` is canonicalized away, so a reserialization is not a new id.
+        assert_eq!(
+            minted,
+            pending_call_id(&CLAUDE_PERMISSION_REQUEST_NO_CALL_ID.replace(
+                r#"{"command":"touch /tmp/e4t/marker-leg1 && echo leg1-done","description":"Create marker file and print confirmation"}"#,
+                r#"{"description":"Create marker file and print confirmation","command":"touch /tmp/e4t/marker-leg1 && echo leg1-done"}"#
+            )),
+            "tool_input key order does not change the id"
+        );
+    }
+
+    /// The other half of the mint: two prompts that differ only in what the tool was asked to do
+    /// must not collide, or the id would be a per-session constant rather than a call id.
+    #[test]
+    fn two_calls_differing_only_in_tool_input_mint_different_ids() {
+        assert_ne!(
+            pending_call_id(CLAUDE_PERMISSION_REQUEST_NO_CALL_ID),
+            pending_call_id(
+                &CLAUDE_PERMISSION_REQUEST_NO_CALL_ID.replace("marker-leg1", "marker-leg2")
+            )
+        );
+    }
+
+    /// A payload that carries a `tool_use_id` keeps using it verbatim: the mint is the fallback, not
+    /// a replacement, so a build whose hook still sends the vendor id stamps that id.
+    #[test]
+    fn a_present_tool_use_id_is_stamped_unchanged() {
+        assert_eq!(pending_call_id(CLAUDE_PERMISSION_REQUEST), "toolu_01ABC123");
     }
 
     /// The per-tool summary shapes: the path for the file tools, the first string field for a tool

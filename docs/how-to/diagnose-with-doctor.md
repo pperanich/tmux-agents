@@ -190,7 +190,8 @@ tma: doctor: 2 warning(s), 1 pane(s) below the tier their manifest supports
 
 Counted as a warning: a missing wrapper, each tmux hook that is not present, each
 skipped manifest and each action naming an unknown agent, each unreachable
-`process_names` entry, each undecodable stamp, a detached server with no daemon,
+`process_names` entry, each stamp tma cannot decode or did not write, a detached
+server with no daemon,
 `status` off, mouse bindings without `mouse on`, a failed notify command, and per
 pane, incomplete hook wiring, a hook demotion, and a pending permission with no
 endpoint.

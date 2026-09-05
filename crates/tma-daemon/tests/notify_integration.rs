@@ -397,7 +397,7 @@ fn blocked_transition_fires_once_and_dedups_within_episode() {
         marker2.parse::<u64>().unwrap_or(0) > marker1.parse::<u64>().unwrap_or(u64::MAX),
         "the re-fire wrote a fresh marker for the new episode (got {marker2}, was {marker1})"
     );
-    assert_eq!(s.status_u64("notify_fires"), 2, "exactly two fires total");
+    s.expect_status("notify_fires", "2");
 
     // The ring this daemon accumulated is readable over the socket (`tma debug transitions`), both
     // renderings off the one wire document.
@@ -1265,7 +1265,104 @@ fn context_high_fires_once_then_rearms_and_refires() {
         2,
         "the next crossing after a rearm fires exactly one more"
     );
-    assert_eq!(s.status_u64("notify_fires"), 2, "exactly two context fires");
+    s.expect_status("notify_fires", "2");
+}
+
+// ---------------------------------------------------------------------------------------------
+// 11. stall: a pane that stays `working` past the threshold fires exactly one notification on its
+//     OWN marker (@agent_stall_notified_at), holds for the rest of the run, rearms when the run
+//     ends, and fires again on the next long run.
+// ---------------------------------------------------------------------------------------------
+
+/// The shared manifest plus a `Stop` mapping, so a test can end a working run the way an agent does.
+fn manifest_with_stop(names: &str) -> String {
+    format!(
+        "{}[[hooks.map]]\nevent = \"Stop\"\nclaim = {{ state = \"idle\" }}\n",
+        manifest(names)
+    )
+}
+
+#[test]
+fn stall_fires_once_per_working_run_and_rearms_when_the_run_ends() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("t21");
+    let (pane, pid) = new_shell_session(&s, "s1");
+    write_manifest(&s, &manifest_with_stop(&process_names_toml(&s, "s1", pid)));
+    // A one-second threshold via config (the env overrides do not cover it), kept out of the
+    // manifest dir so `load_dir` never parses it as a manifest.
+    let cfg_dir = s.workdir.join("cfg");
+    std::fs::create_dir_all(&cfg_dir).unwrap();
+    let cfg = cfg_dir.join("config.toml");
+    std::fs::write(&cfg, "[notify.stall]\nthreshold_s = 1\n").unwrap();
+    let _daemon = spawn_daemon_with_config(&s, &sink_cmd(&s, ""), &cfg, &["--sweep-ms", "400"]);
+    s.expect_status("clients", "1");
+    wait_quiescent(&s);
+
+    // A working run that outlasts the threshold. No edge marks the moment it does, which is the
+    // point: the fire comes from the reconcile's own reading of `now - @agent_since`.
+    fire(
+        &s,
+        "UserPromptSubmit",
+        &pane,
+        r#"{"session_id":"sess-1"}"#,
+        false,
+        None,
+    );
+    assert!(wait_opt(&s, &pane, "@agent_state", "working"));
+    assert_eq!(
+        wait_sink_lines(&s, 1, common::POLL_CEILING),
+        1,
+        "the working run passing the threshold fired exactly one stall notification"
+    );
+    assert_eq!(sink_lines(&s)[0], format!("fire {pane}"));
+    assert!(
+        !s.get(&pane, "#{@agent_stall_notified_at}").is_empty(),
+        "the stall marker (@agent_stall_notified_at) armed"
+    );
+    assert!(
+        s.get(&pane, "#{@agent_notified_at}").is_empty(),
+        "the state-lane marker is never touched by stall"
+    );
+
+    // Still working, still stalled: no re-fire. Negative window of two sweeps (--sweep-ms 400).
+    let run = s.get(&pane, "#{@agent_since}");
+    std::thread::sleep(Duration::from_millis(900));
+    assert_eq!(
+        sink_lines(&s).len(),
+        1,
+        "no re-fire while the same working run continues (state {:?}, @agent_since {run} then {:?})",
+        s.get(&pane, "#{@agent_state}"),
+        s.get(&pane, "#{@agent_since}"),
+    );
+
+    // The run ends: the flag clears, so the next one can fire.
+    fire(&s, "Stop", &pane, r#"{"session_id":"sess-1"}"#, false, None);
+    assert!(wait_opt(&s, &pane, "@agent_state", "idle"));
+    assert!(
+        wait_marker_empty(&s, &pane, "@agent_stall_notified_at"),
+        "leaving `working` rearmed the flag (marker cleared)"
+    );
+
+    // The next long run fires exactly one more.
+    fire(
+        &s,
+        "UserPromptSubmit",
+        &pane,
+        r#"{"session_id":"sess-2"}"#,
+        false,
+        None,
+    );
+    assert_eq!(
+        wait_sink_lines(&s, 2, common::POLL_CEILING),
+        2,
+        "the next working run past the threshold fires exactly one more"
+    );
+    // The sink line lands before the daemon rewrites its status file, so poll the counter.
+    s.expect_status("notify_fires", "2");
 }
 
 // ---------------------------------------------------------------------------------------------

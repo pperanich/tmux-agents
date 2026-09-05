@@ -563,7 +563,7 @@ undone by one `--clear`. `--pane` and the selector flags are mutually exclusive.
 What mute changes is the *fire*, nothing else. A muted pane is still detected,
 still stamped, still counted by `tma status`, still `blocked` in `tma ls` and in
 the JSON — it simply rings nothing: no `display-message`, no bell or OSC, no
-`[notify] command`, for both the state triggers and `context_high`. The episode's
+`[notify] command`, for the state triggers and for `context_high` and `stall`. The episode's
 `@agent_notified_at` marker is written as usual, so a mute that expires mid-episode
 does not then ring for a transition you already muted. A detached action's
 completion notification is deliberately outside the mute: you asked for that one,
@@ -1014,6 +1014,7 @@ tier:
 | manifests and actions | Files the loader skipped, and actions naming an unknown agent. |
 | remote panes | A pane whose foreground is a remote shell (ssh, mosh, docker, podman, kubectl). Neither the process walk nor a capture crosses that boundary, so an agent behind it reports only if its hooks can reach this tmux socket ([Run an agent in a container](../how-to/agents-in-containers.md)). Any `@agent_*` options such a pane still carries are held, not refreshed. Reported, not warned about: running an agent elsewhere is a choice, not a misconfiguration. |
 | unreadable stamps | A pane carrying an `@agent_*` option that does not decode. Every read path treats a corrupt stamp as no stamp, so the pane reads as never-stamped with nothing else to say why; doctor names the option and the value. `tma debug explain` prints the same fact for one pane. |
+| stamps tma did not write | An `@agent_state` outside the closed token set, or one set with no `@agent_stamped_at` beside it, which no tma write produces. Both say a second tool is writing the pane's state; doctor names the value and points at [the `@agent_state` contract](agent-state-contract.md). Reported on the same line as an unreadable stamp, and counted the same way. |
 
 Reading the report section by section, and the `--exit-code` CI recipe, are in
 [Diagnose with `tma doctor`](../how-to/diagnose-with-doctor.md).
@@ -1078,7 +1079,7 @@ Usage: tma debug [OPTIONS] <COMMAND>
 | `capture` | Print exactly what the detector saw for a pane, in fixture format. |
 | `explain` | Run identity, the rule engine, and fold for a pane; print evidence, matched and failed rules, and the verdict. `--json` emits the versioned schema. |
 | `transitions` | Print the running daemon's recent state transitions (its in-memory ring). `--json` emits the versioned schema. |
-| `notify-test` | Fire the notify command a trigger resolves to against a representative payload. `--trigger blocked\|done\|context_high` (default `blocked`). |
+| `notify-test` | Fire the notify command a trigger resolves to against a representative payload. `--trigger blocked\|done\|context_high\|stall` (default `blocked`). |
 | `stamp` | Internal, unstable: apply a guarded stamp to a pane, for testing the pane-option write guards directly. Not a public interface. |
 
 ### `tma debug transitions`

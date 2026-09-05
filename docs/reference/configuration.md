@@ -51,8 +51,11 @@ from_event = false           # daemonless direct-fire opt-in
 on = ["blocked"]             # transitions that fire; add "done" for working->idle completions
 bell = false                 # also ring the firing pane's terminal bell
 osc = false                  # also post an OSC 9 desktop notification to the pane's tty
+osc_777 = false              # also post the OSC 777 form (Ghostty, WezTerm) beside the OSC 9 one
+osc_progress = false         # show OSC 9;4 taskbar progress while a window has a working agent
 # log = "~/.local/state/tma/notifications.jsonl"  # append one JSON line per fired notification
 # context_high = { threshold = 75 }  # also fire once when a pane's context crosses this percent
+# stall = { threshold_s = 900 }      # also fire once when a pane has been working this long
 # blocked = { command = "..." }      # per-trigger routing; unset falls back to `command`
 # done = { command = "..." }
 
@@ -78,6 +81,7 @@ zero_member_recheck_secs = 1 # clientless liveness recheck
 demote_edges = 5             # hook-liveness demotion threshold
 autostart = false            # auto-start the daemon on first use of a surface
 restart_on_upgrade = true    # let a newer tma replace an older resident daemon
+# window_names = { format = "{repo}:{state}" }  # rename each window after the agents in it
 
 [[agent]]                    # per-agent overrides (repeatable)
 name = "claude"
@@ -122,16 +126,23 @@ surface split changes.
 | `on` | `["blocked"]` | Which transitions fire a notification. Add `"done"` for working-to-idle completions. |
 | `bell` | `false` | Also ring the firing pane's terminal bell. |
 | `osc` | `false` | Also write an OSC 9 desktop notification (`<agent> <state>`) to the firing pane's tty. Off by default because emulator support varies; it crosses ssh/mosh/tmate, since the emulator at your end renders it. See [Set up notifications](../how-to/notifications.md#post-a-desktop-notification-from-the-terminal). |
+| `osc_777` | `false` | Also write the OSC 777 form of the same notification (`ESC ] 777 ; notify ; <agent> ; <state> BEL`) to the firing pane's tty, beside the OSC 9 one. Ghostty and WezTerm honour 777 and ignore 9, so turning both on covers either emulator; one that reads both would show two banners. |
+| `osc_progress` | `false` | Emit the OSC 9;4 taskbar/tab progress indicator on a window's working edges: indeterminate when a window's rollup gains its first `working` pane, cleared when its last one leaves. Ghostty, WezTerm and Windows Terminal draw it on the tab, so it survives a minimized window. Daemon-only, and written once per edge, never per poll cycle. |
 | `log` | unset | Path to a JSONL file; every fired notification appends one line (the hook payload plus an `at` epoch). `~` is expanded and parent directories are created; the file is created `0600`. Errors are silent, never failing a hook. |
 | `include_title` | `false` | Send the pane title to the notify carriers. Off by default: a pane title routinely holds a branch name, a repo path or a prompt fragment, and `command` pipes the payload to whatever you configured (ntfy, Pushover, a Shortcut), so the title would reach that service's operator. Turning it on restores the payload's `title` key, the `TMA_TITLE` variable and the audit line's title together. The host-local `display-message` always shows the title and is unaffected. |
 | `blocked` | unset | A sub-table routing the `blocked` trigger: `{ command = "..." }`. |
 | `done` | unset | The same for the `done` trigger. |
 | `context_high` | unset | A sub-table `{ threshold = <percent>, command = "..." }`. When present, fire once when a pane's context utilization crosses `threshold`; naming the sub-table is the opt-in, so `threshold` is required (`command` is not). Unset means no context notifications. |
+| `stall` | unset | A sub-table `{ threshold_s = <seconds>, command = "..." }`. When present, fire once when a pane has been continuously `working` for `threshold_s` seconds; naming the sub-table is the opt-in, so `threshold_s` is required (`command` is not) and `0` is refused. Unset means no stall notifications. |
 
-`context_high` is separate from `on` because it rides its own armed flag
-(`@agent_context_notified_at`), not the state lane's marker: it fires once on the
-crossing, holds while the gauge stays high, and rearms only after the gauge dips
-below `threshold - 10`. See [Set up notifications](../how-to/notifications.md#notify-on-high-context).
+`context_high` and `stall` are separate from `on` because each rides its own armed
+flag (`@agent_context_notified_at`, `@agent_stall_notified_at`), not the state
+lane's marker. `context_high` fires once on the crossing, holds while the gauge
+stays high, and rearms only after the gauge dips below `threshold - 10`. `stall`
+measures `now - @agent_since` on every poll, fires once per working run, and rearms
+when the pane leaves `working`. See [Notify on high
+context](../how-to/notifications.md#notify-on-high-context) and [Notify on a stalled
+agent](../how-to/notifications.md#notify-on-a-stalled-agent).
 
 ### Per-trigger routing
 
@@ -283,6 +294,35 @@ The daemon is strictly additive; these knobs apply only when it runs.
 | `demote_edges` | `5` | Hook-liveness demotion threshold: activity edges the pane's hooks do not account for before its coverage is treated as suspect. An edge landing on a fresh hook claim does not count, and neither does one on a pane whose hooks last said `working` and have not yet been contradicted by capture, so a single long tool call cannot demote a healthy pane. |
 | `autostart` | `false` | Auto-start the daemon on first use of a surface (`ls`/`status`/`jump`/picker/`watch`/`wait`/`subscribe`). |
 | `restart_on_upgrade` | `true` | Replace a resident daemon whose build is **strictly older** than the binary running the check. Runs from every user surface, from `tma event`, and from `tma daemon --ensure`. Set `false` to opt out. |
+| `window_names` | unset | A sub-table `{ format = "..." }` that renames each tmux window after the agents in it. Naming the sub-table is the opt-in; `format` is optional and defaults to `"{repo}:{state}"`. See [`window_names`](#window_names) below. |
+
+### `window_names`
+
+Rename each tmux window after the agents running in it. Off until you name the
+sub-table:
+
+```toml
+[daemon.window_names]
+format = "{repo}:{state}"
+```
+
+| token | expands to |
+|---|---|
+| `{agent}` | the agent name (`claude`, `codex`, …) |
+| `{state}` | the window's highest-attention state: `blocked`, `working`, `idle`, `unknown` |
+| `{detail}` | the winning pane's `@agent_detail` (`permission`, `plan`, …), empty when it has none |
+| `{repo}` | the repo the winning pane's working directory belongs to |
+| `{branch}` | that checkout's branch |
+
+Any other token is a config error naming the token, so a typo fails the load
+instead of ending up in every window name. A token that resolves to nothing takes
+its separator with it: with `{repo}:{state}`, a pane outside a checkout reads
+`working`, not `:working`. Names are stripped of control bytes and capped at 64
+characters.
+
+Only the daemon renames, and only windows holding at least one agent pane. The
+recipe and the restore rules are in [Name windows after their
+agents](../how-to/show-agents-in-your-status-line.md#name-windows-after-their-agents).
 
 ### `restart_on_upgrade`
 

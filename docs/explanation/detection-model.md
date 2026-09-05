@@ -92,6 +92,30 @@ onto two other axes so the state token stays stable:
   output without touching the keyboard looks exactly like a person who is not
   there, so their mark stands until they type or move.
 
+### The same four distinctions, arrived at independently
+
+The strongest evidence that these are the natural cuts is that an agent vendor
+reached the same ones without reference to tma. OpenAI's `codex app-server`
+publishes a `thread/status/changed` notification whose `ThreadStatus` is
+`notLoaded`, `idle`, `systemError`, or `active` carrying an `activeFlags` list of
+`waitingOnApproval` and `waitingOnUserInput`
+(`codex-rs/app-server-protocol/schema/typescript/v2/ThreadStatus.ts`). It maps
+onto this vocabulary without loss: `active` with no flags is `working`, `active`
+plus `waitingOnApproval` or `waitingOnUserInput` is `blocked`, `idle` is `idle`,
+and `notLoaded` is a pane with no agent registered on it at all. `systemError` is
+the case that argues for the axis split rather than against it: an error is a
+reason, so it belongs on the detail axis, and it is the declared `error` detail
+token rather than a fifth state.
+
+The two flag names line up with tma's detail tokens, though only one of them
+exactly. `waitingOnApproval` is `permission`, the same distinction under another
+name. `waitingOnUserInput` has no exact counterpart: the nearest token is
+`question`, declared in `tma-core` and not yet emitted by any bundled manifest,
+so the honest statement is that the two vocabularies agree on the distinction and
+not on the word. Publishing the token set as something another tool can write to
+follows from all of this, and is written down as [the `@agent_state`
+contract](../reference/agent-state-contract.md).
+
 ## Three evidence sources, one ranking
 
 `tma` learns a pane's state from three kinds of evidence, in descending

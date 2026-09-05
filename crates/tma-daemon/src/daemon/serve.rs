@@ -21,6 +21,7 @@ use tma_tmux::control::{self, ControlPool, ProbeOutcome};
 use tma_tmux::tmux::{Tmux, TmuxError};
 
 use crate::notify::NotifyState;
+use crate::window_names::WindowNames;
 
 use super::pending::{self, Advance, Pending};
 use super::subscribers::{push_subscribers, reap_closed_subscribers, register_subscriber};
@@ -65,7 +66,11 @@ pub(super) fn serve(
         config.notify.on.clone(),
         config.notify.sinks(),
         config.notify.context_high.as_ref().map(|c| c.threshold),
+        config.notify.stall.as_ref().map(|s| s.threshold_ms()),
     );
+    // State-derived window names (`[daemon] window_names`): off unless the sub-table is named, and
+    // then one read plus a write only where a window's rendered name actually moved.
+    let mut window_names = WindowNames::new(config.daemon.window_names.as_ref());
     // Mutable: a SIGHUP reload re-derives this from the reloaded `[daemon]` config.
     let mut empty_pool_recheck = config.daemon.zero_member_recheck();
 
@@ -126,7 +131,7 @@ pub(super) fn serve(
             p,
             probe,
             sweep,
-            &status_extra(&capture, &notify, subscribers.len()),
+            &status_extra(&capture, &notify, &window_names, subscribers.len()),
         );
     }
 
@@ -165,6 +170,7 @@ pub(super) fn serve(
             &mut pool,
             &mut capture,
             &mut notify,
+            &window_names,
             &mut subscribers,
             tmux,
             &manifests,
@@ -252,7 +258,9 @@ pub(super) fn serve(
                             config.notify.on.clone(),
                             config.notify.sinks(),
                             config.notify.context_high.as_ref().map(|c| c.threshold),
+                            config.notify.stall.as_ref().map(|s| s.threshold_ms()),
                         );
+                        window_names.reconfigure(tmux, config.daemon.window_names.as_ref());
                         empty_pool_recheck = config.daemon.zero_member_recheck();
                         sweep = resolve_sweep(probe, &config, sweep_ms);
                         eprintln!("tma: reloaded config + manifests (SIGHUP)");
@@ -266,7 +274,7 @@ pub(super) fn serve(
                                 p,
                                 probe,
                                 sweep,
-                                &status_extra(&capture, &notify, subscribers.len()),
+                                &status_extra(&capture, &notify, &window_names, subscribers.len()),
                             );
                         }
                     }
@@ -407,6 +415,15 @@ pub(super) fn serve(
             break;
         }
 
+        // State-derived window names, after the dispatch so a pass reads the same settled stamps a
+        // notification just fired on. A no-op when the feature is off, and one read with no writes
+        // when nothing's rollup moved.
+        if status_dirty && window_names.enabled() {
+            if let Err(TmuxError::ServerGone) = window_names.reconcile(tmux) {
+                break;
+            }
+        }
+
         // The sweep's deferred ordered-input clear, STRICTLY after that dispatch: both read the same
         // persisted `@agent_attention`, and the dispatch is what turns a completion into a desktop
         // notification, so a clear landing first would swallow it. Nothing here dirties status — the
@@ -435,10 +452,18 @@ pub(super) fn serve(
                     p,
                     probe,
                     sweep,
-                    &status_extra(&capture, &notify, subscribers.len()),
+                    &status_extra(&capture, &notify, &window_names, subscribers.len()),
                 );
             }
         }
+    }
+    // Take down any OSC 9;4 progress indicator this daemon lit: it is state the emulator keeps, so
+    // nothing else would ever clear it once the daemon that raised it is gone.
+    notify.shutdown_progress(tmux);
+    // Hand every window tma renamed back to the user before this process goes away: a name frozen on
+    // the state some agent was in when the daemon stopped is worse than never having renamed it.
+    if window_names.enabled() {
+        let _ = window_names.restore_all(tmux);
     }
     // `pool` drops here → every control client is killed + waited (no leaked `tmux -C`). `subscribers`
     // drops too → each waiter socket closes, so a blocked `tma wait` reads EOF and degrades to polling.
@@ -446,11 +471,17 @@ pub(super) fn serve(
 
 /// Combined status-file body: the capture + notify introspection blocks plus the `wait_subscribers`
 /// gauge, which lets integration tests gate on push mode being active.
-fn status_extra(capture: &CaptureState, notify: &NotifyState, n_subscribers: usize) -> String {
+fn status_extra(
+    capture: &CaptureState,
+    notify: &NotifyState,
+    window_names: &WindowNames,
+    n_subscribers: usize,
+) -> String {
     format!(
-        "{}{}wait_subscribers={}\n",
+        "{}{}{}wait_subscribers={}\n",
         capture.status_lines(),
         notify.status_lines(),
+        window_names.status_lines(),
         n_subscribers
     )
 }
@@ -473,6 +504,7 @@ fn drain_and_fold_edges(
     pool: &mut ControlPool,
     capture: &mut CaptureState,
     notify: &mut NotifyState,
+    window_names: &WindowNames,
     subscribers: &mut Vec<UnixStream>,
     tmux: &Tmux,
     manifests: &[LoadedManifest],
@@ -510,7 +542,7 @@ fn drain_and_fold_edges(
                 p,
                 probe,
                 sweep,
-                &status_extra(capture, notify, subscribers.len()),
+                &status_extra(capture, notify, window_names, subscribers.len()),
             );
         }
     }

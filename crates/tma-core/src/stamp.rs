@@ -33,6 +33,9 @@ pub mod opt {
     pub const HASH: &str = "@agent_hash";
     pub const PID: &str = "@agent_pid";
     pub const SESSION: &str = "@agent_session";
+    /// Path to the agent's own transcript file, from the hook payload's `transcript_path`. Stamped
+    /// beside [`SESSION`] and removed with it; not part of the [`super::StampedState`] tuple.
+    pub const TRANSCRIPT: &str = "@agent_transcript";
     pub const SUBAGENTS: &str = "@agent_subagents";
     /// Context-utilization metric percent: integer `0..=100`, or absent when the agent has no
     /// telemetry coverage or the channel reported no window (a null-clear). Stamped under the
@@ -78,6 +81,9 @@ pub mod opt {
     /// comparison basis. Written only by the context-high notifier, guarded set-from-absent so
     /// concurrent firers resolve to one bell. Never the state lane's [`NOTIFIED_AT`]. Pane scope.
     pub const CONTEXT_NOTIFIED_AT: &str = "@agent_context_notified_at";
+    /// The `stall` notify marker: the same armed flag as [`CONTEXT_NOTIFIED_AT`], absent = armed,
+    /// its epoch **ms** fire instant rearmed by unsetting once the pane leaves `working`. Pane scope.
+    pub const STALL_NOTIFIED_AT: &str = "@agent_stall_notified_at";
     /// The agent's model name, a best-effort label the file-tail intake reads from the rollout
     /// window. Not part of the [`super::StampedState`] tuple and never load-bearing for a gauge; it
     /// only feeds `tma doctor`'s recognized-model line (a model no `[telemetry.windows]` entry
@@ -94,7 +100,8 @@ pub mod opt {
     /// cleared with them on every edge that ends the prompt. Pane scope.
     pub const PENDING_TOOL: &str = "@agent_pending_tool";
     /// The pending call's id (`tool_use_id`), so a consumer can tell one prompt from the next on a
-    /// pane that blocks twice on the same tool. Pane scope.
+    /// pane that blocks twice on the same tool. Minted from the call's identifying fields when the
+    /// payload omits the field, which Claude Code 2.1.261 does. Pane scope.
     pub const PENDING_CALL: &str = "@agent_pending_call";
     /// A one-line, 120-byte summary of the pending call derived from `tool_input`: the command for
     /// Bash, the path for Edit/Write/Read, else the first string field. **Agent-supplied text**, so
@@ -157,7 +164,23 @@ pub mod opt {
     /// marker, via `REMOVABLE`). Any non-shell process reappearing clears it, so a live pid-less
     /// agent (gemini's steady `node`, matching no `process_names`) is never shell-only and holds.
     pub const REG_DEAD_SINCE: &str = "@tma_reg_dead_since";
+    /// The window name tma found before its first state-derived rename (`[daemon] window_names`).
+    /// Present exactly while tma owns the window's name; its presence is what licenses a restore.
+    /// Window scope.
+    pub const WINDOW_NAME_ORIG: &str = "@tma_window_name_orig";
+    /// The window-scope `automatic-rename` value saved beside [`WINDOW_NAME_ORIG`], since
+    /// `rename-window` turns that option off. The sentinel [`super::AUTORENAME_UNSET`] records "nothing was
+    /// set at window scope", so the restore unsets it rather than pinning an inherited value.
+    /// Window scope.
+    pub const WINDOW_AUTORENAME_ORIG: &str = "@tma_window_autorename_orig";
+    /// The last name tma wrote to the window. A current name that differs from it means the user
+    /// renamed the window by hand, and tma stops renaming it until the next restore. Window scope.
+    pub const WINDOW_NAME_LAST: &str = "@tma_window_name_last";
 }
+
+/// [`opt::WINDOW_AUTORENAME_ORIG`]'s "was not set at window scope" sentinel. A real tmux value is
+/// `on`/`off`, so no legal value collides with it.
+pub const AUTORENAME_UNSET: &str = "-";
 
 /// The deserialized pane-option tuple for one agent pane.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -669,12 +692,14 @@ mod tests {
         opt::HASH,
         opt::PID,
         opt::SESSION,
+        opt::TRANSCRIPT,
         opt::SUBAGENTS,
         opt::IGNORE,
         opt::MUTE_UNTIL,
         opt::CONTEXT_PCT,
         opt::CONTEXT_AT,
         opt::CONTEXT_NOTIFIED_AT,
+        opt::STALL_NOTIFIED_AT,
         opt::MODEL,
         opt::PERMISSION_REQUEST,
         opt::PENDING_TOOL,

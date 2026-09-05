@@ -31,6 +31,7 @@
 - [Keybindings](reference/keybindings.md)
 - [Configuration](reference/configuration.md)
 - [Pane options and JSON contracts](reference/pane-options-and-json.md)
+- [The `@agent_state` contract](reference/agent-state-contract.md)
 - [Agent coverage](reference/agent-coverage.md)
 - [Manifest schema](reference/manifest-schema.md)
 - [Action manifest schema](reference/action-manifest-schema.md)

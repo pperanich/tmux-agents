@@ -780,7 +780,7 @@ pub(crate) enum DebugCommand {
     /// Fire the notify command a trigger resolves to against a representative payload, printing
     /// the command, the payload, and how it exited. Unlike a real fire this waits and shows stderr.
     NotifyTest {
-        /// blocked | done | context_high.
+        /// blocked | done | context_high | stall.
         #[arg(long, default_value = "blocked")]
         trigger: String,
     },

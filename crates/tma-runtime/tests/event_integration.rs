@@ -145,9 +145,13 @@ fn fire_argv(s: &Scratch, agent: &str, event: &str, pane: &str, payload_arg: &st
 }
 
 const SESSION: &str = "65ced290-2a08-43de-aa80-d0b049d7ce30";
+/// The `transcript_path` a Claude envelope carries on every event, stamped as `@agent_transcript`.
+const TRANSCRIPT: &str = "/w/.claude/projects/p/65ced290.jsonl";
 
 fn payload(event: &str, session: &str) -> String {
-    format!(r#"{{"session_id":"{session}","hook_event_name":"{event}"}}"#)
+    format!(
+        r#"{{"session_id":"{session}","transcript_path":"{TRANSCRIPT}","hook_event_name":"{event}"}}"#
+    )
 }
 
 fn notification_permission(session: &str) -> String {
@@ -195,6 +199,7 @@ fn wrapper_bridges_hook_events_to_stamps_and_dedups() {
     assert_eq!(s.get(&pane, "#{@agent_state}"), "idle");
     assert_eq!(s.get(&pane, "#{@agent_source}"), "hook");
     assert_eq!(s.get(&pane, "#{@agent_session}"), SESSION);
+    assert_eq!(s.get(&pane, "#{@agent_transcript}"), TRANSCRIPT);
     assert_eq!(s.get(&pane, "#{@agent_name}"), "claude");
 
     // UserPromptSubmit → working.
@@ -267,6 +272,11 @@ fn wrapper_bridges_hook_events_to_stamps_and_dedups() {
     );
     assert_eq!(s.get(&pane, "#{@agent_state}"), "", "state option removed");
     assert_eq!(s.get(&pane, "#{@agent_session}"), "");
+    assert_eq!(
+        s.get(&pane, "#{@agent_transcript}"),
+        "",
+        "the transcript path goes with the session tuple"
+    );
 }
 
 /// A daemonless event that loses arbitration (a strictly-newer hook claim is stored) must commit

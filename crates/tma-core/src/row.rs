@@ -84,6 +84,15 @@ pub struct AgentRow {
     /// Owning agent session id (`@agent_session`), `None` when the pane never registered one. The
     /// `session` key of the JSON rows.
     pub agent_session: Option<String>,
+    /// Path to the agent's transcript file (`@agent_transcript`), `None` when no hook payload ever
+    /// carried one. The `transcript` key of the JSON rows.
+    pub transcript: Option<String>,
+    /// The permission request id the pane is waiting on (`@agent_permission_request`), `None` when
+    /// none is outstanding. The `permission_request` key of the JSON rows.
+    pub permission_request: Option<String>,
+    /// Epoch **ms** the pane's tuple was last stamped (`@agent_stamped_at`), `None` when absent or
+    /// unparsable. The `stamped_at_ms` key of the JSON rows: the freshness anchor for the tuple.
+    pub stamped_at: Option<u64>,
     /// Context-utilization percent (`@agent_context_pct`), `None` when absent. The `context`
     /// key of the JSON rows.
     pub context_pct: Option<u8>,
@@ -315,6 +324,9 @@ mod tests {
             title: String::new(),
             attention: false,
             agent_session: None,
+            transcript: None,
+            permission_request: None,
+            stamped_at: None,
             context_pct: None,
             context_at: None,
             tokens: None,

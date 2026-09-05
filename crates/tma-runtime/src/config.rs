@@ -13,6 +13,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use tma_core::{AgentState, FoldConfig};
 
+use crate::window_name::NameTemplate;
+
 /// The whole `config.toml`. Every section is optional and every leaf defaults to the value it
 /// replaced, so [`Config::default`] is byte-for-byte the pre-config behavior (`deny_unknown_fields`).
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -244,6 +246,21 @@ pub struct DaemonSection {
     /// [`crate::ipc::restart_decision`].
     #[serde(default = "default_restart_on_upgrade")]
     pub restart_on_upgrade: bool,
+    /// `[daemon.window_names]`: rename each tmux window after the agents in it. Absent ⇒ off, so
+    /// naming the sub-table is the opt-in; `format` inside it is optional.
+    #[serde(default)]
+    pub window_names: Option<WindowNamesSection>,
+}
+
+/// `[daemon.window_names]`: the state-derived window-name feature. One key, and an unknown one stays
+/// a loud error, so a mistyped `format` never leaves the windows silently unnamed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowNamesSection {
+    /// The name template. Tokens are `{agent}`, `{state}`, `{detail}`, `{repo}` and `{branch}`;
+    /// an unknown one fails the load. Default [`crate::window_name::DEFAULT_FORMAT`].
+    #[serde(default)]
+    pub format: NameTemplate,
 }
 
 fn default_sweep_secs() -> u64 {
@@ -271,6 +288,7 @@ impl Default for DaemonSection {
             demote_edges: default_demote_edges(),
             autostart: false,
             restart_on_upgrade: default_restart_on_upgrade(),
+            window_names: None,
         }
     }
 }
@@ -354,6 +372,18 @@ pub struct NotifySection {
     /// emulator you are actually sitting at.
     #[serde(default)]
     pub osc: bool,
+    /// Also post an OSC 777 desktop notification beside the OSC 9 one (default `false`). Same text,
+    /// split into a title (the agent) and a body (the state). Ghostty and WezTerm honour 777 and
+    /// ignore 9, so the two together cover both camps; an emulator that reads both would show one
+    /// notification per sequence, which is why this is its own key rather than a replacement.
+    #[serde(default)]
+    pub osc_777: bool,
+    /// Emit the OSC 9;4 taskbar/tab progress indicator on a window's working edges (default
+    /// `false`): state 3 when a window's rollup gains its first `working` pane, cleared when its
+    /// last one leaves. Ghostty, WezTerm and Windows Terminal render it on the tab, so it survives a
+    /// minimized window. Daemon-only: the edge is a comparison against the previous pass.
+    #[serde(default)]
+    pub osc_progress: bool,
     /// Append one JSON line per fired notification to this path (default unset). The daemonless
     /// answer to the daemon's in-memory transition ring: durable, and a record of what was sent.
     #[serde(default)]
@@ -371,6 +401,11 @@ pub struct NotifySection {
     /// a present sub-table with a `threshold` percent enables it. Rearms below `threshold - 10`.
     #[serde(default)]
     pub context_high: Option<ContextHighSection>,
+    /// `stall`: fire once when a pane has been continuously `working` for `threshold_s` seconds, on
+    /// its own `@agent_stall_notified_at` armed flag. Absent ⇒ disabled; a present sub-table with a
+    /// `threshold_s` enables it. Rearms when the pane leaves `working`.
+    #[serde(default)]
+    pub stall: Option<StallSection>,
 }
 
 /// `[notify.<trigger>]`: one trigger's routing. Only `command` for now, and unknown keys stay a loud
@@ -396,6 +431,38 @@ pub struct ContextHighSection {
     pub command: Option<String>,
 }
 
+/// `[notify.stall]`: the stalled-agent notify trigger. Like `context_high` it rides its own armed
+/// flag rather than the `on` set, and carries a duration instead of a percent.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StallSection {
+    /// Fire when the pane has been continuously `working` for at least this many seconds. No
+    /// default: naming the sub-table is the opt-in, so the threshold is required.
+    #[serde(deserialize_with = "positive_secs")]
+    pub threshold_s: u64,
+    /// Per-trigger routing, like the state triggers' sub-tables. Unset ⇒ the global `notify.command`.
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
+impl StallSection {
+    /// The threshold as milliseconds, the unit every comparison downstream is in.
+    pub fn threshold_ms(&self) -> u64 {
+        self.threshold_s.saturating_mul(1_000)
+    }
+}
+
+/// Reject `threshold_s = 0`: a zero threshold fires the instant a pane starts working, which is a
+/// `working` notification and not a stall one.
+fn positive_secs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    match u64::deserialize(d)? {
+        0 => Err(serde::de::Error::custom(
+            "notify.stall threshold_s must be greater than 0",
+        )),
+        secs => Ok(secs),
+    }
+}
+
 /// The `TMA_NOTIFY_CMD` test/CI seam, read in one place so every surface resolves it identically. An
 /// empty value is treated as unset.
 pub fn notify_cmd_env() -> Option<String> {
@@ -410,6 +477,12 @@ pub fn notify_cmd_env() -> Option<String> {
 pub struct NotifySinks {
     pub bell: bool,
     pub osc: bool,
+    /// `notify.osc_777`: the OSC 777 companion of the OSC 9 notification.
+    pub osc_777: bool,
+    /// `notify.osc_progress`: the OSC 9;4 taskbar progress lane. Not a per-fire sink like the
+    /// others (it rides a window's working edges), but it is carried here so both fire paths and
+    /// the SIGHUP reload resolve it exactly where they resolve the rest of `[notify]`.
+    pub osc_progress: bool,
     /// `notify.log`: the JSONL audit file every fire appends to, `None` when unconfigured.
     pub log: Option<PathBuf>,
     /// `notify.include_title`: let the pane title out to the carriers. Default `false` — see
@@ -426,6 +499,7 @@ pub struct NotifyCommands {
     pub blocked: Option<String>,
     pub done: Option<String>,
     pub context_high: Option<String>,
+    pub stall: Option<String>,
 }
 
 impl NotifyCommands {
@@ -441,6 +515,11 @@ impl NotifyCommands {
     /// The command the `context_high` trigger fires: its own override, else the global one.
     pub fn for_context_high(&self) -> Option<&str> {
         self.context_high.as_deref().or(self.global.as_deref())
+    }
+
+    /// The command the `stall` trigger fires: its own override, else the global one.
+    pub fn for_stall(&self) -> Option<&str> {
+        self.stall.as_deref().or(self.global.as_deref())
     }
 
     /// Apply the `TMA_NOTIFY_CMD` test/CI seam: a set override replaces the command for EVERY
@@ -471,9 +550,12 @@ impl Default for NotifySection {
             on: default_notify_on(),
             bell: false,
             osc: false,
+            osc_777: false,
+            osc_progress: false,
             log: None,
             include_title: false,
             context_high: None,
+            stall: None,
         }
     }
 }
@@ -496,6 +578,8 @@ impl NotifySection {
         NotifySinks {
             bell: self.bell,
             osc: self.osc,
+            osc_777: self.osc_777,
+            osc_progress: self.osc_progress,
             log: self
                 .log
                 .as_ref()
@@ -512,6 +596,7 @@ impl NotifySection {
             blocked: self.blocked.as_ref().and_then(|t| t.command.clone()),
             done: self.done.as_ref().and_then(|t| t.command.clone()),
             context_high: self.context_high.as_ref().and_then(|c| c.command.clone()),
+            stall: self.stall.as_ref().and_then(|s| s.command.clone()),
         }
     }
 }
@@ -849,6 +934,8 @@ mod tests {
         // Both tty sinks are opt-in: off by default (display-message-only behavior unchanged).
         assert!(!c.notify.bell);
         assert!(!c.notify.osc);
+        assert!(!c.notify.osc_777);
+        assert!(!c.notify.osc_progress);
         assert!(c.notify.log.is_none());
         assert_eq!(c.notify.sinks(), NotifySinks::default());
         // context_high is opt-in: absent by default (no context-utilization notifications).
@@ -861,6 +948,8 @@ mod tests {
         assert!(c.agent_overrides.is_empty());
         // Per-agent API config is empty by default: the broker relies on the pane stamp.
         assert!(c.api.api_base("opencode").is_none());
+        // State-derived window names are opt-in: absent by default, so tma renames nothing.
+        assert!(c.daemon.window_names.is_none());
         // Telemetry windows: zero-config recognizes the shipped names and nothing else.
         assert!(c.telemetry.windows.knows("gemini-1.5-pro"));
         assert!(!c.telemetry.windows.knows("some-unknown-model"));
@@ -880,6 +969,29 @@ mod tests {
         assert!(c.telemetry.windows.knows("gemini-1.5-pro"));
         // Still unknown outside the union.
         assert!(!c.telemetry.windows.knows("mystery-model"));
+    }
+
+    /// `[daemon.window_names]`: naming the sub-table is the opt-in, `format` inside it optional,
+    /// and an unknown token in the format fails the load rather than surviving into every name.
+    #[test]
+    fn window_names_opts_in_by_name_and_rejects_an_unknown_token() {
+        let c: Config = toml::from_str("[daemon]\nwindow_names = {}\n").unwrap();
+        let names = c.daemon.window_names.expect("named the sub-table");
+        assert_eq!(names.format.to_string(), crate::window_name::DEFAULT_FORMAT);
+
+        let c: Config =
+            toml::from_str("[daemon.window_names]\nformat = \"{agent} {state}\"\n").unwrap();
+        assert_eq!(
+            c.daemon.window_names.unwrap().format.to_string(),
+            "{agent} {state}"
+        );
+
+        let err = toml::from_str::<Config>("[daemon.window_names]\nformat = \"{model}\"\n")
+            .expect_err("an unknown token is a config error");
+        assert!(
+            err.to_string().contains("unknown token `{model}`"),
+            "the error names the token: {err}"
+        );
     }
 
     /// A partial section fills only the named field; the rest stay at their per-field defaults.
@@ -1012,6 +1124,27 @@ mod tests {
         assert!(toml::from_str::<Config>("[notify.context_high]\n").is_err());
     }
 
+    /// `notify.stall` parses its `threshold_s` the same way, and rejects the one value that would
+    /// make the trigger meaningless.
+    #[test]
+    fn notify_stall_parses_threshold_s_and_rejects_zero() {
+        let c: Config = toml::from_str("[notify.stall]\nthreshold_s = 600\n").unwrap();
+        let stall = c.notify.stall.expect("naming the sub-table is the opt-in");
+        assert_eq!(stall.threshold_s, 600);
+        assert_eq!(stall.threshold_ms(), 600_000);
+        // Inline-table form parses identically.
+        let inline: Config = toml::from_str("[notify]\nstall = { threshold_s = 300 }\n").unwrap();
+        assert_eq!(inline.notify.stall.map(|s| s.threshold_s), Some(300));
+        // Absent stays disabled; a missing or zero threshold is a loud error.
+        assert!(Config::default().notify.stall.is_none());
+        assert!(toml::from_str::<Config>("[notify.stall]\n").is_err());
+        let zero = toml::from_str::<Config>("[notify.stall]\nthreshold_s = 0\n").unwrap_err();
+        assert!(
+            zero.to_string().contains("greater than 0"),
+            "the error says why zero is refused: {zero}"
+        );
+    }
+
     /// Per-trigger routing: each `[notify.<trigger>]` command wins for its own trigger, and every
     /// unrouted trigger falls back to the global `notify.command`.
     #[test]
@@ -1019,7 +1152,8 @@ mod tests {
         let c: Config = toml::from_str(
             "[notify]\ncommand = \"global\"\n\
              [notify.blocked]\ncommand = \"ntfy\"\n\
-             [notify.context_high]\nthreshold = 80\ncommand = \"log-it\"\n",
+             [notify.context_high]\nthreshold = 80\ncommand = \"log-it\"\n\
+             [notify.stall]\nthreshold_s = 900\n",
         )
         .unwrap();
         let cmds = c.notify.commands();
@@ -1030,6 +1164,11 @@ mod tests {
             "an unrouted trigger falls back to the global command"
         );
         assert_eq!(cmds.for_context_high(), Some("log-it"));
+        assert_eq!(
+            cmds.for_stall(),
+            Some("global"),
+            "a sub-table with no command of its own still falls back"
+        );
 
         // No global command: an unrouted trigger simply has none (display-message only).
         let only_done: Config = toml::from_str("[notify.done]\ncommand = \"say done\"\n").unwrap();
@@ -1037,6 +1176,7 @@ mod tests {
         assert_eq!(cmds.for_trigger(NotifyTrigger::Done), Some("say done"));
         assert_eq!(cmds.for_trigger(NotifyTrigger::Blocked), None);
         assert_eq!(cmds.for_context_high(), None);
+        assert_eq!(cmds.for_stall(), None);
 
         // Zero-config routes nothing at all.
         assert_eq!(
@@ -1060,6 +1200,7 @@ mod tests {
         assert_eq!(cmds.for_trigger(NotifyTrigger::Blocked), Some("sink"));
         assert_eq!(cmds.for_trigger(NotifyTrigger::Done), Some("sink"));
         assert_eq!(cmds.for_context_high(), Some("sink"));
+        assert_eq!(cmds.for_stall(), Some("sink"));
         // An unset or empty override leaves the config's routing intact.
         let kept = c.notify.commands().overridden_by(Some(String::new()));
         assert_eq!(kept.for_trigger(NotifyTrigger::Blocked), Some("ntfy"));
@@ -1259,6 +1400,14 @@ mod tests {
                 toml::Value::Boolean(c.notify.bell),
             ),
             ("notify.osc".to_string(), toml::Value::Boolean(c.notify.osc)),
+            (
+                "notify.osc_777".to_string(),
+                toml::Value::Boolean(c.notify.osc_777),
+            ),
+            (
+                "notify.osc_progress".to_string(),
+                toml::Value::Boolean(c.notify.osc_progress),
+            ),
             (
                 "notify.on".to_string(),
                 toml::Value::Array(

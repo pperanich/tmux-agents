@@ -581,29 +581,27 @@ pub fn render_quota_advisory(pane_id: &str, q: &QuotaStamp, evidence_at: u64) ->
     cmds
 }
 
-/// The guarded set-from-absent write for the `context_high` notify marker: stamp `now` into
-/// `@agent_context_notified_at` only when it is empty/absent, else hold the stored value. Paired with
-/// a mandatory read-back at the tmux edge so two concurrent firers resolve to one bell (the same
-/// shape as the lock acquire's first arm). `now` is the marker value (debuggability only).
-pub fn render_context_notify_fire(pane_id: &str, now: u64) -> StampCommand {
-    let value = format!(
-        "#{{?#{{==:#{{{k}}},}},{now},#{{{k}}}}}",
-        k = opt::CONTEXT_NOTIFIED_AT
-    );
-    set_fmt(pane_id, opt::CONTEXT_NOTIFIED_AT, &value)
+/// The guarded set-from-absent write for a notify armed flag (`key` is
+/// [`opt::CONTEXT_NOTIFIED_AT`] or [`opt::STALL_NOTIFIED_AT`]): stamp `now` only when the option is
+/// empty/absent, else hold the stored value. Paired with a mandatory read-back at the tmux edge so
+/// two concurrent firers resolve to one bell (the same shape as the lock acquire's first arm).
+/// `now` is the marker value (debuggability only).
+pub fn render_notify_arm(pane_id: &str, key: &str, now: u64) -> StampCommand {
+    let value = format!("#{{?#{{==:#{{{key}}},}},{now},#{{{key}}}}}");
+    set_fmt(pane_id, key, &value)
 }
 
-/// **Documented degrade**: advisory (unguarded) plain-set of the `context_high` marker for a tmux
+/// **Documented degrade**: advisory (unguarded) plain-set of a notify armed flag for a tmux
 /// lacking `set -pF` expansion. The caller has already checked the marker is absent (a producer-side
 /// read-decide-write, NOT TOCTOU-safe), matching [`render_context_advisory`]'s posture.
-pub fn render_context_notify_fire_advisory(pane_id: &str, now: u64) -> StampCommand {
-    set_plain(pane_id, opt::CONTEXT_NOTIFIED_AT, &now.to_string())
+pub fn render_notify_arm_advisory(pane_id: &str, key: &str, now: u64) -> StampCommand {
+    set_plain(pane_id, key, &now.to_string())
 }
 
-/// Rearm the `context_high` notify marker: unset `@agent_context_notified_at` so the next
-/// crossing fires. Absent = armed, so a plain unset is the whole rearm.
-pub fn render_context_notify_rearm(pane_id: &str) -> StampCommand {
-    unset_pane(pane_id, opt::CONTEXT_NOTIFIED_AT)
+/// Rearm a notify armed flag: unset it so the next crossing fires. Absent = armed, so a plain
+/// unset is the whole rearm.
+pub fn render_notify_rearm(pane_id: &str, key: &str) -> StampCommand {
+    unset_pane(pane_id, key)
 }
 
 /// Render a writes-on-hold refresh: `@agent_stamped_at` and `@agent_hash` only — never
@@ -635,12 +633,14 @@ const REMOVABLE: &[&str] = &[
     opt::PID,
     opt::NAME,
     opt::SESSION,
+    opt::TRANSCRIPT,
     opt::SUBAGENTS,
     opt::CONTEXT_PCT,
     opt::CONTEXT_AT,
     opt::TOKENS,
     opt::TOKENS_AT,
     opt::CONTEXT_NOTIFIED_AT,
+    opt::STALL_NOTIFIED_AT,
     opt::QUOTA_PCT,
     opt::QUOTA_WINDOW,
     opt::QUOTA_RESETS_AT,
