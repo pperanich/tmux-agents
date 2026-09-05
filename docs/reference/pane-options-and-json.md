@@ -24,10 +24,11 @@ emit today:
 | `permission` | `blocked` | a tool-use permission prompt: approving grants the one action in front of the user |
 | `plan` | `blocked` | a plan-approval dialog. Its affirmative option grants **every following action**, so `tma act approve` deliberately does not resolve here |
 | `trust` | `blocked` | a workspace-trust gate. Its affirmative option grants the **whole folder**, so neither `approve` nor `deny` resolves here |
+| `question` | `blocked` | the agent asked *you* something and is waiting on the answer (OpenCode's `question` tool). There is nothing to grant, so `approve` and `deny` do not resolve here either: answering means picking one of the options on screen |
 | `rate_limit` | `working` **or** `blocked` | a usage-limit wait. The state is the whole point of the pair: `working/rate_limit` is the agent waiting out its own limit and resuming by itself, `blocked/rate_limit` is a wait that halted and needs you (a keypress, or a fresh prompt). A `wait --until blocked` that also reads the detail can tell "needs the clock" from "needs permission" |
 
-`tma-core` additionally declares `question`, `error`,
-`background` and `compacting` as constants; no bundled manifest emits them yet.
+`tma-core` additionally declares `error`, `background` and `compacting` as
+constants; no bundled manifest emits those three yet.
 
 Every `@agent_*_at` value is epoch **milliseconds** (13 digits today), not
 seconds. Millisecond resolution is what keeps two episodes opening in the same

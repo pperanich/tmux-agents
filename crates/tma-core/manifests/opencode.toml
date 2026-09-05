@@ -149,3 +149,39 @@ state = "idle"
 priority = 40
 region = "visible"
 match = { contains = "ctrl+p commands" }
+
+# --- blocked: the `question` tool's dialog ------------------------------------------------
+# Appended, never inserted: `tests/opencode_manifest.rs` maps rule indices by declaration order.
+#
+# OpenCode's `question` tool asks the human to pick an option mid-turn. The model's turn is
+# technically still in progress, but nothing advances until someone answers, so the ball is with
+# the human: `blocked`, with a detail that says it is a question and not a permission decision.
+# That distinction is the point: `tma act approve` answers a permission prompt and cannot answer
+# this one, and the detail is what keeps it from trying (approve/deny gate on `detail = permission`).
+#
+# Anchored on the dialog's footer, `↑↓ select  enter submit  esc dismiss`, present verbatim at
+# every captured width. The options render as `1. Red` / `2. Blue`, the same numbered shape as
+# claude's permission dialog, so `^\s*\d\. ` alone would be a false-block generator and is not
+# matched. The tool's own `3. Type your own answer` line is corroborating evidence rather than a
+# second required token: it is appended only while the tool's `custom` flag is not false, so
+# requiring it would miss a fixed-choice question outright.
+#
+# Evidence: five live captures of opencode 1.18.29 at w60/w80/w100/w120/w200, the footer identical
+# and unwrapped at each; `opencode_blocked_question_w{60,100}` are two of them. The dialog REPLACES
+# the composer, so those captures carry neither `ctrl+p commands` nor `esc interrupt` and this is
+# the only rule they match. The reverse holds too: the footer is absent from both idle fixtures,
+# from all three permission fixtures, and from a capture taken right after dismissing the dialog
+# with Escape, so it cannot linger.
+#
+# Priority 90: above `working` (60) and `idle` (40), which is what stops a mid-turn question from
+# reading as a live turn, and below the permission dialog (100). The two dialogs are mutually
+# exclusive on screen, so that ordering never fires in practice; it says which way to fall if
+# OpenCode ever draws a permission prompt over a question, and a permission stop is the one users
+# must trust. `tail_lines(24)` matches the permission rule beside it: the dialog is bottom-anchored,
+# and the dismissed capture proves the footer leaves no scrollback residue to re-match.
+[[rules]]
+state = "blocked"
+detail = "question"
+priority = 90
+region = "tail_lines(24)"
+match = { contains = "↑↓ select  enter submit  esc dismiss" }
