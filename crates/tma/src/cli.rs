@@ -597,6 +597,15 @@ pub(crate) struct ActArgs {
     /// Skip the `when` gate only (never `requires`, never the lock).
     #[arg(long, conflicts_with_all = ["list", "menu"])]
     pub(crate) force: bool,
+    /// Refuse (`episode-changed`) unless the pane is still in this episode: the `episode_ms` of
+    /// the `tma ls --json` row you acted on. Checked under the action lock, so a prompt that
+    /// turned over since you read the row cannot be answered by mistake.
+    #[arg(long = "expect-episode-ms", value_name = "MS", conflicts_with_all = ["list", "menu", "all"])]
+    pub(crate) expect_episode_ms: Option<u64>,
+    /// Refuse (`request-gone`) unless the pane still carries this `@agent_permission_request`:
+    /// the `permission_request` of the row you acted on. Checked under the same lock.
+    #[arg(long = "expect-permission-request", value_name = "ID", conflicts_with_all = ["list", "menu", "all"])]
+    pub(crate) expect_permission_request: Option<String>,
     /// Satisfy a `confirm` action non-interactively.
     #[arg(long, conflicts_with_all = ["list", "menu"])]
     pub(crate) yes: bool,

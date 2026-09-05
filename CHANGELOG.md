@@ -10,6 +10,16 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **`tma act` can bind a dispatch to the pane the caller actually saw.** `--expect-episode-ms` and
+  `--expect-permission-request` take the `episode_ms` and `permission_request` a script read off a
+  `tma ls --json` row and re-check them inside the pane's single-flight action lock, against the
+  same read the gate is re-asserted from. A surface that shows someone a permission prompt and
+  dispatches their approve some seconds later can no longer land it on the prompt that replaced it:
+  a pane that has moved on refuses `episode-changed`, one that no longer carries the quoted id
+  refuses `request-gone`, and both exit 4 having sent nothing.
+
 ## [0.5.12] - 2026-09-05
 
 ### Added

@@ -911,3 +911,124 @@ fn the_repeat_run_warns_at_three_and_resets_on_a_new_episode() {
     assert!(lines[3].contains(r#""repeat":1"#), "{}", lines[3]);
     assert!(lines[3].contains(r#""episode_ms":2000"#), "{}", lines[3]);
 }
+
+/// A user action whose key sequence is an unmistakable marker, so "the pane received no keys" is a
+/// real assertion rather than a hunt for a digit in a shell prompt. Gated like `approve`.
+fn write_probe_action(s: &Scratch) {
+    let dir = s.workdir.join("tma/actions");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("probe.toml"),
+        "min_engine_version = \"0.1\"\nname = \"probe\"\nlabel = \"Probe\"\nkind = \"keys\"\n\
+         when = { state = [\"blocked\"], detail = [\"permission\"] }\n\
+         [keys]\nclaude = [\"TMAPROBE\"]\n",
+    )
+    .unwrap();
+}
+
+/// A-212 through the CLI. A remote caller reads a row's `episode_ms`, hands it back on the
+/// dispatch, and the broker refuses when the pane has moved on: the pane is still
+/// `blocked/permission` so the ordinary gate passes, and only the binder can tell it is a different
+/// prompt. Then the same fire with the episode the pane is actually in goes through, so the refusal
+/// is the binder deciding and not the action being unfireable.
+#[test]
+fn a_stale_expect_episode_ms_refuses_and_sends_nothing() {
+    if !have_tmux() {
+        return;
+    }
+    let s = Scratch::new("act_expect_episode");
+    let pane = s.new_shell_pane();
+    stamp_blocked_claude(&s, &pane);
+    s.set_opt(&pane, "@agent_since", "1700000000000");
+    write_probe_action(&s);
+
+    let out = act(
+        &s,
+        &[
+            "probe",
+            "--pane",
+            &pane,
+            "--expect-episode-ms",
+            "1699999000000",
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(4), "a stale episode refuses with 4");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(r#""outcome":"refused""#)
+            && stdout.contains(r#""reason":"episode-changed""#),
+        "the result names the binder: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("episode-changed"),
+        "the refusing fact reaches the terminal: {stderr}"
+    );
+    let capture = s.tmux(&["capture-pane", "-p", "-t", &pane]);
+    assert!(
+        !String::from_utf8_lossy(&capture.stdout).contains("TMAPROBE"),
+        "a refused dispatch delivers no keystrokes"
+    );
+    assert!(
+        s.pane_option(&pane, "@agent_action").is_empty(),
+        "the lock it took is released"
+    );
+
+    // The episode the pane really is in: same pane, same action, same gate.
+    let out = act(
+        &s,
+        &[
+            "probe",
+            "--pane",
+            &pane,
+            "--expect-episode-ms",
+            "1700000000000",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "the expected episode fires");
+    assert!(
+        wait_capture_contains(&s.socket, &pane, "TMAPROBE", POLL_CEILING),
+        "the keystrokes reach the pane"
+    );
+}
+
+/// A-214 through the CLI: an OpenCode pane whose pending id has been replaced refuses
+/// `request-gone` before any HTTP call, which is why this needs no mock server. The endpoint is
+/// stamped so the API-lane `requires` is satisfied and the binder is what refuses.
+#[test]
+fn a_stale_expect_permission_request_refuses_before_any_http() {
+    if !have_tmux() {
+        return;
+    }
+    let s = Scratch::new("act_expect_request");
+    let pane = s.new_shell_pane();
+    stamp_blocked_opencode(&s, &pane, "per_current", "http://127.0.0.1:1");
+
+    let out = act(
+        &s,
+        &[
+            "approve",
+            "--pane",
+            &pane,
+            "--expect-permission-request",
+            "per_spent",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "a refused dispatch, not the exit 3 a 404 would give"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(r#""outcome":"refused""#) && stdout.contains(r#""reason":"request-gone""#),
+        "the result names the request: {stdout}"
+    );
+    assert_eq!(
+        s.pane_option(&pane, "@agent_permission_request"),
+        "per_current",
+        "a refusal leaves the pane exactly as it found it"
+    );
+}
