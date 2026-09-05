@@ -18,9 +18,9 @@ use std::process::ExitCode;
 
 use tma_core::{ActionKind, ActionManifest, AgentRow, FoldConfig, Selector, When};
 use tma_runtime::broker::audit::{ActSource, AuditCtx};
-use tma_runtime::broker::{self, ActResult, Gone, Outcome, TmuxBroker};
+use tma_runtime::broker::{self, ActResult, Gone, Outcome, Refusal, TmuxBroker};
 use tma_runtime::json::{JsonWriter, JSON_SCHEMA};
-use tma_runtime::{actions, cycle, manifests, MenuItem};
+use tma_runtime::{actions, cycle, manifests, slots, MenuItem};
 
 use crate::cli_support;
 use crate::config::Config;
@@ -42,6 +42,11 @@ pub(crate) struct ActOpts {
     pub expect_episode_ms: Option<u64>,
     /// `--expect-permission-request`: the request id the caller observed, checked under that lock.
     pub expect_permission_request: Option<String>,
+    /// `--slot`: the caller's idempotency key. A slot that already carries a receipt replays it and
+    /// dispatches nothing.
+    pub slot: Option<String>,
+    /// `--device`: which device dispatched, recorded on the receipt. Never part of the slot key.
+    pub device: Option<String>,
     pub yes: bool,
     pub json: bool,
     pub list: bool,
@@ -161,30 +166,147 @@ pub(crate) fn run(opts: ActOpts) -> ExitCode {
         all: opts.all,
         batch: batch.as_deref(),
     };
+    let fire = |pane: &str| {
+        broker::fire(
+            &tmux,
+            &manifests,
+            &cfg,
+            &opts.config.api,
+            detach,
+            action,
+            pane,
+            broker::FireArgs {
+                force: opts.force,
+                args: &opts.args,
+                audit,
+                expect_episode_ms: opts.expect_episode_ms,
+                expect_permission_request: opts.expect_permission_request.as_deref(),
+            },
+        )
+    };
+    // `--slot` makes the dispatch idempotent: the ledger decides whether it happens at all, and
+    // `--slot` conflicts with `--all`, so there is exactly one target here.
+    if let Some(slot) = opts.slot.as_deref() {
+        return fire_once(
+            slot,
+            opts.device.as_deref(),
+            &panes[0],
+            action,
+            opts.json,
+            fire,
+        );
+    }
     // Sequential, one full broker sequence per pane: each target takes its own single-flight lock
     // and re-verifies its own gate, so a fan-out is exactly N independent fires, never a shortcut.
-    let results: Vec<ActResult> = panes
-        .iter()
-        .map(|pane| {
-            broker::fire(
-                &tmux,
-                &manifests,
-                &cfg,
-                &opts.config.api,
-                detach,
-                action,
-                pane,
-                broker::FireArgs {
-                    force: opts.force,
-                    args: &opts.args,
-                    audit,
-                    expect_episode_ms: opts.expect_episode_ms,
-                    expect_permission_request: opts.expect_permission_request.as_deref(),
-                },
-            )
-        })
-        .collect();
+    let results: Vec<ActResult> = panes.iter().map(|pane| fire(pane)).collect();
     emit_all(&results, opts.json, opts.all)
+}
+
+// ---- idempotent dispatch (`--slot`) ------------------------------------------------------------
+
+/// Fire `pane` at most once for `slot`. The claim happens BEFORE the fire, so a replay returns the
+/// cached receipt and sends nothing; `locked` releases the claim, because it is the one refusal that
+/// changed nothing and will pass on a retry. Every other outcome writes a terminal receipt, `error`
+/// included: the broker failed somewhere it cannot prove the keystroke did not land, and a second
+/// dispatch is the worse answer.
+fn fire_once(
+    slot: &str,
+    device: Option<&str>,
+    pane: &str,
+    action: &ActionManifest,
+    json: bool,
+    fire: impl FnOnce(&str) -> ActResult,
+) -> ExitCode {
+    let ledger = match slots::Ledger::at_runtime_dir() {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            eprintln!("tma: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let guard = match ledger.claim(slot, pane, &action.name, device, tma_runtime::now_ms()) {
+        Ok(slots::Claim::Hit(receipt)) => {
+            return emit_cached(slot, &action.name, pane, &receipt, json)
+        }
+        Ok(slots::Claim::Claimed(guard)) => guard,
+        Err(err) => {
+            eprintln!("tma: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = fire(pane);
+    let resolved = if matches!(result.outcome, Outcome::Refused(Refusal::Locked)) {
+        guard.release()
+    } else {
+        guard.write(slots::Receipt::from_act_result(&result))
+    };
+    // The dispatch already happened; a ledger that could not record it is a warning, not a failure,
+    // and the exit code stays the broker's.
+    if let Err(err) = resolved {
+        eprintln!("tma: {err}");
+    }
+    if json {
+        println!("{}", render_slot_json(&result));
+    }
+    if let Some(note) = human_note(&result) {
+        eprintln!("{note}");
+    }
+    ExitCode::from(result.exit_code() as u8)
+}
+
+/// Replay a receipt: the original exit code, the same `--json` object the fire printed, and a
+/// stderr line saying nothing was dispatched this time.
+fn emit_cached(
+    slot: &str,
+    action: &str,
+    pane: &str,
+    receipt: &slots::Receipt,
+    json: bool,
+) -> ExitCode {
+    if json {
+        println!("{}", render_cached_json(action, pane, receipt));
+    }
+    let outcome = match &receipt.reason {
+        Some(reason) => format!("{}: {reason}", receipt.outcome),
+        None => receipt.outcome.clone(),
+    };
+    eprintln!(
+        "tma: cached receipt for slot `{slot}`: `{action}` on {pane} {outcome} (exit {}); \
+         nothing was dispatched",
+        receipt.exit_code
+    );
+    ExitCode::from(receipt.exit_code as u8)
+}
+
+/// A replayed receipt as the same object a fire prints: the ledger stores the tokens, so this
+/// rebuilds the key set rather than reconstructing an [`ActResult`] it cannot know the payload of.
+fn render_cached_json(action: &str, pane: &str, receipt: &slots::Receipt) -> String {
+    let mut j = JsonWriter::new();
+    j.begin_object();
+    j.number("schema", JSON_SCHEMA);
+    j.string("action", action);
+    j.string("pane", pane);
+    j.string("outcome", &receipt.outcome);
+    j.number("exit_code", receipt.exit_code as i64);
+    match &receipt.reason {
+        Some(reason) => j.string("reason", reason),
+        None => j.null("reason"),
+    }
+    j.bool("cached", true);
+    j.end_object();
+    j.finish()
+}
+
+/// A slotted fire's result object: the ordinary key set plus `cached`, which a `--slot` caller can
+/// always read (`false` here, `true` on the replay).
+fn render_slot_json(result: &ActResult) -> String {
+    let mut j = JsonWriter::new();
+    j.begin_object();
+    j.number("schema", JSON_SCHEMA);
+    write_act_result_fields(&mut j, result);
+    j.bool("cached", false);
+    j.end_object();
+    j.finish()
 }
 
 // ---- audit context -----------------------------------------------------------------------------
@@ -839,6 +961,36 @@ mod tests {
             json_keys(&json),
             ["action", "exit_code", "outcome", "pane", "reason", "schema"]
         );
+    }
+
+    /// A `--slot` dispatch and its replay print the SAME object, `cached` apart: the ordinary key
+    /// set plus one additive key, so a slotted caller parses one shape either way.
+    #[test]
+    fn slot_json_adds_exactly_the_cached_key() {
+        let fired = render_slot_json(&result("approve", "%5", Outcome::Sent));
+        assert_eq!(
+            json_keys(&fired),
+            [
+                "action",
+                "cached",
+                "exit_code",
+                "outcome",
+                "pane",
+                "reason",
+                "schema"
+            ]
+        );
+        assert!(fired.contains("\"cached\":false"), "{fired}");
+        let replay = render_cached_json(
+            "approve",
+            "%5",
+            &slots::Receipt {
+                outcome: "sent".to_string(),
+                reason: None,
+                exit_code: 0,
+            },
+        );
+        assert_eq!(replay, fired.replace("\"cached\":false", "\"cached\":true"));
     }
 
     /// A refusal carries its reason token and exit 4; a locked refusal exits 5.

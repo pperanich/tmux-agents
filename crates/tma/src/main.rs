@@ -16,6 +16,7 @@ mod init;
 mod install;
 mod install_keys;
 mod mute;
+mod receipts;
 mod redact;
 mod subscribe;
 mod wait;
@@ -161,6 +162,8 @@ fn main() -> ExitCode {
             force: args.force,
             expect_episode_ms: args.expect_episode_ms,
             expect_permission_request: args.expect_permission_request,
+            slot: args.slot,
+            device: args.device,
             yes: args.yes,
             json: args.json,
             list: args.list,
@@ -168,6 +171,11 @@ fn main() -> ExitCode {
             server: server.clone(),
             manifest_dir,
             config,
+        }),
+        Some(Command::Receipts(args)) => receipts::run(receipts::ReceiptsOpts {
+            slot: args.slot,
+            since_ms: args.since_ms,
+            json: args.json,
         }),
         Some(Command::Mute(args)) => mute::run(mute::MuteOpts {
             pane: args.pane,

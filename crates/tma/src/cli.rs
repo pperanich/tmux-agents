@@ -72,6 +72,10 @@ pub(crate) enum Command {
     /// scope), or enumerate/menu the fireable ones (`--list` / `--menu`). Exit 0 acted, 4 gate
     /// refused, 5 pane locked, 3 target gone, 124 exec timeout, 2 usage, 1 runtime failure.
     Act(ActArgs),
+    /// Read the dispatch ledger `tma act --slot` writes: one line per receipt, or the schema-1
+    /// document with `--json`. Reads only, so it answers "did my dispatch land" without
+    /// dispatching anything to find out.
+    Receipts(ReceiptsArgs),
     /// Suppress notifications for the matched panes (`--for <DURATION>`, or indefinitely), or lift
     /// it with `--clear`. Detection, stamping, and the counts are untouched; the deadline lives in
     /// `@agent_mute_until`, so a mute survives a tma or daemon restart.
@@ -606,6 +610,15 @@ pub(crate) struct ActArgs {
     /// the `permission_request` of the row you acted on. Checked under the same lock.
     #[arg(long = "expect-permission-request", value_name = "ID", conflicts_with_all = ["list", "menu", "all"])]
     pub(crate) expect_permission_request: Option<String>,
+    /// Make this dispatch idempotent under `<ID>`: the first fire writes a receipt into the host
+    /// ledger, and a retry with the same id replays that receipt without sending anything. Read
+    /// them back with `tma receipts`.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["list", "menu", "all"])]
+    pub(crate) slot: Option<String>,
+    /// Record which device dispatched, on the slot's receipt. Never part of the slot's identity,
+    /// so a second device's retry still replays the first one's receipt.
+    #[arg(long, value_name = "NAME", requires = "slot", conflicts_with_all = ["list", "menu", "all"])]
+    pub(crate) device: Option<String>,
     /// Satisfy a `confirm` action non-interactively.
     #[arg(long, conflicts_with_all = ["list", "menu"])]
     pub(crate) yes: bool,
@@ -618,6 +631,20 @@ pub(crate) struct ActArgs {
     /// Render a tmux `display-menu` of the currently-fireable actions.
     #[arg(long, conflicts_with_all = ["list", "name", "agent"])]
     pub(crate) menu: bool,
+}
+
+/// Args for `tma receipts`. Both filters are optional and combine; neither touches tmux.
+#[derive(clap::Args)]
+pub(crate) struct ReceiptsArgs {
+    /// Only the receipt for this slot id.
+    #[arg(long, value_name = "ID")]
+    pub(crate) slot: Option<String>,
+    /// Only dispatches claimed at or after this epoch-ms instant.
+    #[arg(long = "since-ms", value_name = "MS")]
+    pub(crate) since_ms: Option<u64>,
+    /// Emit the schema-1 document instead of one tab-separated line per receipt.
+    #[arg(long)]
+    pub(crate) json: bool,
 }
 
 /// Args for `tma watch`. The invoking tmux client comes from the global `--client`
