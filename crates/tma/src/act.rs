@@ -38,6 +38,10 @@ pub(crate) struct ActOpts {
     /// The `--arg` values, for an `exec` action's environment (`keys` actions reject them).
     pub args: Vec<String>,
     pub force: bool,
+    /// `--expect-episode-ms`: the episode the caller observed, re-checked under the pane lock.
+    pub expect_episode_ms: Option<u64>,
+    /// `--expect-permission-request`: the request id the caller observed, checked under that lock.
+    pub expect_permission_request: Option<String>,
     pub yes: bool,
     pub json: bool,
     pub list: bool,
@@ -174,6 +178,8 @@ pub(crate) fn run(opts: ActOpts) -> ExitCode {
                     force: opts.force,
                     args: &opts.args,
                     audit,
+                    expect_episode_ms: opts.expect_episode_ms,
+                    expect_permission_request: opts.expect_permission_request.as_deref(),
                 },
             )
         })

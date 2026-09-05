@@ -296,11 +296,19 @@ launched), `timeout` (a synchronous child killed at `timeout_ms`), `refused`
 API target answered/withdrawn between gate and act — a 404; `reason` carries
 which), `error` (broker runtime failure: an unreachable API server, or a tmux
 command the server refused, whose stderr rides in the message). `reason` is one
-of `gated`, `requires-unmet`, `wrong-agent`, `no-coverage` (all exit `4`),
-`locked` (exit `5`), or — on a `vanished` outcome, both exit `3` — `pane-gone`
-(tmux says the pane is gone) and `request-gone` (the API server answered `404`:
-the permission request was already answered or withdrawn, on a pane that is
-still there).
+of `gated`, `requires-unmet`, `wrong-agent`, `no-coverage`, `episode-changed`,
+`request-gone` (all exit `4`) and `locked` (exit `5`). On a `vanished` outcome
+(both exit `3`) it is instead `pane-gone` (tmux says the pane is gone) or
+`request-gone` (the API server answered `404`: the permission request was
+already answered or withdrawn, on a pane that is still there).
+
+`episode-changed` and `request-gone` are the binder refusals: the fire carried
+`--expect-episode-ms` or `--expect-permission-request` and the pane, read under
+the action lock, no longer matches what the caller saw (see [Binding a dispatch
+to the pane you saw](cli.md#binding-a-dispatch-to-the-pane-you-saw)). Note that
+`request-gone` is deliberately one token across two outcomes: `refused` means
+the pane stopped carrying the id the caller quoted, `vanished` means the server
+answered `404` for it. Read `outcome` to tell them apart.
 
 ## `tma act` list document
 

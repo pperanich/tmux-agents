@@ -398,6 +398,8 @@ Usage: tma act [OPTIONS] [NAME]
 | `--dry-run` | Print the resolved targets and each one's gate verdict; execute nothing, acquire no lock. For a single target it also prints the resolved context (with each value's age) and the would-be keys or command. |
 | `--arg <VALUE>` | Repeatable. Pass a value to an `exec` action's command as environment (`TMA_ARG`, `TMA_ARG_1..N`, `TMA_ARG_COUNT`); never interpolated into the command string. A `keys` action rejects it (exit 2). Under `--all` every target gets the same values. |
 | `--force` | Skip the `when` gate only, never `requires` and never the lock. |
+| `--expect-episode-ms <MS>` | Refuse (`episode-changed`, exit 4) unless the pane is still in this episode: the `episode_ms` of the `tma ls --json` row you acted on. Checked inside the action lock. A usage error alongside `--all` (exit 2). See [Binding a dispatch to the pane you saw](#binding-a-dispatch-to-the-pane-you-saw). |
+| `--expect-permission-request <ID>` | Refuse (`request-gone`, exit 4) unless the pane still carries this `@agent_permission_request`: the `permission_request` of that same row. Checked inside the same lock. A usage error alongside `--all` (exit 2). |
 | `--yes` | Satisfy a `confirm` action non-interactively (a non-TTY without `--yes` refuses). Under `--all` it covers the whole batch. |
 | `--json` | Emit schema-1 JSON: the fire result object (the `results` envelope under `--all`), or the `--list` document. |
 | `--list` | Enumerate actions; with `--pane`, include each one's fireability verdict. |
@@ -406,6 +408,39 @@ Usage: tma act [OPTIONS] [NAME]
 The `--json` result object, the `--all` envelope, and the `--list` document are
 specified in
 [Pane options and JSON contracts](pane-options-and-json.md#tma-act-json-result).
+
+### Binding a dispatch to the pane you saw
+
+A surface that reads a pane, shows a person the prompt, and dispatches their
+answer some seconds later is answering a pane it can no longer see. If the agent
+asked a second question in between, the approve meant for the first one lands on
+the second. The `--expect-*` flags close that: a script reads `episode_ms` and
+`permission_request` off the `tma ls --json` row it acted on and hands them back
+on the fire.
+
+```
+episode=$(tma ls --json | jq -r '.agents[] | select(.pane == "%5") | .episode_ms')
+# ... a person looks at the prompt and decides, some seconds later ...
+tma act approve --pane %5 --expect-episode-ms "$episode"
+```
+
+Both are checked inside the pane's single-flight action lock, against the same
+read the gate is re-asserted from, so nothing can turn the prompt over between
+the check and the keystrokes. A pane that has moved on refuses `episode-changed`;
+one that no longer carries the quoted request id refuses `request-gone`. Both
+exit 4 and send nothing. (`request-gone` on a `vanished` outcome is a different
+event, exit 3: the API server's own 404. The `outcome` field separates them.)
+
+Two limits are worth knowing. The comparison is equality, not order, so a
+backward wall-clock step can leave the pane at an *earlier* episode than the one
+you read and that refuses `episode-changed` too, which is the honest answer: the
+pane is not where you saw it. And a matching `permission_request` is a necessary
+condition, not proof the prompt is still open, because tma clears the stamp only
+when its own reply lands or the agent's next event arrives; a matching id can
+still name a request that has already been answered.
+
+`--dry-run` reports the gate verdict and never fires, so it does not evaluate
+either expectation.
 
 ### Fan-out (`--all`)
 
@@ -522,7 +557,7 @@ lives on the pane as `@agent_act_repeat`.
 |---|---|
 | `0` | Acted: keys delivered, an API-channel answer delivered (2xx), a synchronous exec child exited `0`, or a detached supervisor spawned. |
 | `124` | A synchronous exec child was killed at `timeout_ms`. |
-| `4` | The gate refused: state did not satisfy `when`, `requires` was unmet (including an API `permission-reply` op with no pending request id or no resolvable endpoint), the action does not apply to this agent, or the gated metric has no coverage. The refusing fact goes to stderr. |
+| `4` | The gate refused: state did not satisfy `when`, `requires` was unmet (including an API `permission-reply` op with no pending request id or no resolvable endpoint), the action does not apply to this agent, or the gated metric has no coverage. Also the two binder refusals, `episode-changed` and `request-gone`, when the fire carried an `--expect-*` the pane no longer satisfies (see [Binding a dispatch to the pane you saw](#binding-a-dispatch-to-the-pane-you-saw)). The refusing fact goes to stderr. |
 | `5` | The pane action lock is held by another invocation. |
 | `3` | The act's target disappeared mid-act: tmux reports the pane gone (`can't find pane` / `no such pane`), `reason` `pane-gone`; or an API permission was answered/withdrawn between the gate and the act (a 404), `reason` `request-gone` — the pane itself is still there. |
 | `2` | Usage error (bad flag combination, selector flags alongside `--pane`, or `--all` whose selector matched no pane). |
