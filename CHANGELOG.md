@@ -10,6 +10,21 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **`tma transcript` reads what the agent in a pane has been writing.** Every surface before this
+  one told you *that* a pane was blocked; this one tells you what it was doing when it stopped, out
+  of the agent's own transcript file, normalized so a claude pane and a codex pane answer in the
+  same vocabulary. The window is end-anchored and bounded on all three axes (1 MiB read, 32 KiB of
+  headers, 256 bytes per string), so opening a 44 MiB claude session costs the same first page as a
+  4 KiB pi one, and the `older` cursor a page reports pages backwards without duplicates or gaps
+  until it reaches the head. Claude Code, Codex, Gemini and pi are served; cursor-agent (no tool
+  results, no timestamps) and OpenCode (SQLite, its own workstream) are refused by name rather than
+  returned empty, because "nothing happened" is a claim and it would be false. Discovery uses the
+  `@agent_transcript` stamp 0.5.12 added, so for three of the four it is one `stat`. See [`tma
+  transcript`](docs/reference/cli.md#tma-transcript) and [Agent transcript
+  stores](docs/explanation/transcript-stores.md).
+
 ## [0.5.12] - 2026-09-05
 
 ### Added

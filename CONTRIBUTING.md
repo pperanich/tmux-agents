@@ -32,13 +32,14 @@ command above. `TMA_TEST_BIN_NO_STALE_CHECK` skips the scan.
 
 ## Where things live
 
-Eight crates under `crates/`, stacked so the dependency graph enforces the
+Nine crates under `crates/`, stacked so the dependency graph enforces the
 boundaries below.
 
 | crate | one line |
 |---|---|
 | `tma-core` | The pure detection library: snapshot and evidence types, manifest schema, identity, the verdict fold. |
 | `tma-tmux` | The only crate that spawns `tmux`: read path, control-mode pool, guarded option writes. |
+| `tma-transcript` | The agent transcript readers: one adapter per store, a bounded end-anchored window with cursor paging, and the fixture corpus that pins them. Depends on nothing else in the workspace. |
 | `tma-runtime` | Tier 2: config, manifest loading, the poll cycle, capture, `tma event`, the wire protocol, and the `ui` helper surface. |
 | `tma-daemon` | Tier 3 only: the serve loop and notification dispatch. |
 | `tma-ui-core` | the pure Elm-style folds behind the picker and `tma watch`. No terminal, no tmux. |

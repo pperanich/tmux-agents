@@ -40,4 +40,5 @@
 
 - [Architecture](explanation/architecture.md)
 - [The detection model](explanation/detection-model.md)
+- [Agent transcript stores](explanation/transcript-stores.md)
 - [The security model](explanation/security-model.md)
