@@ -300,7 +300,8 @@ fn every_refusal_class_writes_a_terminal_receipt() {
     s.set_opt(&idle, "@agent_state", "idle");
     let wrong = s.new_shell_pane();
     stamp_blocked_claude(&s, &wrong);
-    s.set_opt(&wrong, "@agent_name", "gemini");
+    // pi has no approve row in any state, so approve on a pi pane is the wrong-agent refusal.
+    s.set_opt(&wrong, "@agent_name", "pi");
 
     let cases: [(&str, Vec<&str>, i32, &str); 5] = [
         ("gated", vec!["approve", "--pane", &idle], 4, "gated"),
