@@ -7,9 +7,10 @@
 //! answers. It optionally fires the blocked notification (`TMA_NOTIFY_FROM_EVENT=1`, write-before-
 //! fire). The event→decision logic is pure and unit-tested; only [`run`] touches tmux.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::PathBuf;
 use std::process::ExitCode;
+use std::time::Duration;
 
 use tma_core::render::{self, Guard, Publish};
 use tma_core::stamp::opt;
@@ -18,6 +19,7 @@ use tma_core::{Provenance, ReadResult, StampedState};
 use tma_tmux::stamp::{self, StampPlan};
 use tma_tmux::tmux::{PaneRecord, Tmux};
 
+use crate::hook_lane;
 use crate::ipc::{self, DaemonSink};
 use crate::manifests::{self, LoadedManifest};
 
@@ -26,7 +28,8 @@ mod mapping;
 mod permission;
 
 use context::run_context;
-use mapping::{decide, json_string_field, parse_session_id, transcript_stamp, EventPlan};
+use mapping::{decide, parse_session_id, transcript_stamp, EventPlan};
+pub(crate) use mapping::{json_object_field, json_string_field};
 pub use mapping::{map_event, Mapped};
 use permission::{apply_pending_call, apply_permission_request};
 
@@ -63,6 +66,9 @@ pub struct EventArgs {
     pub notify_context_high: Option<u8>,
     /// `[[agent]]` config: enable/disable + custom process-name maps.
     pub agents: Vec<crate::config::AgentConfig>,
+    /// `[hooks] claude_reply_lane`: the hold bound for the claude hook reply lane, `None` when the
+    /// sub-table is unnamed (the lane is off and this event behaves exactly as it did before it).
+    pub claude_reply_hold_ms: Option<u64>,
 }
 
 /// Run `tma event`. A hook must never fail loudly: every error path exits 0 (the wrapper
@@ -75,6 +81,12 @@ pub const CONTEXT_KIND: &str = "context";
 /// `@agent_permission_request`. It carries no state (maps to `Unmapped`), so the intake keys the
 /// request-option clear on this name directly.
 pub const PERMISSION_REPLIED: &str = "permission-replied";
+
+/// The agent and event the hook reply lane covers. claude only in v1: it is the one agent whose
+/// hook can return a permission decision, and the one whose prompt label does not survive a phone
+/// width intact.
+const HOOK_LANE_AGENT: &str = "claude";
+const HOOK_LANE_EVENT: &str = "PermissionRequest";
 
 pub fn run(args: EventArgs) -> ExitCode {
     // The context-telemetry intake is a separate lane: it resolves its own pane (explicit
@@ -103,42 +115,106 @@ pub fn run(args: EventArgs) -> ExitCode {
     let payload = read_payload(args.payload.as_deref());
     let tmux = Tmux::connect(&args.server);
 
+    // Resolved before the notify knobs are consumed below; the hold itself runs last.
+    let hold_ms = hook_lane_hold(&args);
+
     // Daemon delivery first: hand the raw event to a running daemon over its per-server socket,
     // keyed by the same `#{socket_path}` `tma daemon` bound and the caller already resolved.
-    if let Some(socket_path) = args.server_socket.as_deref() {
+    let delivered = args.server_socket.as_deref().is_some_and(|socket_path| {
         let sink = DaemonSink {
             path: ipc::paths_for(socket_path).socket,
         };
-        if sink.deliver(&pane, &args.agent, &args.kind, &payload) {
-            return ExitCode::SUCCESS;
-        }
+        sink.deliver(&pane, &args.agent, &args.kind, &payload)
+    });
+
+    if !delivered {
+        // No daemon (or delivery failed): direct guarded stamp through the shared adapter. Config
+        // is canonical for both notify knobs; the env vars override it (documented test/CI seam).
+        let notify_opt_in = match std::env::var("TMA_NOTIFY_FROM_EVENT") {
+            Ok(v) => v == "1",
+            Err(_) => args.notify_from_event,
+        };
+        let commands = args
+            .notify_commands
+            .overridden_by(crate::config::notify_cmd_env());
+        // The outcome only matters to a relaying peer; this IS the last hop, so it is discarded.
+        let _ = apply_event(
+            &tmux,
+            lm,
+            &pane,
+            &args.kind,
+            &payload,
+            &NotifyPolicy {
+                opt_in: notify_opt_in,
+                on: &args.notify_on,
+                commands: &commands,
+                sinks: &args.notify_sinks,
+            },
+            crate::now_ms(),
+        );
     }
 
-    // No daemon (or delivery failed): direct guarded stamp through the shared adapter. Config
-    // is canonical for both notify knobs; the env vars override it (documented test/CI seam).
-    let notify_opt_in = match std::env::var("TMA_NOTIFY_FROM_EVENT") {
-        Ok(v) => v == "1",
-        Err(_) => args.notify_from_event,
-    };
-    let commands = args
-        .notify_commands
-        .overridden_by(crate::config::notify_cmd_env());
-    // The outcome only matters to a relaying peer; this IS the last hop, so it is discarded.
-    let _ = apply_event(
-        &tmux,
-        lm,
-        &pane,
-        &args.kind,
-        &payload,
-        &NotifyPolicy {
-            opt_in: notify_opt_in,
-            on: &args.notify_on,
-            commands: &commands,
-            sinks: &args.notify_sinks,
-        },
-        crate::now_ms(),
-    );
+    // The hook reply lane, after the stamps either path just wrote and in THIS process either way:
+    // the daemon applied the state, but only the hook itself can hold claude's tool call open.
+    if let Some(hold_ms) = hold_ms {
+        return hold_for_reply(&tmux, &pane, &payload, hold_ms);
+    }
     ExitCode::SUCCESS
+}
+
+/// The hold bound when this event is one the lane covers, `None` otherwise. Three conditions, all
+/// of them cheap: the sub-table is named, the agent is claude, the event is `PermissionRequest`.
+fn hook_lane_hold(args: &EventArgs) -> Option<u64> {
+    (args.agent == HOOK_LANE_AGENT && args.kind == HOOK_LANE_EVENT)
+        .then_some(args.claude_reply_hold_ms)
+        .flatten()
+}
+
+/// The request half: mint the id, stamp it where the binder reads it, park the request record, then
+/// hold. Every failure path exits 0 having printed nothing, which is claude's untouched prompt.
+fn hold_for_reply(tmux: &Tmux, pane: &str, payload: &str, hold_ms: u64) -> ExitCode {
+    let Some(tool) = json_string_field(payload, "tool_name").filter(|t| !t.is_empty()) else {
+        return ExitCode::SUCCESS; // no call to answer; the pending trio skipped this one too
+    };
+    let id = permission::call_id(payload, &tool);
+    if !hook_lane::valid_request_id(&id) {
+        return ExitCode::SUCCESS;
+    }
+    let now = crate::now_ms();
+    // `@agent_permission_request` is the field the U6 binder quotes, so the lane mints into it
+    // rather than inventing a second one. Claude's payload carries no `request_id` of its own, so
+    // this is the only writer for a claude pane and nothing is being overwritten.
+    let _ = tmux.apply(&[render::set_pane_option(pane, opt::PERMISSION_REQUEST, &id)]);
+    let record =
+        hook_lane::RequestRecord::from_payload(&id, pane, payload, episode_ms(tmux, pane), now);
+    if hook_lane::write_request(&record).is_err() {
+        // Nothing to hold on: the reply half would have nothing to find, so fall straight through.
+        return ExitCode::SUCCESS;
+    }
+    if let Some(decision) = hook_lane::hold_for_verdict(&id, Duration::from_millis(hold_ms)) {
+        // Not `println!`: a closed stdout would panic there, and a hook must never speak.
+        let _ = writeln!(std::io::stdout(), "{decision}");
+    }
+    ExitCode::SUCCESS
+}
+
+/// The pane's episode, `max(@agent_since, @agent_turn_at)`: the same instant an `ls --json` row
+/// reports, so a caller can bind its dispatch to the episode the record was written in. `0` when
+/// the pane cannot be read, which the record carries as "unknown" rather than failing the hold.
+fn episode_ms(tmux: &Tmux, pane: &str) -> u64 {
+    let Ok(panes) = tmux.list_panes() else {
+        return 0;
+    };
+    let Some(rec) = panes.iter().find(|r| r.pane_id == pane) else {
+        return 0;
+    };
+    let num = |k: &str| {
+        rec.options
+            .get(k)
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    num(opt::SINCE).max(num(opt::TURN_AT))
 }
 
 /// What one event resolved to here, so a relaying peer knows whether to apply it itself. The daemon

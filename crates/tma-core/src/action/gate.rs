@@ -9,7 +9,7 @@ use serde::Deserialize;
 
 use crate::state::{AgentState, Detail};
 
-use super::{ActionKind, ActionManifest, ApiTransport};
+use super::{ActionKind, ActionManifest, ApiTransport, HookTransport};
 
 /// The optional `when` gate. All present keys are ANDed; context bounds fail closed.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -158,9 +158,13 @@ impl ActionManifest {
     /// its `[keys]` table, an `exec` action from `agents` (empty = all).
     pub fn applies_to(&self, agent: &str) -> bool {
         match self.kind {
-            // Applicability is the union of the two transport tables; exclusivity is a
-            // parse rule, so at most one of them ever covers a given agent.
-            ActionKind::Keys => self.keys.contains_key(agent) || self.api.contains_key(agent),
+            // Applicability is the union of the three transport tables. `[keys]`/`[api]` are
+            // mutually exclusive by parse rule; `[hook]` deliberately overlaps `[keys]`.
+            ActionKind::Keys => {
+                self.keys.contains_key(agent)
+                    || self.api.contains_key(agent)
+                    || self.hook.contains_key(agent)
+            }
             ActionKind::Exec => self.agents.is_empty() || self.agents.iter().any(|a| a == agent),
         }
     }
@@ -174,6 +178,13 @@ impl ActionManifest {
     /// uncovered. Exclusivity is enforced at parse, so this never overlaps [`ActionManifest::keys_for`].
     pub fn api_for(&self, agent: &str) -> Option<&ApiTransport> {
         self.api.get(agent)
+    }
+
+    /// The hook-lane transport for `agent`, or `None` when the action offers no hook arm for it.
+    /// May coexist with [`ActionManifest::keys_for`]: the broker takes this arm only when a request
+    /// record is on disk and uses the key sequence otherwise.
+    pub fn hook_for(&self, agent: &str) -> Option<&HookTransport> {
+        self.hook.get(agent)
     }
 
     /// Evaluate applicability, the `when` gate, and `requires` against a pane snapshot row.

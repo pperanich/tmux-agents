@@ -47,6 +47,11 @@ pub enum Effect {
         op: &'static str,
         reply: &'static str,
     },
+    /// A hook-lane verdict written for the request a hook is currently holding on.
+    Hook {
+        request: String,
+        verdict: &'static str,
+    },
     /// The `exec` command string (passed to `sh -c` verbatim).
     Command(String),
     /// Nothing resolvable (the pane is gone, or a `keys` action does not cover the agent).
@@ -106,16 +111,37 @@ pub fn dry_run<T: BrokerIo>(io: &T, action: &ActionManifest, pane_id: &str) -> D
                     op: t.op.token(),
                     reply: t.reply.token(),
                 },
-                None => action
-                    .keys_for(a)
-                    .map(|seq| Effect::Keys(seq.to_vec()))
-                    .unwrap_or(Effect::None),
+                // The hook lane only when one is actually holding right now, which is the same
+                // question the fire asks: with no record parked this reports the keystroke instead.
+                None => match hook_effect(io, action, &facts, a) {
+                    Some(e) => e,
+                    None => action
+                        .keys_for(a)
+                        .map(|seq| Effect::Keys(seq.to_vec()))
+                        .unwrap_or(Effect::None),
+                },
             },
             None => Effect::None,
         },
         ActionKind::Exec => Effect::Command(action.command.clone().unwrap_or_default()),
     };
     base(gate, agent, context, effect)
+}
+
+/// The hook-lane effect for `agent`, `None` when the action has no hook arm for it or no hook is
+/// parked on the pane's current request.
+fn hook_effect<T: BrokerIo>(
+    io: &T,
+    action: &ActionManifest,
+    facts: &PaneFacts,
+    agent: &str,
+) -> Option<Effect> {
+    let transport = action.hook_for(agent)?;
+    let request = facts.permission_request.as_deref()?;
+    io.hook_request_pending(request).then(|| Effect::Hook {
+        request: request.to_string(),
+        verdict: transport.verdict.token(),
+    })
 }
 
 /// The `TMA_*` context table with per-value ages, for `--dry-run`. Stamp-derived values are aged

@@ -27,7 +27,7 @@ pub mod verdict;
 
 pub use action::{
     ActionError, ActionKind, ActionManifest, ApiOp, ApiReply, ContextKeys, GateInput, GateOutcome,
-    RefusalReason, Requirement, When,
+    HookTransport, HookVerdict, RefusalReason, Requirement, When,
 };
 pub use edge::{diff_rows, Edge};
 pub use engine::{EngineError, Evaluation, RuleEngine, RuleReport};

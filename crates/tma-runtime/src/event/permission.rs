@@ -108,7 +108,7 @@ pub(crate) fn pending_call_effect(
 /// The pending call's id: the hook's own `tool_use_id` when it carries one, else a minted stand-in.
 /// Claude Code 2.1.261 omits the field from `PermissionRequest` (its `PreToolUse` and `PostToolUse`
 /// for the same call still carry it), which stamped `@agent_pending_call` empty on every prompt.
-fn call_id(payload: &str, tool: &str) -> String {
+pub(super) fn call_id(payload: &str, tool: &str) -> String {
     match json_string_field(payload, "tool_use_id") {
         Some(id) if !id.is_empty() => id,
         _ => mint_call_id(payload, tool),

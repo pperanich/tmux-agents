@@ -230,6 +230,7 @@ fn main() -> ExitCode {
             notify_on: config.notify.on,
             notify_context_high: config.notify.context_high.as_ref().map(|c| c.threshold),
             agents: config.agent_overrides,
+            claude_reply_hold_ms: config.hooks.claude_reply_lane.as_ref().map(|l| l.hold_ms),
         }),
         Some(Command::Daemon(args)) => tma_daemon::run_cli(tma_daemon::DaemonOpts {
             ensure: args.ensure,

@@ -22,3 +22,10 @@ codex = ["y"]
 # permission request rather than sending a key into the pane. `once` grants this one request.
 [api]
 opencode = { op = "permission-reply", reply = "once" }
+
+# Claude answers over the hook reply lane when one is holding: a `PermissionRequest` hook that
+# tma parked on a request record reads this verdict and returns claude's own decision object, so
+# the tool runs with no keystroke. Purely additive to the `[keys]` arm above, which is still what
+# fires when no record is on disk (`[hooks] claude_reply_lane` unset, or the hold already expired).
+[hook]
+claude = { verdict = "allow" }

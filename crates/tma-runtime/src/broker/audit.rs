@@ -93,15 +93,20 @@ pub struct ActObserved {
     /// Consecutive fires of this action on this pane in this episode, counting this one. `0` when
     /// the fire never reached the effect, so a refusal contributes nothing to the run.
     pub repeat: u32,
+    /// Whether the fire took the hook reply lane rather than the key sequence. Recorded rather than
+    /// derived: the same action covers one agent over both arms, and only the fire knows which ran.
+    pub took_hook_lane: bool,
 }
 
-/// The `kind` token: the transport the fire actually used. An `api` line is a `keys` action whose
-/// agent answers over HTTP, which is a different effect on the world and so a different token.
-pub fn kind_token(kind: ActionKind, api: bool) -> &'static str {
-    match (kind, api) {
-        (ActionKind::Keys, true) => "api",
-        (ActionKind::Keys, false) => "keys",
-        (ActionKind::Exec, _) => "exec",
+/// The `kind` token: the transport the fire actually used. `api` and `hook` are both `keys`
+/// actions answering structurally rather than by keystroke, and each is a different effect on the
+/// world, so each earns its own token.
+pub fn kind_token(kind: ActionKind, api: bool, hook: bool) -> &'static str {
+    match kind {
+        ActionKind::Exec => "exec",
+        ActionKind::Keys if hook => "hook",
+        ActionKind::Keys if api => "api",
+        ActionKind::Keys => "keys",
     }
 }
 
@@ -183,6 +188,7 @@ mod tests {
             pending_tool: Some("Bash".to_string()),
             pending_call: Some("toolu_01".to_string()),
             repeat: 1,
+            took_hook_lane: false,
         }
     }
 
@@ -274,8 +280,9 @@ mod tests {
 
     #[test]
     fn kind_names_the_transport_not_just_the_manifest_kind() {
-        assert_eq!(kind_token(ActionKind::Keys, false), "keys");
-        assert_eq!(kind_token(ActionKind::Keys, true), "api");
-        assert_eq!(kind_token(ActionKind::Exec, false), "exec");
+        assert_eq!(kind_token(ActionKind::Keys, false, false), "keys");
+        assert_eq!(kind_token(ActionKind::Keys, true, false), "api");
+        assert_eq!(kind_token(ActionKind::Keys, false, true), "hook");
+        assert_eq!(kind_token(ActionKind::Exec, false, false), "exec");
     }
 }

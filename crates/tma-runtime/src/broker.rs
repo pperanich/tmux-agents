@@ -27,13 +27,14 @@
 
 use tma_core::{
     ActionKind, ActionManifest, AgentState, ApiOp, ApiReply, ContextKeys, FoldConfig, GateInput,
-    GateOutcome, RefusalReason, Requirement,
+    GateOutcome, HookVerdict, RefusalReason, Requirement,
 };
 
 use tma_tmux::lock::{Acquire, LockError, LockValue};
 use tma_tmux::tmux::{Tmux, TmuxError};
 
 use crate::config::ApiSection;
+use crate::hook_lane::VerdictWrite;
 use crate::http::HttpOutcome;
 use crate::manifests::LoadedManifest;
 
@@ -322,6 +323,12 @@ pub trait BrokerIo {
         reply: ApiReply,
         timeout_ms: u64,
     ) -> HttpOutcome;
+    /// Whether a hook-lane request record is parked for `request_id`. The test for "a hook is
+    /// holding on this prompt": false means no lane to answer over, and the caller uses keystrokes.
+    fn hook_request_pending(&self, request_id: &str) -> bool;
+    /// Create the hook-lane verdict for `request_id`, exclusively. The real impl calls
+    /// [`crate::hook_lane::write_verdict`]; the mock records the call and returns a canned outcome.
+    fn write_hook_verdict(&self, request_id: &str, verdict: HookVerdict) -> VerdictWrite;
     /// Write the pane's `@agent_act_repeat` run under the held lock. Best-effort and infallible by
     /// construction, like [`BrokerIo::clear_permission_request`]: the counter is a mis-tap signal,
     /// and a failed option write must never turn a delivered action into a reported failure.
@@ -453,7 +460,7 @@ fn write_audit_line<T: BrokerIo>(
             io.now_ms(),
             pane_id,
             &action.name,
-            audit::kind_token(action.kind, api),
+            audit::kind_token(action.kind, api, observed.took_hook_lane),
             result.outcome.token(),
             result.reason(),
             observed,
@@ -684,8 +691,8 @@ fn act_under_lock<T: BrokerIo>(
 
     match action.kind {
         ActionKind::Keys => {
-            // Transport is per-agent and exclusive: an `api` agent answers over HTTP, a
-            // `keys` agent gets the send-keys sequence. Applicability guaranteed exactly one covers.
+            // Three arms, tried in order. `api` and `hook` are structured and mutually exclusive
+            // per agent; `keys` is the floor every fire lands on when neither one applies.
             if let Some(transport) = action.api_for(agent) {
                 // The endpoint + request id are guaranteed present (the API requires re-asserted
                 // under the lock). Empty defaults here would only surface as the server's own 404.
@@ -707,6 +714,28 @@ fn act_under_lock<T: BrokerIo>(
                     HttpOutcome::NotFound => Outcome::Vanished(Gone::Request),
                     HttpOutcome::Error(msg) => Outcome::Error(msg),
                 };
+            }
+            // The hook reply lane, taken only when a hook is actually parked on this request:
+            // with no record on disk this falls through to the keys arm below, which is the whole
+            // degradation guarantee. `binder_refusal` has already re-asserted the id under the lock.
+            if let Some(transport) = action.hook_for(agent) {
+                let request = facts.permission_request.as_deref().unwrap_or_default();
+                if io.hook_request_pending(request) {
+                    return match io.write_hook_verdict(request, transport.verdict) {
+                        VerdictWrite::Written => {
+                            observed.took_hook_lane = true;
+                            // Spend the id here, under the same lock, for the same reason the API
+                            // arm does: a second dispatch then refuses `request-gone` at the binder
+                            // rather than reaching a verdict file that would refuse it anyway.
+                            io.clear_permission_request(pane_id);
+                            Outcome::Replied
+                        }
+                        // A verdict already existed: the request was answered between the binder's
+                        // read and this write, so its target is gone.
+                        VerdictWrite::Exists => Outcome::Vanished(Gone::Request),
+                        VerdictWrite::Error(msg) => Outcome::Error(msg),
+                    };
+                }
             }
             // Applicability guaranteed the sequence exists; an empty one is a no-op send.
             let seq = action.keys_for(agent).unwrap_or(&[]);
@@ -887,6 +916,11 @@ mod tests {
         request_cleared: RefCell<Vec<String>>,
         /// Every `@agent_act_repeat` value the broker wrote, in order.
         repeat_writes: RefCell<Vec<String>>,
+        /// Whether a hook-lane request record is "parked" (default false: no lane, keys arm).
+        hook_pending: bool,
+        /// Canned verdict-write outcome, and every `(request_id, verdict)` the broker wrote.
+        hook_result: VerdictWrite,
+        hook_writes: RefCell<Vec<(String, HookVerdict)>>,
     }
 
     impl MockIo {
@@ -906,7 +940,21 @@ mod tests {
                 api_call: RefCell::new(None),
                 request_cleared: RefCell::new(Vec::new()),
                 repeat_writes: RefCell::new(Vec::new()),
+                hook_pending: false,
+                hook_result: VerdictWrite::Written,
+                hook_writes: RefCell::new(Vec::new()),
             }
+        }
+        /// A hook is parked on the request, so the hook arm is live.
+        fn with_hook_pending(mut self) -> MockIo {
+            self.hook_pending = true;
+            self
+        }
+        /// The verdict write returns `outcome` instead of creating the file.
+        fn with_hook_result(mut self, outcome: VerdictWrite) -> MockIo {
+            self.hook_pending = true;
+            self.hook_result = outcome;
+            self
         }
         /// The API lane returns `outcome` instead of the default 2xx.
         fn with_api_result(mut self, outcome: HttpOutcome) -> MockIo {
@@ -968,6 +1016,15 @@ mod tests {
             *self.api_call.borrow_mut() =
                 Some((endpoint.to_string(), request_id.to_string(), reply));
             self.api_result.clone()
+        }
+        fn hook_request_pending(&self, request_id: &str) -> bool {
+            self.hook_pending && !request_id.is_empty()
+        }
+        fn write_hook_verdict(&self, request_id: &str, verdict: HookVerdict) -> VerdictWrite {
+            self.hook_writes
+                .borrow_mut()
+                .push((request_id.to_string(), verdict));
+            self.hook_result.clone()
         }
         fn set_act_repeat(&self, _pane: &str, value: &str) {
             self.repeat_writes.borrow_mut().push(value.to_string());
@@ -1302,6 +1359,119 @@ mod tests {
             io.spawned.borrow().is_none(),
             "a refused detach never spawns a supervisor"
         );
+    }
+
+    // ---- hook reply lane ------------------------------------------------------------------------
+
+    /// The shipped `approve`: a `[keys]` arm for claude AND a `[hook]` arm for the same agent. The
+    /// overlap is the degradation path, so both tests below run against this one manifest.
+    fn hook_action() -> ActionManifest {
+        let src = "min_engine_version = \"0.1\"\nname = \"approve\"\nlabel = \"Approve\"\nkind = \"keys\"\nwhen = { state = [\"blocked\"], detail = [\"permission\"] }\n[keys]\nclaude = [\"1\"]\n[hook]\nclaude = { verdict = \"allow\" }\n";
+        ActionManifest::parse(src, "approve", "approve.toml").unwrap()
+    }
+
+    /// A blocked/permission claude pane carrying the minted request id the lane stamps.
+    fn blocked_claude_with_request(stamped_at: u64) -> PaneFacts {
+        PaneFacts {
+            permission_request: Some("d41d8cd98f00b204".to_string()),
+            ..blocked_claude(stamped_at)
+        }
+    }
+
+    #[test]
+    fn hook_verdict_replies_and_spends_the_request() {
+        let io = MockIo::new(
+            vec![Some(blocked_claude_with_request(1_000_000))],
+            acquired(),
+        )
+        .with_hook_pending();
+        let r = act(&io, &hook_action(), "%1", FireArgs::default());
+        assert_eq!(r.outcome, Outcome::Replied);
+        assert_eq!(r.exit_code(), 0);
+        assert!(
+            io.sent.borrow().is_none(),
+            "the hook lane sends no keystrokes"
+        );
+        assert_eq!(
+            *io.hook_writes.borrow(),
+            vec![("d41d8cd98f00b204".to_string(), HookVerdict::Allow)]
+        );
+        assert_eq!(
+            *io.request_cleared.borrow(),
+            vec!["%1".to_string()],
+            "the id is spent under the same held lock the verdict was written under"
+        );
+        assert!(*io.cleared.borrow(), "the lock is released after the reply");
+    }
+
+    /// The degradation guarantee at the broker: no record on disk, so the same action delivers the
+    /// keystroke it always did.
+    #[test]
+    fn no_request_record_falls_through_to_the_keys_arm() {
+        let io = MockIo::new(
+            vec![Some(blocked_claude_with_request(1_000_000))],
+            acquired(),
+        );
+        let r = act(&io, &hook_action(), "%1", FireArgs::default());
+        assert_eq!(r.outcome, Outcome::Sent);
+        assert_eq!(*io.sent.borrow(), Some(vec!["1".to_string()]));
+        assert!(io.hook_writes.borrow().is_empty(), "nothing was written");
+        assert!(
+            io.request_cleared.borrow().is_empty(),
+            "a keys fire does not spend the id"
+        );
+    }
+
+    /// A pane with no stamped request cannot be on the lane at all, record or no record.
+    #[test]
+    fn an_unstamped_pane_takes_the_keys_arm() {
+        let io = MockIo::new(vec![Some(blocked_claude(1_000_000))], acquired()).with_hook_pending();
+        let r = act(&io, &hook_action(), "%1", FireArgs::default());
+        assert_eq!(r.outcome, Outcome::Sent);
+        assert!(io.hook_writes.borrow().is_empty());
+    }
+
+    /// A verdict that already exists is the request having been answered in the gap: `vanished`
+    /// with the same `request-gone` token the API lane's 404 reports, and nothing is clobbered.
+    #[test]
+    fn an_existing_verdict_maps_to_vanished() {
+        let io = MockIo::new(
+            vec![Some(blocked_claude_with_request(1_000_000))],
+            acquired(),
+        )
+        .with_hook_result(VerdictWrite::Exists);
+        let r = act(&io, &hook_action(), "%1", FireArgs::default());
+        assert_eq!(r.outcome.token(), "vanished");
+        assert_eq!(r.exit_code(), 3);
+        assert_eq!(r.reason(), Some("request-gone"));
+        assert!(
+            io.request_cleared.borrow().is_empty(),
+            "a request that was already answered is not ours to unstamp"
+        );
+    }
+
+    /// The binder is checked before the arm is chosen, so a dispatch quoting a request the pane no
+    /// longer carries never reaches the verdict file.
+    #[test]
+    fn a_stale_expectation_refuses_before_the_verdict_is_written() {
+        let io = MockIo::new(
+            vec![Some(blocked_claude_with_request(1_000_000))],
+            acquired(),
+        )
+        .with_hook_pending();
+        let r = act(
+            &io,
+            &hook_action(),
+            "%1",
+            FireArgs {
+                expect_permission_request: Some("some-other-id"),
+                ..FireArgs::default()
+            },
+        );
+        assert_eq!(r.reason(), Some("request-gone"));
+        assert_eq!(r.exit_code(), 4);
+        assert!(io.hook_writes.borrow().is_empty(), "nothing was written");
+        assert!(io.sent.borrow().is_none(), "and nothing was typed either");
     }
 
     // ---- API-channel lane -----------------------------------------------------------------------

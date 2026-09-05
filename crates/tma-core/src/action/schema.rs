@@ -12,7 +12,10 @@ use crate::manifest::{is_safe_token, Version};
 use crate::state::{AgentState, Detail};
 
 use super::gate::{Requirement, When};
-use super::{ActionError, ActionKind, ActionManifest, ApiOp, ApiReply, ApiTransport};
+use super::{
+    ActionError, ActionKind, ActionManifest, ApiOp, ApiReply, ApiTransport, HookTransport,
+    HookVerdict,
+};
 
 /// Default synchronous execution / lock-expiry bound for an exec action, in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -88,9 +91,9 @@ impl ActionManifest {
         };
         match kind {
             ActionKind::Keys => {
-                // A `keys` action needs at least one transport across `[keys]` and `[api]`
-                // (an api-only action is legal; both empty stays a parse error).
-                if raw.keys.is_empty() && raw.api.is_empty() {
+                // A `keys` action needs at least one transport across `[keys]`, `[api]` and
+                // `[hook]` (a single-transport action is legal; all three empty stays a parse error).
+                if raw.keys.is_empty() && raw.api.is_empty() && raw.hook.is_empty() {
                     return Err(structural(StructuralRule::KeysEmpty));
                 }
                 if raw.command.is_some() {
@@ -110,6 +113,14 @@ impl ActionManifest {
                         agent: agent.clone(),
                     });
                 }
+                // `[hook]` may share an agent with `[keys]` (that overlap IS the degradation path)
+                // but never with `[api]`: a hook-lane miss falls through to keystrokes, not to HTTP.
+                if let Some(agent) = raw.hook.keys().find(|a| raw.api.contains_key(*a)) {
+                    return Err(ActionError::AgentInApiAndHook {
+                        file: file.to_string(),
+                        agent: agent.clone(),
+                    });
+                }
             }
             ActionKind::Exec => {
                 if raw.command.is_none() {
@@ -120,6 +131,9 @@ impl ActionManifest {
                 }
                 if !raw.api.is_empty() {
                     return Err(structural(StructuralRule::ExecForbidsApi));
+                }
+                if !raw.hook.is_empty() {
+                    return Err(structural(StructuralRule::ExecForbidsHook));
                 }
             }
         }
@@ -139,6 +153,15 @@ impl ActionManifest {
                 return Err(ActionError::BadToken {
                     file: file.to_string(),
                     field: "[api] agent",
+                    token: agent.clone(),
+                });
+            }
+        }
+        for agent in raw.hook.keys() {
+            if !is_safe_token(agent) {
+                return Err(ActionError::BadToken {
+                    file: file.to_string(),
+                    field: "[hook] agent",
                     token: agent.clone(),
                 });
             }
@@ -182,6 +205,11 @@ impl ActionManifest {
                     )
                 })
                 .collect(),
+            hook: raw
+                .hook
+                .into_iter()
+                .map(|(agent, t)| (agent, HookTransport { verdict: t.verdict }))
+                .collect(),
         })
     }
 }
@@ -223,6 +251,8 @@ struct RawAction {
     keys: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     api: BTreeMap<String, RawApiTransport>,
+    #[serde(default)]
+    hook: BTreeMap<String, RawHookTransport>,
 }
 
 /// The raw `[api]` per-agent transport. `op` and `reply` are closed serde enums, so an unknown
@@ -232,6 +262,14 @@ struct RawAction {
 struct RawApiTransport {
     op: ApiOp,
     reply: ApiReply,
+}
+
+/// The raw `[hook]` per-agent transport. `verdict` is a closed serde enum, so an unknown or
+/// missing value surfaces as a parse error.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawHookTransport {
+    verdict: HookVerdict,
 }
 
 #[derive(Deserialize)]
@@ -302,7 +340,7 @@ fn validate_when(raw: Option<RawWhen>, file: &str) -> Result<Option<When>, Actio
 /// A per-kind structural rule violation.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StructuralRule {
-    /// `kind = "keys"` with no transport entry across `[keys]` and `[api]`.
+    /// `kind = "keys"` with no transport entry across `[keys]`, `[api]` and `[hook]`.
     KeysEmpty,
     /// `kind = "keys"` carrying `command` (an exec-only field).
     KeysForbidsCommand,
@@ -316,13 +354,15 @@ pub enum StructuralRule {
     ExecForbidsKeys,
     /// `kind = "exec"` carrying an `[api]` table (a keys-kind-only transport).
     ExecForbidsApi,
+    /// `kind = "exec"` carrying a `[hook]` table (a keys-kind-only transport).
+    ExecForbidsHook,
 }
 
 impl fmt::Display for StructuralRule {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let msg = match self {
             StructuralRule::KeysEmpty => {
-                "kind = \"keys\" requires at least one [keys] or [api] transport entry"
+                "kind = \"keys\" requires at least one [keys], [api] or [hook] transport entry"
             }
             StructuralRule::KeysForbidsCommand => {
                 "kind = \"keys\" must not set command (exec only)"
@@ -334,6 +374,7 @@ impl fmt::Display for StructuralRule {
             StructuralRule::ExecNeedsCommand => "kind = \"exec\" requires command",
             StructuralRule::ExecForbidsKeys => "kind = \"exec\" must not set a [keys] table",
             StructuralRule::ExecForbidsApi => "kind = \"exec\" must not set an [api] table",
+            StructuralRule::ExecForbidsHook => "kind = \"exec\" must not set a [hook] table",
         };
         f.write_str(msg)
     }
@@ -652,6 +693,102 @@ opencode = { op = "permission-reply", reply = "once" }
         assert!(a.applies_to("opencode"));
         assert!(!a.applies_to("codex"));
         assert!(a.keys_for("opencode").is_none(), "api agent has no keys");
+    }
+
+    /// The hook lane deliberately shares an agent with `[keys]`: that overlap IS the degradation
+    /// path, so a manifest carrying both parses and both arms are readable.
+    #[test]
+    fn a_hook_transport_may_share_an_agent_with_keys() {
+        let src = r#"
+min_engine_version = "0.1"
+name = "approve"
+label = "Approve"
+kind = "keys"
+when = { state = ["blocked"], detail = ["permission"] }
+
+[keys]
+claude = ["1"]
+
+[hook]
+claude = { verdict = "allow" }
+"#;
+        let a = ActionManifest::parse(src, "approve", "approve.toml").unwrap();
+        assert_eq!(a.keys_for("claude"), Some(["1".to_string()].as_slice()));
+        assert_eq!(
+            a.hook_for("claude"),
+            Some(&HookTransport {
+                verdict: HookVerdict::Allow
+            })
+        );
+        assert!(a.applies_to("claude"));
+        assert!(a.hook_for("codex").is_none());
+    }
+
+    /// A hook-only action is legal (applicability is the union of all three tables), and an
+    /// unknown verdict is a parse error rather than a silently ignored table.
+    #[test]
+    fn a_hook_only_action_is_legal_and_the_verdict_is_closed() {
+        let src = r#"
+min_engine_version = "0.1"
+name = "deny"
+label = "Deny"
+kind = "keys"
+
+[hook]
+claude = { verdict = "deny" }
+"#;
+        let a = ActionManifest::parse(src, "deny", "deny.toml").unwrap();
+        assert!(a.applies_to("claude"));
+        assert_eq!(a.hook_for("claude").unwrap().verdict, HookVerdict::Deny);
+
+        let bad = src.replace("\"deny\" }", "\"maybe\" }");
+        assert!(matches!(
+            ActionManifest::parse(&bad, "deny", "deny.toml"),
+            Err(ActionError::Parse { .. })
+        ));
+    }
+
+    /// `[api]` and `[hook]` for one agent leaves the broker two structured transports and no rule
+    /// for choosing, so it is a parse error. The hook lane falls through to keystrokes, not to HTTP.
+    #[test]
+    fn an_agent_in_both_api_and_hook_is_a_parse_error() {
+        let src = r#"
+min_engine_version = "0.1"
+name = "approve"
+label = "Approve"
+kind = "keys"
+
+[api]
+opencode = { op = "permission-reply", reply = "once" }
+
+[hook]
+opencode = { verdict = "allow" }
+"#;
+        let err = ActionManifest::parse(src, "approve", "approve.toml").unwrap_err();
+        assert!(
+            err.to_string().contains("both [api] and [hook]"),
+            "the error names the collision: {err}"
+        );
+    }
+
+    /// `[hook]` is a `keys`-kind transport; an exec action carrying one is a structural error.
+    #[test]
+    fn exec_forbids_a_hook_table() {
+        let src = r#"
+min_engine_version = "0.1"
+name = "ping"
+label = "Ping"
+kind = "exec"
+command = "true"
+
+[hook]
+claude = { verdict = "allow" }
+"#;
+        let err = ActionManifest::parse(src, "ping", "ping.toml").unwrap_err();
+        assert!(
+            err.to_string().contains("must not set a [hook] table"),
+            "{err}"
+        );
     }
 
     #[test]

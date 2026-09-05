@@ -38,6 +38,7 @@ pub mod transitions;
 pub mod actions;
 pub mod broker;
 pub mod debug;
+pub mod hook_lane;
 mod http;
 pub mod json;
 pub mod notify;
