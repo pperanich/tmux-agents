@@ -938,3 +938,90 @@ fn ls_json_carries_the_pending_call_stamped_on_the_pane() {
         "{json}"
     );
 }
+
+/// The `transcript` key: the path the hook intake stamped on the pane, and `null` before anything
+/// stamped one. It travels the same `list-panes -F` read set the `pending_*` keys needed, so this
+/// covers both the read set and the serialization.
+#[test]
+fn ls_json_carries_the_transcript_stamped_on_the_pane() {
+    if !tma_test_support::tmux_available() {
+        return;
+    }
+    let s = Scratch::new("transcript");
+    let rules = "[[rules]]\nstate = \"blocked\"\npriority = 50\n\
+                 region = \"tail_lines(50)\"\nmatch = { contains = \"READY\" }\n";
+    let pane = setup_agent(&s, "READY\\n", rules);
+    assert!(tma(&s, &["status"]).status.success()); // one cycle to stamp
+
+    let before = tma(&s, &["ls", "--json"]);
+    let json = String::from_utf8_lossy(&before.stdout);
+    assert!(
+        json.contains("\"transcript\":null"),
+        "a pane no hook has registered carries no transcript: {json}"
+    );
+
+    let path = "/w/.claude/projects/p/abc.jsonl";
+    assert!(
+        s.tmux(&["set-option", "-p", "-t", &pane, "@agent_transcript", path])
+            .status
+            .success(),
+        "seed @agent_transcript"
+    );
+
+    let after = tma(&s, &["ls", "--json"]);
+    let json = String::from_utf8_lossy(&after.stdout);
+    assert!(
+        json.contains(&format!("\"transcript\":\"{path}\"")),
+        "{json}"
+    );
+}
+
+/// The `permission_request` and `stamped_at_ms` keys: both read straight off the pane's options, so
+/// this covers the `list-panes -F` read set and the serialization. The first cycle builds its rows
+/// from the options it read before its own stamp, which is why the anchor starts `null` too.
+#[test]
+fn ls_json_carries_the_permission_request_and_stamp_time() {
+    if !tma_test_support::tmux_available() {
+        return;
+    }
+    let s = Scratch::new("rowkeys");
+    let rules = "[[rules]]\nstate = \"blocked\"\npriority = 50\n\
+                 region = \"tail_lines(50)\"\nmatch = { contains = \"READY\" }\n";
+    let pane = setup_agent(&s, "READY\\n", rules);
+
+    let before = tma(&s, &["ls", "--json"]);
+    let json = String::from_utf8_lossy(&before.stdout);
+    assert!(
+        json.contains("\"permission_request\":null"),
+        "a pane waiting on nothing carries no request id: {json}"
+    );
+    assert!(
+        json.contains("\"stamped_at_ms\":null"),
+        "the first cycle's row predates its own stamp: {json}"
+    );
+
+    let id = "per_01ABC";
+    let stamped_at = "1790787200000";
+    for (key, value) in [
+        ("@agent_permission_request", id),
+        ("@agent_stamped_at", stamped_at),
+    ] {
+        assert!(
+            s.tmux(&["set-option", "-p", "-t", &pane, key, value])
+                .status
+                .success(),
+            "seed {key}"
+        );
+    }
+
+    let after = tma(&s, &["ls", "--json"]);
+    let json = String::from_utf8_lossy(&after.stdout);
+    assert!(
+        json.contains(&format!("\"permission_request\":\"{id}\"")),
+        "{json}"
+    );
+    assert!(
+        json.contains(&format!("\"stamped_at_ms\":{stamped_at}")),
+        "{json}"
+    );
+}

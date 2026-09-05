@@ -10,6 +10,25 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **The agent's own transcript file, stamped on the pane as `@agent_transcript`.** Claude Code,
+  Codex, Gemini and Cursor name the session's transcript in their hook payloads
+  (`transcript_path`); tma read the `session_id` beside it and threw the rest away. The path now
+  rides the same guarded write as `@agent_session`, and `tma ls --json` and `tma wait --json` carry
+  it as an additive `transcript` key (the schema stays `1`), so a script that finds a blocked pane
+  can open what that agent has been writing. It is rewritten only when a payload names a different
+  file and removed with the rest of the tuple on session end. OpenCode and pi publish no such path,
+  and a pane detected from the screen alone has none, so both read `null`. Claude's `SubagentStop`
+  `agent_transcript_path` is deliberately not stamped: one session spawns many subagents and one
+  pane option cannot hold them.
+- **`permission_request` and `stamped_at_ms` on the JSON rows.** Both options were already read off
+  every pane and thrown away before the row was built. `tma ls --json` and `tma wait --json` now
+  carry them as additive keys (the schema stays `1`): `permission_request` is the id an OpenCode
+  prompt is waiting on, which a reply must quote but which is no proof the prompt is still open (the
+  plugin's next event and tma's own reply both clear it), and `stamped_at_ms` is when tma last
+  stamped the pane, so a consumer can age the whole row against its own clock instead of guessing.
+
 ### Fixed
 
 - **Claude Code's first-run workspace-trust dialog read `unknown` on 2.1.261.** That build redrew the
@@ -18,7 +37,6 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   rule reads the new layout off its refusal cursor plus the trust wording, and the numbered rule
   stays for the builds that still draw it. Both stamp `blocked` / `trust`, so `approve` and `deny`
   remain gated at a dialog whose affirmative option grants the whole folder.
-
 - **`@agent_pending_call` was stamped empty on every Claude permission prompt.** Claude Code 2.1.261
   sends no `tool_use_id` in its `PermissionRequest` payload, though its `PreToolUse` and
   `PostToolUse` for the same call both still carry one. tma now mints the id from the session id,

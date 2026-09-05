@@ -68,6 +68,7 @@ options carry rollups and hints.
 | `@agent_notified_at` | pane | notification-episode marker, written only by the notifier |
 | `@agent_turn_at` | pane | epoch **ms** of the last hook event that meant "a turn ended" and raised the done marker (`Stop`, codex's `notify`, pi's `agent_settled`). It exists because `@agent_since` is write-once per state run and so cannot move when a second completion lands on a pane that never left `idle`; the notify dedup and `wait --since` compare against the later of the two. Written only by the hook intake, and only when the marker was down, so one turn end reported on two channels records one turn. Absent on a pane that has never had one, which leaves both comparisons reading `@agent_since` alone |
 | `@agent_session` | pane | owning agent session id from hook registration; the subagent guard compares incoming event session ids against this |
+| `@agent_transcript` | pane | path to the agent's own transcript file, as the hook payload's `transcript_path` named it (Claude Code, Codex, Gemini and Cursor carry one; OpenCode and pi do not, and a pane detected from the screen alone never gets one). Stamped beside `@agent_session` under the same guard, rewritten only when a payload names a different file, never cleared on an ordinary edge, and removed with the rest of the tuple on session end. Claude's `SubagentStop` `agent_transcript_path` is deliberately not read: one session spawns many subagents and one option cannot hold them |
 | `@agent_subagents` | pane | space-separated live subagent session ids; SubagentStart appends, SubagentStop removes; bookkeeping only, never top-level state. While it is non-empty, only an event whose session matches `@agent_session` may write state; an event that cannot be attributed (either side missing) is ignored |
 | `@agent_context_pct` | pane | context-utilization metric percent (integer `0`–`100`), or absent when the agent has no telemetry coverage or the channel reported no window (a null-clear); written only by the context intake under the evidence-time write guard, never part of the state tuple |
 | `@agent_context_at` | pane | epoch **ms** of the evidence behind `@agent_context_pct`; written last in the context mini-chain and advanced even by a null-clear, so a reordered stale push cannot walk the gauge backward (`not older` acceptance) |
@@ -123,6 +124,9 @@ A versioned, additive-only document. The top level is `{ "schema": 1, "agents":
 | `attention` | boolean | `true` when the pane still carries `@agent_attention` |
 | `done` | boolean | `true` when the pane is idle **and** carries `@agent_attention`: finished with output nobody has reviewed |
 | `session` | string or null | owning agent session id, `null` when the pane never registered one |
+| `transcript` | string or null | path to the agent's transcript file (`@agent_transcript`), `null` when no hook payload ever named one |
+| `permission_request` | string or null | the id of the permission decision the pane is waiting on (`@agent_permission_request`), `null` when none is outstanding or the pane's channel publishes no id (OpenCode is the one that does today). A consumer answering the prompt must quote this id, but a match is necessary and not sufficient: it is no proof the request is still open, since the plugin's next event and tma's own successful reply both clear the option |
+| `stamped_at_ms` | number or null | epoch **ms** of this pane's last stamp (`@agent_stamped_at`), the freshness anchor for the whole tuple: compare it against your own clock to decide whether the row is stale before acting on it. `null` for a pane nothing has stamped yet |
 | `context` | number or null | context-utilization percent (`0`–`100`), `null` when the agent has no telemetry coverage or the channel reported no window |
 | `context_at_ms` | number or null | epoch **ms** of the evidence behind `context`, `null` when `context` is |
 | `muted` | boolean | `true` when the pane's `@agent_mute_until` is still ahead of the clock, so its notifications are suppressed ([`tma mute`](cli.md#tma-mute)). A resolved boolean, not the deadline: the row is rendered at a known instant, and this is the only question a consumer asks |
@@ -142,7 +146,8 @@ The "done" surface is `state == "idle"` and `attention == true`; `done` carries
 that conjunction precomputed from the one definition the whole tool shares (it is
 also what `wait --until done` and `--state done` mean), so consumers stop
 re-deriving it. The state token itself is never mangled — it stays `idle`. All of
-`attention`, `done`, `session`, `context`, `context_at_ms`, `muted`, `tokens`,
+`attention`, `done`, `session`, `transcript`, `permission_request`, `stamped_at_ms`,
+`context`, `context_at_ms`, `muted`, `tokens`,
 `quota`, `cost_usd`, `repo`, `branch`, `worktree`, `pending_tool`, `pending_call`,
 `pending_summary`, `server`, and `host` are additive, so the schema stays `1` (a new key never
 bumps it, including the keys nested inside `quota`); render an absent `context`, `tokens`, `quota`
@@ -179,7 +184,8 @@ down to one element must not lose the provenance with it. A long-lived
 The single matched agent row as one schema-1 object: the top-level `schema` key
 plus the same row fields as an `ls --json` element (`pane`, `agent`, `state`,
 `detail`, `since`, `since_ms`, `episode_ms`, `locator`, `title`, `attention`, `done`,
-`session`, `context`, `context_at_ms`, `muted`, `tokens`, `quota`, `cost_usd`, `repo`, `branch`,
+`session`, `transcript`, `permission_request`, `stamped_at_ms`, `context`,
+`context_at_ms`, `muted`, `tokens`, `quota`, `cost_usd`, `repo`, `branch`,
 `worktree`, `pending_tool`, `pending_call`, `pending_summary`, `server`, `host`). It shares the
 serialization with `ls --json`, so the two can
 never disagree on keys, order, or null handling.
