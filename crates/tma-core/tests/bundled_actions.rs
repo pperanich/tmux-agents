@@ -1,15 +1,17 @@
-//! Parse round-trips and gate assertions for the bundled action manifests. These are the
-//! compiled-in `keys` actions (`approve`, `deny`, `interrupt`, `compact`); the loader that
-//! embeds them lives in `tma-runtime`, so here we assert each parses under its own stem and gates
-//! as ACTIONS.md pins.
+//! Parse round-trips and gate assertions for the bundled action manifests: the compiled-in `keys`
+//! actions (`approve`, `deny`, `interrupt`, `compact`) and `text` actions (`steer`, `steer_now`).
+//! The loader that embeds them lives in `tma-runtime`, so here we assert each parses under its own
+//! stem and gates as ACTIONS.md pins.
 
 use tma_core::action::{ActionKind, ContextKeys, GateInput, GateOutcome, RefusalReason};
-use tma_core::{ActionManifest, AgentState};
+use tma_core::{ActionManifest, AgentState, TextRefusal};
 
 const APPROVE: &str = include_str!("../actions/approve.toml");
 const DENY: &str = include_str!("../actions/deny.toml");
 const INTERRUPT: &str = include_str!("../actions/interrupt.toml");
 const COMPACT: &str = include_str!("../actions/compact.toml");
+const STEER: &str = include_str!("../actions/steer.toml");
+const STEER_NOW: &str = include_str!("../actions/steer_now.toml");
 
 fn row<'a>(agent: &'a str, state: AgentState) -> GateInput<'a> {
     GateInput {
@@ -35,6 +37,66 @@ fn every_bundled_action_parses_under_its_stem() {
         assert_eq!(a.name, stem);
         assert_eq!(a.kind, ActionKind::Keys);
         assert!(!a.keys.is_empty(), "{stem} is a keys action");
+    }
+}
+
+#[test]
+fn the_bundled_text_actions_parse_and_wrap_with_enter() {
+    for (stem, src) in [("steer", STEER), ("steer_now", STEER_NOW)] {
+        let a = ActionManifest::parse(src, stem, &format!("{stem}.toml"))
+            .unwrap_or_else(|e| panic!("{stem} must parse: {e}"));
+        assert_eq!(a.kind, ActionKind::Text);
+        assert!(!a.confirm, "{stem} is not a second-factor action");
+        assert_eq!(a.sigils, ['/', '!'], "{stem} sigils");
+        for (agent, t) in &a.text {
+            assert!(t.prefix.is_empty(), "{stem}/{agent} needs no prefix");
+            assert_eq!(t.suffix, ["Enter"], "{stem}/{agent} submits with Enter");
+        }
+        // The command plane the sigils exist to keep out of reach.
+        let claude = a.check_text("/compact");
+        assert_eq!(
+            claude,
+            Err(TextRefusal::Sigil),
+            "{stem} must refuse /compact"
+        );
+    }
+}
+
+/// `steer` is idle-only, and `steer_now` is the working-pane action, offered only to the two agents
+/// that declared they queue a message typed mid-turn. gemini is in neither, permanently.
+#[test]
+fn steer_and_steer_now_split_idle_from_working() {
+    let steer = ActionManifest::parse(STEER, "steer", "steer.toml").unwrap();
+    assert_eq!(
+        steer.evaluate_gate(&row("claude", AgentState::Idle)),
+        GateOutcome::Fireable
+    );
+    assert_eq!(
+        steer.evaluate_gate(&row("claude", AgentState::Working)),
+        GateOutcome::Refused(RefusalReason::Gated)
+    );
+    assert_eq!(
+        steer.evaluate_gate(&row("gemini", AgentState::Idle)),
+        GateOutcome::Refused(RefusalReason::WrongAgent)
+    );
+
+    let now = ActionManifest::parse(STEER_NOW, "steer_now", "steer_now.toml").unwrap();
+    for agent in ["claude", "codex"] {
+        assert!(
+            now.text_for(agent).is_some_and(|t| t.steer_now),
+            "{agent} must declare steer_now to be offered here"
+        );
+        assert_eq!(
+            now.evaluate_gate(&row(agent, AgentState::Working)),
+            GateOutcome::Fireable
+        );
+    }
+    for agent in ["gemini", "opencode", "pi", "cursor"] {
+        assert_eq!(
+            now.evaluate_gate(&row(agent, AgentState::Working)),
+            GateOutcome::Refused(RefusalReason::WrongAgent),
+            "{agent} has not declared it queues a mid-turn message"
+        );
     }
 }
 

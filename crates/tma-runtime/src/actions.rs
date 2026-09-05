@@ -30,6 +30,11 @@ const BUNDLED: &[(&str, &str)] = &[
         "compact",
         include_str!("../../tma-core/actions/compact.toml"),
     ),
+    ("steer", include_str!("../../tma-core/actions/steer.toml")),
+    (
+        "steer_now",
+        include_str!("../../tma-core/actions/steer_now.toml"),
+    ),
 ];
 
 /// Errors loading the action set. Every variant names the offending file (an `ActionError` already
@@ -184,7 +189,6 @@ fn user_actions_dir() -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tma_core::ActionKind;
 
     #[test]
     fn bundled_actions_load_and_are_named_by_stem() {
@@ -199,14 +203,22 @@ mod tests {
         std::fs::create_dir_all(&tmp).unwrap();
         let actions = with_env(&tmp, || load(None).unwrap());
         let names: Vec<&str> = actions.iter().map(|a| a.name.as_str()).collect();
-        for want in ["approve", "deny", "interrupt", "compact"] {
+        for want in [
+            "approve",
+            "deny",
+            "interrupt",
+            "compact",
+            "steer",
+            "steer_now",
+        ] {
             assert!(
                 names.contains(&want),
                 "bundled {want} missing from {names:?}"
             );
         }
-        // Every bundled action is a keys action (the safety-critical class).
-        assert!(actions.iter().all(|a| a.kind == ActionKind::Keys));
+        // Every bundled action reaches the pane with keystrokes: no bundled action spawns a
+        // process, because tma cannot review what someone else's script would do.
+        assert!(actions.iter().all(|a| a.kind.sends_keystrokes()));
         let _ = std::fs::remove_dir_all(&tmp);
     }
 
