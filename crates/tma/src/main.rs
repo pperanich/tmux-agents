@@ -19,6 +19,7 @@ mod install_keys;
 mod mute;
 mod redact;
 mod subscribe;
+mod transcript;
 mod wait;
 mod watch_session;
 
@@ -188,6 +189,7 @@ fn main() -> ExitCode {
             manifest_dir,
             config,
         }),
+        Some(Command::Transcript(args)) => transcript::run(args, &server),
         Some(Command::Watch(args)) if args.temporary_session => {
             watch_session::run(watch_session::WatchSessionOpts {
                 args,

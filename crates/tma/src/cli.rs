@@ -84,6 +84,10 @@ pub(crate) enum Command {
     /// pushes when present and degrading to an `--interval` poll otherwise (contract-identical). A
     /// plugin spawns this instead of a polling timer; it exits on a signal or when its stdout closes.
     Subscribe(SubscribeArgs),
+    /// Read what the agent in a pane has been writing: its own transcript, as normalized events,
+    /// newest first. `--last`/`--before` page backwards in bounded chunks; `--event <cursor>`
+    /// fetches one event's body. Exit 4 when the pane has no readable transcript.
+    Transcript(TranscriptArgs),
     /// Persistent live dashboard for a normal pane, window, or terminal of its own. Enter jumps
     /// and normally stays open; `--temporary-session` closes after a jump; `q`/Esc quits.
     Watch(WatchArgs),
@@ -718,6 +722,51 @@ pub(crate) struct LsArgs {
     pub(crate) pane: Option<String>,
     #[command(flatten)]
     pub(crate) selector: SelectorArgs,
+}
+
+/// Args for `tma transcript`. The window is end-anchored: `--last` counts back from the newest
+/// event, and `--before` (a cursor from a previous page's `older`) walks further back. `--event`
+/// is the other request entirely, so it takes neither.
+#[derive(clap::Args)]
+#[command(
+    long_about = "Serve one pane's conversation from the agent's own transcript store, as \
+normalized events, newest first.\n\n\
+Discovery prefers the pane's @agent_transcript stamp and falls back to walking the store's layout \
+from @agent_session. Claude Code, Codex, Gemini and pi are served; cursor-agent and OpenCode are \
+refused by name (`--json` carries the reason as a `refusal` object).\n\n\
+A window carries event HEADERS, not bodies, and pages backwards in bounded chunks, so the cost of \
+opening a 44 MiB session is the same as a 4 KiB one. Take the `older` cursor a page reports and \
+pass it back as --before for the page behind it; pass one event's cursor to --event for its body.\n\n\
+Exit codes:\n  \
+0    the window (or the body) was served\n  \
+3    no such pane\n  \
+4    a typed refusal: no transcript, a store this reader does not serve, or a stale cursor\n  \
+1    a runtime failure"
+)]
+pub(crate) struct TranscriptArgs {
+    /// The agent pane to read (e.g. `%5`).
+    #[arg(long, value_name = "ID")]
+    pub(crate) pane: String,
+    /// How many events to return, counting back from the newest (default 50).
+    #[arg(long, value_name = "N", default_value_t = 50, conflicts_with = "event")]
+    pub(crate) last: usize,
+    /// Return only events older than this cursor: the `older` a previous page reported.
+    #[arg(long, value_name = "CURSOR", conflicts_with = "event")]
+    pub(crate) before: Option<String>,
+    /// Drop bodies and cap every string at the header budget, which is what a remote reader wants.
+    /// Without it a local run carries each event's body inline.
+    #[arg(long, conflicts_with = "event")]
+    pub(crate) headers: bool,
+    /// Fetch one event's body by its cursor instead of a window.
+    #[arg(long, value_name = "CURSOR")]
+    pub(crate) event: Option<String>,
+    /// Read a nested agent's own transcript instead of the parent's (the `child_id` a
+    /// `subagent_ref` event carries). Claude only; no other store writes a child to its own file.
+    #[arg(long, value_name = "ID")]
+    pub(crate) subagent: Option<String>,
+    /// Emit the schema-1 JSON document instead of one tab-separated line per event.
+    #[arg(long)]
+    pub(crate) json: bool,
 }
 
 /// Args for `tma subscribe`: a long-running stream of `ls --json` documents, one per line.

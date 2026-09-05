@@ -1138,6 +1138,7 @@ dependencies = [
  "tma-runtime",
  "tma-test-support",
  "tma-tmux",
+ "tma-transcript",
  "tma-ui",
  "toml",
  "toml_edit",
@@ -1198,6 +1199,14 @@ dependencies = [
  "thiserror",
  "tma-core",
  "tma-test-support",
+]
+
+[[package]]
+name = "tma-transcript"
+version = "0.5.12"
+dependencies = [
+ "thiserror",
+ "toml",
 ]
 
 [[package]]

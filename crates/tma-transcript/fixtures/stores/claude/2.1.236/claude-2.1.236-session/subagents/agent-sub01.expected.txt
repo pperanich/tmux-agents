@@ -1,0 +1,4 @@
+user_message	bytes=5 attachments=0
+tool_call	name=Read call_id=toolu_child01 args=[file_path] bytes=28
+tool_result	call_id=toolu_child01 status=ok bytes=32
+assistant_text	bytes=11
