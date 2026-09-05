@@ -125,6 +125,8 @@ A versioned, additive-only document. The top level is `{ "schema": 1, "agents":
 | `done` | boolean | `true` when the pane is idle **and** carries `@agent_attention`: finished with output nobody has reviewed |
 | `session` | string or null | owning agent session id, `null` when the pane never registered one |
 | `transcript` | string or null | path to the agent's transcript file (`@agent_transcript`), `null` when no hook payload ever named one |
+| `permission_request` | string or null | the id of the permission decision the pane is waiting on (`@agent_permission_request`), `null` when none is outstanding or the pane's channel publishes no id (OpenCode is the one that does today). A consumer answering the prompt must quote this id, but a match is necessary and not sufficient: it is no proof the request is still open, since the plugin's next event and tma's own successful reply both clear the option |
+| `stamped_at_ms` | number or null | epoch **ms** of this pane's last stamp (`@agent_stamped_at`), the freshness anchor for the whole tuple: compare it against your own clock to decide whether the row is stale before acting on it. `null` for a pane nothing has stamped yet |
 | `context` | number or null | context-utilization percent (`0`–`100`), `null` when the agent has no telemetry coverage or the channel reported no window |
 | `context_at_ms` | number or null | epoch **ms** of the evidence behind `context`, `null` when `context` is |
 | `muted` | boolean | `true` when the pane's `@agent_mute_until` is still ahead of the clock, so its notifications are suppressed ([`tma mute`](cli.md#tma-mute)). A resolved boolean, not the deadline: the row is rendered at a known instant, and this is the only question a consumer asks |
@@ -144,7 +146,8 @@ The "done" surface is `state == "idle"` and `attention == true`; `done` carries
 that conjunction precomputed from the one definition the whole tool shares (it is
 also what `wait --until done` and `--state done` mean), so consumers stop
 re-deriving it. The state token itself is never mangled — it stays `idle`. All of
-`attention`, `done`, `session`, `transcript`, `context`, `context_at_ms`, `muted`, `tokens`,
+`attention`, `done`, `session`, `transcript`, `permission_request`, `stamped_at_ms`,
+`context`, `context_at_ms`, `muted`, `tokens`,
 `quota`, `cost_usd`, `repo`, `branch`, `worktree`, `pending_tool`, `pending_call`,
 `pending_summary`, `server`, and `host` are additive, so the schema stays `1` (a new key never
 bumps it, including the keys nested inside `quota`); render an absent `context`, `tokens`, `quota`
@@ -181,7 +184,8 @@ down to one element must not lose the provenance with it. A long-lived
 The single matched agent row as one schema-1 object: the top-level `schema` key
 plus the same row fields as an `ls --json` element (`pane`, `agent`, `state`,
 `detail`, `since`, `since_ms`, `episode_ms`, `locator`, `title`, `attention`, `done`,
-`session`, `transcript`, `context`, `context_at_ms`, `muted`, `tokens`, `quota`, `cost_usd`, `repo`, `branch`,
+`session`, `transcript`, `permission_request`, `stamped_at_ms`, `context`,
+`context_at_ms`, `muted`, `tokens`, `quota`, `cost_usd`, `repo`, `branch`,
 `worktree`, `pending_tool`, `pending_call`, `pending_summary`, `server`, `host`). It shares the
 serialization with `ls --json`, so the two can
 never disagree on keys, order, or null handling.

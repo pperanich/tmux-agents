@@ -23,6 +23,13 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   `agent_transcript_path` is deliberately not stamped: one session spawns many subagents and one
   pane option cannot hold them.
 
+- **`permission_request` and `stamped_at_ms` on the JSON rows.** Both options were already read off
+  every pane and thrown away before the row was built. `tma ls --json` and `tma wait --json` now
+  carry them as additive keys (the schema stays `1`): `permission_request` is the id an OpenCode
+  prompt is waiting on, which a reply must quote but which is no proof the prompt is still open (the
+  plugin's next event and tma's own reply both clear it), and `stamped_at_ms` is when tma last
+  stamped the pane, so a consumer can age the whole row against its own clock instead of guessing.
+
 ## [0.5.11] - 2026-09-04
 
 ### Fixed

@@ -128,6 +128,20 @@ fn write_row_fields(j: &mut JsonWriter, r: &AgentRow, origin: &Origin) {
         Some(p) => j.string("transcript", p),
         None => j.null("transcript"),
     }
+    // Additive (schema stays 1): the id of the permission decision the pane is waiting on (OpenCode
+    // today), `null` when none is outstanding. A reply must quote this id, but a match is necessary
+    // and never sufficient: the agent's next event, or tma's own reply, clears it.
+    match &r.permission_request {
+        Some(id) => j.string("permission_request", id),
+        None => j.null("permission_request"),
+    }
+    // Additive (schema stays 1): when tma last stamped this pane, the freshness anchor for the whole
+    // tuple. Compare it against your own clock to decide whether the row is stale; `null` for a pane
+    // nothing has stamped yet.
+    match r.stamped_at {
+        Some(at) => j.number("stamped_at_ms", at as i64),
+        None => j.null("stamped_at_ms"),
+    }
     match r.context_pct {
         Some(pct) => j.number("context", pct as i64),
         None => j.null("context"),
@@ -450,6 +464,8 @@ mod tests {
             attention: false,
             agent_session: None,
             transcript: None,
+            permission_request: None,
+            stamped_at: None,
             context_pct: None,
             context_at: None,
             tokens: None,
@@ -709,6 +725,29 @@ mod tests {
         assert!(render_wait_json_t(&quota_row("%1")).contains(r#""transcript":null"#));
     }
 
+    /// The pending permission id and the stamp instant on both row surfaces: a plain nullable string
+    /// and a plain nullable number, both read straight off the pane's options, both `null` on a pane
+    /// whose option is unset (no request outstanding, nothing stamped yet).
+    #[test]
+    fn the_permission_request_and_stamp_time_render_on_both_row_surfaces_or_null() {
+        let mut r = quota_row("%1");
+        r.permission_request = Some("per_01ABC".to_string());
+        r.stamped_at = Some(1_790_787_200_000);
+        for json in [
+            render_wait_json_t(&r),
+            render_ls_json_t(&report(vec![r.clone()])),
+        ] {
+            assert!(
+                json.contains(r#""permission_request":"per_01ABC""#),
+                "{json}"
+            );
+            assert!(json.contains(r#""stamped_at_ms":1790787200000"#), "{json}");
+        }
+        let bare = render_wait_json_t(&quota_row("%1"));
+        assert!(bare.contains(r#""permission_request":null"#), "{bare}");
+        assert!(bare.contains(r#""stamped_at_ms":null"#), "{bare}");
+    }
+
     /// The complete `ls --json` key inventory (additive-only): a dropped, renamed, or new key fails
     /// here. `since`/`since_ms` share a value; `since` is the compat key, `since_ms` names the unit.
     #[test]
@@ -735,6 +774,7 @@ mod tests {
                 "pending_call",
                 "pending_summary",
                 "pending_tool",
+                "permission_request",
                 "quota",
                 "repo",
                 "resets_at_ms",
@@ -743,6 +783,7 @@ mod tests {
                 "session",
                 "since",
                 "since_ms",
+                "stamped_at_ms",
                 "state",
                 "title",
                 "tokens",
@@ -779,6 +820,7 @@ mod tests {
                 "pending_call",
                 "pending_summary",
                 "pending_tool",
+                "permission_request",
                 "quota",
                 "repo",
                 "resets_at_ms",
@@ -787,6 +829,7 @@ mod tests {
                 "session",
                 "since",
                 "since_ms",
+                "stamped_at_ms",
                 "state",
                 "title",
                 "tokens",
@@ -826,6 +869,7 @@ mod tests {
                 "pending_call",
                 "pending_summary",
                 "pending_tool",
+                "permission_request",
                 "quota",
                 "repo",
                 "resets_at_ms",
@@ -834,6 +878,7 @@ mod tests {
                 "session",
                 "since",
                 "since_ms",
+                "stamped_at_ms",
                 "state",
                 "title",
                 "tokens",

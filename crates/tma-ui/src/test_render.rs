@@ -76,6 +76,8 @@ pub(crate) fn row(
         attention: false,
         agent_session: None,
         transcript: None,
+        permission_request: None,
+        stamped_at: None,
         context_pct: None,
         context_at: None,
         tokens: None,

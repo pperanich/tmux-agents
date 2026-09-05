@@ -425,6 +425,8 @@ pub fn run_cycle_with(
             attention,
             agent_session: companions.agent_session,
             transcript: companions.transcript,
+            permission_request: companions.permission_request,
+            stamped_at: companions.stamped_at,
             context_pct: companions.context_pct,
             context_at: companions.context_at,
             tokens: companions.tokens,
@@ -559,6 +561,8 @@ fn row_from_stamp(rec: &PaneRecord, stamp: &StampedState, now: u64) -> AgentRow 
         // `@agent_session` is already decoded on the stamp tuple; the metrics ride the options.
         agent_session: stamp.session.clone(),
         transcript: companions.transcript,
+        permission_request: companions.permission_request,
+        stamped_at: companions.stamped_at,
         context_pct: companions.context_pct,
         context_at: companions.context_at,
         tokens: companions.tokens,
@@ -573,13 +577,16 @@ fn row_from_stamp(rec: &PaneRecord, stamp: &StampedState, now: u64) -> AgentRow 
 }
 
 /// The row fields a pane's stored options carry beside the state tuple: the owning `@agent_session`
-/// and the `@agent_transcript` path stamped with it, the `@agent_context_pct` gauge with its
+/// and the `@agent_transcript` path stamped with it, the outstanding `@agent_permission_request`,
+/// the `@agent_stamped_at` freshness anchor, the `@agent_context_pct` gauge with its
 /// `@agent_context_at` evidence time and the `@agent_tokens` count behind it, the account
 /// `@agent_quota_*` trio and `@agent_cost_usd`, and the `@agent_model` label (watch-table-only). A
 /// struct, not a tuple: most of these are numeric options that would swap silently at a call site.
 struct RowCompanions {
     agent_session: Option<String>,
     transcript: Option<String>,
+    permission_request: Option<String>,
+    stamped_at: Option<u64>,
     context_pct: Option<u8>,
     context_at: Option<u64>,
     tokens: Option<u64>,
@@ -598,6 +605,10 @@ fn row_companions(rec: &PaneRecord, now: u64) -> RowCompanions {
     RowCompanions {
         agent_session: opt(opt::SESSION).cloned(),
         transcript: opt(opt::TRANSCRIPT).cloned(),
+        permission_request: opt(opt::PERMISSION_REQUEST).cloned(),
+        // As stored when this cycle read the pane, so it dates the tuple the row carries rather
+        // than the write the cycle is about to make.
+        stamped_at: opt(opt::STAMPED_AT).and_then(|v| v.parse().ok()),
         context_pct: opt(opt::CONTEXT_PCT).and_then(|v| v.parse().ok()),
         context_at: opt(opt::CONTEXT_AT).and_then(|v| v.parse().ok()),
         tokens: opt(opt::TOKENS).and_then(|v| v.parse().ok()),
