@@ -64,6 +64,10 @@ pub(crate) enum Command {
     /// Jump focus to an agent pane across sessions
     /// (`--attention` / `--blocked` / `--next` / `--back` / `--home`).
     Jump(JumpArgs),
+    /// Hand this terminal to the session holding a pane (`--pane %5`): select its window and pane,
+    /// then replace this process with `tmux attach-session`. What a fresh client needs, where
+    /// `jump` moves one that is already attached. Inside tmux it behaves as `jump --pane`.
+    Attach(AttachArgs),
     /// Block until the target reaches one of `--until`'s states, then print the matched row(s). The
     /// scripting primitive: one pane, or a fleet (`--all` / `--count`). Exit 0 = observed,
     /// 124 = timeout, 3 = a watched pane vanished, 4 = its agent died.
@@ -493,6 +497,34 @@ pub(crate) struct JumpArgs {
     /// `--pane`, which names its target).
     #[command(flatten)]
     pub(crate) selector: SelectorArgs,
+}
+
+/// Args for `tma attach`. `--pane` is the only target: the handover replaces this process, so there
+/// is no surface left afterwards for a selector to have narrowed anything for.
+#[derive(clap::Args)]
+#[command(
+    long_about = "Hand this terminal to the tmux session holding a pane. Selects the pane's window \
+and pane on its session, then replaces this process with `tmux attach-session -t <session>` \
+(carrying --socket-name/--socket-path through), so the terminal you are sitting at becomes the \
+tmux client.\n\n\
+This is the handover `jump` cannot do. `tma jump --pane` is `switch-client`, which moves a client \
+that is ALREADY attached, so it does nothing from a terminal that has none (a fresh ssh session, a \
+phone's terminal app). Run inside tmux ($TMUX set), `attach` is exactly `tma jump --pane`: there is \
+already a client to move, and a nested attach is never what anybody means.\n\n\
+Exit codes:\n  \
+0    attached (the exec does not return), or --print printed the argv\n  \
+2    stdin is not a terminal, so there is no tty to hand over\n  \
+3    the pane vanished (before, or between the selects and the attach)\n  \
+1    a runtime failure"
+)]
+pub(crate) struct AttachArgs {
+    /// The pane to land on (e.g. `%5`). Its window and pane are selected before the attach.
+    #[arg(long, value_name = "ID")]
+    pub(crate) pane: String,
+    /// Print the `tmux attach-session` argv instead of exec'ing it; the window and pane are still
+    /// selected. Needs no terminal of its own, since it hands one over to nothing.
+    #[arg(long)]
+    pub(crate) print: bool,
 }
 
 /// Args for `tma wait`. `--pane`/`--any`/`--all`/`--count` are mutually exclusive targets; with none

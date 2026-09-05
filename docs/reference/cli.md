@@ -102,6 +102,7 @@ your other sessions exactly as an unscoped one does.
 | `ls` | List agent panes, one tab-separated line each (`--json` for the versioned schema). |
 | `status` | Print the status-line one-liner: state counts with glyphs and `#[fg=]` styling. |
 | `jump` | Jump focus to an agent pane across sessions (`--attention` / `--blocked` / `--next` / `--back` / `--home` / `--pane`), or menu them (`--menu`). |
+| `attach` | Hand this terminal to the session holding a pane (`--pane %5`): select its window and pane, then replace this process with `tmux attach-session`. |
 | `wait` | Block until the target reaches one of `--until`'s states, then print the matched row(s). One pane, or a fleet (`--all` / `--count`). |
 | `act` | Fire a guarded action into an agent pane (`--all` for every pane in scope), or enumerate/menu the fireable ones (`--list` / `--menu`). |
 | `mute` | Suppress notifications for the panes in scope, for `--for <DURATION>` or until `--clear`. |
@@ -297,6 +298,47 @@ nine carry a `1`-`9` quick-select digit, and each one runs `tma jump --pane <id>
 with the acting client and the invoking server resolved into the command. It is
 what a right-click on a [clickable status
 segment](../how-to/install-the-keybindings.md#clickable-status-segments) opens.
+
+## `tma attach`
+
+Hand the terminal you are sitting at to the tmux session a pane lives in. It
+selects the pane's window and pane on that session, then replaces this process
+with `tmux attach-session -t <session>`, carrying `--socket-name` /
+`--socket-path` through, so what comes back is a real tmux client showing the
+pane you named.
+
+```
+Usage: tma attach --pane <ID> [--print]
+```
+
+| option | meaning |
+|---|---|
+| `--pane <ID>` | The pane to land on (e.g. `%5`). The only target: the handover replaces this process, so there is nothing left afterwards for a selector to have narrowed. |
+| `--print` | Print the `tmux attach-session` argv instead of running it. The window and pane are still selected. Needs no terminal of its own, since it hands one over to nothing. |
+
+This is the half `jump` cannot do. `tma jump --pane` is `switch-client`, which
+moves a client that is **already attached**. From a terminal that has none (a
+fresh ssh session, a phone's terminal app) there is nothing for it to move.
+
+**Inside tmux, `attach` is `jump`.** When `$TMUX` is set there is already a client
+here, and replacing it with a nested one is never what anybody means, so the
+command runs exactly `tma jump --pane <ID>`: same origin trail, same attention
+clear, same "no agent in pane" note. `--print` then has no argv to show and says
+so on stderr.
+
+**It refuses without a terminal.** `tma attach` hands its own tty to tmux, so a
+run whose stdin is not a terminal (a pipe, a `run-shell`, cron) exits `2` before
+moving anything, rather than letting tmux fail with its own terse line after the
+selects have already changed somebody's focus. `--print` is exempt.
+
+Exit codes:
+
+| code | meaning |
+|---|---|
+| `0` | attached (the exec does not return), or `--print` printed the argv |
+| `2` | stdin is not a terminal, so there is no tty to hand over |
+| `3` | the pane vanished, whether before the selects or between them and the attach |
+| `1` | a runtime failure (no tmux binary, an attach tmux refused) |
 
 ## `tma wait`
 

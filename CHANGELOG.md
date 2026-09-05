@@ -10,6 +10,19 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **`tma attach --pane %5`, the way in from a terminal that is not a tmux client yet.** `tma jump`
+  is `switch-client`, which moves a client that is *already attached*: from a fresh ssh session or
+  a phone's terminal app there is nothing for it to move, so the pane you wanted stayed one manual
+  `tmux attach` and some navigation away. `attach` selects the pane's window and pane on its
+  session, then replaces itself with `tmux attach-session -t <session>` (carrying
+  `--socket-name`/`--socket-path` through), so the terminal you are holding becomes the client
+  showing that pane. Inside tmux (`$TMUX` set) it is exactly `tma jump --pane`, which makes it the
+  one command that works from both ends. It refuses with exit 2 when stdin is not a terminal, since
+  it has no tty to hand over, and exit 3 when the pane vanished; `--print` shows the argv it would
+  run instead of running it.
+
 ## [0.5.12] - 2026-09-05
 
 ### Added
