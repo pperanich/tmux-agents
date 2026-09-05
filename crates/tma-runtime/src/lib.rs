@@ -44,6 +44,7 @@ pub mod notify;
 pub mod nudge;
 pub mod seen;
 pub mod ui;
+pub mod window_name;
 
 /// The tmux I/O handle and its error, re-exported so consumers can name the type runtime's public
 /// API already requires (`cycle::run_cycle(&Tmux)`) without a direct [`tma_tmux`] dependency.

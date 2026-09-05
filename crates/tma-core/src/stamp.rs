@@ -164,7 +164,23 @@ pub mod opt {
     /// marker, via `REMOVABLE`). Any non-shell process reappearing clears it, so a live pid-less
     /// agent (gemini's steady `node`, matching no `process_names`) is never shell-only and holds.
     pub const REG_DEAD_SINCE: &str = "@tma_reg_dead_since";
+    /// The window name tma found before its first state-derived rename (`[daemon] window_names`).
+    /// Present exactly while tma owns the window's name; its presence is what licenses a restore.
+    /// Window scope.
+    pub const WINDOW_NAME_ORIG: &str = "@tma_window_name_orig";
+    /// The window-scope `automatic-rename` value saved beside [`WINDOW_NAME_ORIG`], since
+    /// `rename-window` turns that option off. The sentinel [`super::AUTORENAME_UNSET`] records "nothing was
+    /// set at window scope", so the restore unsets it rather than pinning an inherited value.
+    /// Window scope.
+    pub const WINDOW_AUTORENAME_ORIG: &str = "@tma_window_autorename_orig";
+    /// The last name tma wrote to the window. A current name that differs from it means the user
+    /// renamed the window by hand, and tma stops renaming it until the next restore. Window scope.
+    pub const WINDOW_NAME_LAST: &str = "@tma_window_name_last";
 }
+
+/// [`opt::WINDOW_AUTORENAME_ORIG`]'s "was not set at window scope" sentinel. A real tmux value is
+/// `on`/`off`, so no legal value collides with it.
+pub const AUTORENAME_UNSET: &str = "-";
 
 /// The deserialized pane-option tuple for one agent pane.
 #[derive(Clone, Debug, PartialEq, Eq)]

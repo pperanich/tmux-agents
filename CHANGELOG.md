@@ -28,21 +28,6 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   prompt is waiting on, which a reply must quote but which is no proof the prompt is still open (the
   plugin's next event and tma's own reply both clear it), and `stamped_at_ms` is when tma last
   stamped the pane, so a consumer can age the whole row against its own clock instead of guessing.
-
-### Fixed
-
-- **Claude Code's first-run workspace-trust dialog read `unknown` on 2.1.261.** That build redrew the
-  dialog without option numbers and with `No, exit` first and preselected, so the `❯ 1. Yes, I trust
-  this folder` anchor the trust rule was authored on stopped matching at every pane width. A second
-  rule reads the new layout off its refusal cursor plus the trust wording, and the numbered rule
-  stays for the builds that still draw it. Both stamp `blocked` / `trust`, so `approve` and `deny`
-  remain gated at a dialog whose affirmative option grants the whole folder.
-- **`@agent_pending_call` was stamped empty on every Claude permission prompt.** Claude Code 2.1.261
-  sends no `tool_use_id` in its `PermissionRequest` payload, though its `PreToolUse` and
-  `PostToolUse` for the same call both still carry one. tma now mints the id from the session id,
-  the prompt id, the tool name and the tool input when the field is missing: stable across repeated
-  fires of one call, different for the next one, so a status line or script can again tell two
-  prompts apart. A payload that carries a `tool_use_id` is stamped with it unchanged.
 - **The pane options are now a contract another tool can write to, not just read.** [The
   `@agent_state` contract](docs/reference/agent-state-contract.md) is the one-page spec: the closed
   four-token state set and what an out-of-set value silently costs, what `@agent_since` and
@@ -64,6 +49,42 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   (`@agent_stall_notified_at`), takes a `command` of its own like the other triggers, and the
   payload's `state` reads `stall`. The daemon is what notices, since a stalled pane produces no
   events to notice it by.
+- **Two more terminal notification sequences beside OSC 9.** `[notify] osc_777` writes the OSC 777
+  form of the same alert, with the agent as its title and the state as its body, for the emulators
+  that read 777 and ignore 9 (Ghostty, WezTerm). `[notify] osc_progress` writes the OSC 9;4 taskbar
+  indicator instead of a banner: it goes up when a tmux window's rollup gains its first `working`
+  agent and comes down when the last one finishes, so a minimized window still shows that something
+  is running. Both are off by default, and both, like `osc`, now travel out of tmux through its DCS
+  passthrough, which needs `set -g allow-passthrough on` in your tmux config.
+- **tmux window names derived from the agents in them.** `[daemon] window_names = { format =
+  "{repo}:{state}" }` renames each window holding an agent pane after that window's
+  highest-attention state, with `{agent}`, `{state}`, `{detail}`, `{repo}` and `{branch}` to build
+  the name from; an unknown token fails the config load rather than surviving into every window.
+  Only the daemon renames, only when the rendered name actually changes, and only windows that hold
+  an agent. tma saves the window's name and its `automatic-rename` setting on the first rename and
+  puts both back when the last agent pane leaves or the daemon stops, so the feature hands the
+  window list back exactly as it found it. Rename a window yourself and tma notices its own last
+  write no longer matches and leaves that window alone.
+
+### Fixed
+
+- **Claude Code's first-run workspace-trust dialog read `unknown` on 2.1.261.** That build redrew the
+  dialog without option numbers and with `No, exit` first and preselected, so the `❯ 1. Yes, I trust
+  this folder` anchor the trust rule was authored on stopped matching at every pane width. A second
+  rule reads the new layout off its refusal cursor plus the trust wording, and the numbered rule
+  stays for the builds that still draw it. Both stamp `blocked` / `trust`, so `approve` and `deny`
+  remain gated at a dialog whose affirmative option grants the whole folder.
+- **`@agent_pending_call` was stamped empty on every Claude permission prompt.** Claude Code 2.1.261
+  sends no `tool_use_id` in its `PermissionRequest` payload, though its `PreToolUse` and
+  `PostToolUse` for the same call both still carry one. tma now mints the id from the session id,
+  the prompt id, the tool name and the tool input when the field is missing: stable across repeated
+  fires of one call, different for the next one, so a status line or script can again tell two
+  prompts apart. A payload that carries a `tool_use_id` is stamped with it unchanged.
+- **`[notify] osc` never left tmux.** A raw OSC 9 written to a pane's tty is one of the sequences
+  tmux does not forward to its client, so the sink documented as raising a desktop banner raised
+  nothing (verified on tmux 3.6a with a recorded client). The sequence now travels inside tmux's DCS
+  passthrough, which reaches the emulator when `allow-passthrough` is `on`; with it off the
+  behaviour is unchanged (nothing is shown and nothing lands on the pane).
 
 ## [0.5.11] - 2026-09-04
 

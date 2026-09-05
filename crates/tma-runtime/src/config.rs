@@ -13,6 +13,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use tma_core::{AgentState, FoldConfig};
 
+use crate::window_name::NameTemplate;
+
 /// The whole `config.toml`. Every section is optional and every leaf defaults to the value it
 /// replaced, so [`Config::default`] is byte-for-byte the pre-config behavior (`deny_unknown_fields`).
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -244,6 +246,21 @@ pub struct DaemonSection {
     /// [`crate::ipc::restart_decision`].
     #[serde(default = "default_restart_on_upgrade")]
     pub restart_on_upgrade: bool,
+    /// `[daemon.window_names]`: rename each tmux window after the agents in it. Absent ⇒ off, so
+    /// naming the sub-table is the opt-in; `format` inside it is optional.
+    #[serde(default)]
+    pub window_names: Option<WindowNamesSection>,
+}
+
+/// `[daemon.window_names]`: the state-derived window-name feature. One key, and an unknown one stays
+/// a loud error, so a mistyped `format` never leaves the windows silently unnamed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowNamesSection {
+    /// The name template. Tokens are `{agent}`, `{state}`, `{detail}`, `{repo}` and `{branch}`;
+    /// an unknown one fails the load. Default [`crate::window_name::DEFAULT_FORMAT`].
+    #[serde(default)]
+    pub format: NameTemplate,
 }
 
 fn default_sweep_secs() -> u64 {
@@ -271,6 +288,7 @@ impl Default for DaemonSection {
             demote_edges: default_demote_edges(),
             autostart: false,
             restart_on_upgrade: default_restart_on_upgrade(),
+            window_names: None,
         }
     }
 }
@@ -354,6 +372,18 @@ pub struct NotifySection {
     /// emulator you are actually sitting at.
     #[serde(default)]
     pub osc: bool,
+    /// Also post an OSC 777 desktop notification beside the OSC 9 one (default `false`). Same text,
+    /// split into a title (the agent) and a body (the state). Ghostty and WezTerm honour 777 and
+    /// ignore 9, so the two together cover both camps; an emulator that reads both would show one
+    /// notification per sequence, which is why this is its own key rather than a replacement.
+    #[serde(default)]
+    pub osc_777: bool,
+    /// Emit the OSC 9;4 taskbar/tab progress indicator on a window's working edges (default
+    /// `false`): state 3 when a window's rollup gains its first `working` pane, cleared when its
+    /// last one leaves. Ghostty, WezTerm and Windows Terminal render it on the tab, so it survives a
+    /// minimized window. Daemon-only: the edge is a comparison against the previous pass.
+    #[serde(default)]
+    pub osc_progress: bool,
     /// Append one JSON line per fired notification to this path (default unset). The daemonless
     /// answer to the daemon's in-memory transition ring: durable, and a record of what was sent.
     #[serde(default)]
@@ -447,6 +477,12 @@ pub fn notify_cmd_env() -> Option<String> {
 pub struct NotifySinks {
     pub bell: bool,
     pub osc: bool,
+    /// `notify.osc_777`: the OSC 777 companion of the OSC 9 notification.
+    pub osc_777: bool,
+    /// `notify.osc_progress`: the OSC 9;4 taskbar progress lane. Not a per-fire sink like the
+    /// others (it rides a window's working edges), but it is carried here so both fire paths and
+    /// the SIGHUP reload resolve it exactly where they resolve the rest of `[notify]`.
+    pub osc_progress: bool,
     /// `notify.log`: the JSONL audit file every fire appends to, `None` when unconfigured.
     pub log: Option<PathBuf>,
     /// `notify.include_title`: let the pane title out to the carriers. Default `false` — see
@@ -514,6 +550,8 @@ impl Default for NotifySection {
             on: default_notify_on(),
             bell: false,
             osc: false,
+            osc_777: false,
+            osc_progress: false,
             log: None,
             include_title: false,
             context_high: None,
@@ -540,6 +578,8 @@ impl NotifySection {
         NotifySinks {
             bell: self.bell,
             osc: self.osc,
+            osc_777: self.osc_777,
+            osc_progress: self.osc_progress,
             log: self
                 .log
                 .as_ref()
@@ -894,6 +934,8 @@ mod tests {
         // Both tty sinks are opt-in: off by default (display-message-only behavior unchanged).
         assert!(!c.notify.bell);
         assert!(!c.notify.osc);
+        assert!(!c.notify.osc_777);
+        assert!(!c.notify.osc_progress);
         assert!(c.notify.log.is_none());
         assert_eq!(c.notify.sinks(), NotifySinks::default());
         // context_high is opt-in: absent by default (no context-utilization notifications).
@@ -906,6 +948,8 @@ mod tests {
         assert!(c.agent_overrides.is_empty());
         // Per-agent API config is empty by default: the broker relies on the pane stamp.
         assert!(c.api.api_base("opencode").is_none());
+        // State-derived window names are opt-in: absent by default, so tma renames nothing.
+        assert!(c.daemon.window_names.is_none());
         // Telemetry windows: zero-config recognizes the shipped names and nothing else.
         assert!(c.telemetry.windows.knows("gemini-1.5-pro"));
         assert!(!c.telemetry.windows.knows("some-unknown-model"));
@@ -925,6 +969,29 @@ mod tests {
         assert!(c.telemetry.windows.knows("gemini-1.5-pro"));
         // Still unknown outside the union.
         assert!(!c.telemetry.windows.knows("mystery-model"));
+    }
+
+    /// `[daemon.window_names]`: naming the sub-table is the opt-in, `format` inside it optional,
+    /// and an unknown token in the format fails the load rather than surviving into every name.
+    #[test]
+    fn window_names_opts_in_by_name_and_rejects_an_unknown_token() {
+        let c: Config = toml::from_str("[daemon]\nwindow_names = {}\n").unwrap();
+        let names = c.daemon.window_names.expect("named the sub-table");
+        assert_eq!(names.format.to_string(), crate::window_name::DEFAULT_FORMAT);
+
+        let c: Config =
+            toml::from_str("[daemon.window_names]\nformat = \"{agent} {state}\"\n").unwrap();
+        assert_eq!(
+            c.daemon.window_names.unwrap().format.to_string(),
+            "{agent} {state}"
+        );
+
+        let err = toml::from_str::<Config>("[daemon.window_names]\nformat = \"{model}\"\n")
+            .expect_err("an unknown token is a config error");
+        assert!(
+            err.to_string().contains("unknown token `{model}`"),
+            "the error names the token: {err}"
+        );
     }
 
     /// A partial section fills only the named field; the rest stay at their per-field defaults.
@@ -1333,6 +1400,14 @@ mod tests {
                 toml::Value::Boolean(c.notify.bell),
             ),
             ("notify.osc".to_string(), toml::Value::Boolean(c.notify.osc)),
+            (
+                "notify.osc_777".to_string(),
+                toml::Value::Boolean(c.notify.osc_777),
+            ),
+            (
+                "notify.osc_progress".to_string(),
+                toml::Value::Boolean(c.notify.osc_progress),
+            ),
             (
                 "notify.on".to_string(),
                 toml::Value::Array(

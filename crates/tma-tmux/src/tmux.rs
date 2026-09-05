@@ -3,7 +3,7 @@
 //! parent holds the `Tmux` handle, spawn plumbing, and session/probe lifecycle; one submodule per
 //! concern: `read` (list-panes/capture/ps, the poll cycle's whole input), `options` (pane/server
 //! option writes behind the stamp guard), `hooks` (global hook management), `display` (menu,
-//! focus, keys, bell).
+//! focus, keys, bell), `window` (the opt-in window-name pass's own read).
 //!
 //! Every tmux invocation handles a gone server gracefully: [`TmuxError::ServerGone`] is a clean,
 //! expected outcome distinct from a real failure.
@@ -20,9 +20,11 @@ mod display;
 mod hooks;
 mod options;
 mod read;
+mod window;
 
-pub use display::{escape_menu_label, MenuItem};
+pub use display::{escape_menu_label, MenuItem, Progress};
 pub use read::{normalize_comm, ps_all, DepartureKind, PaneRecord};
+pub use window::WindowPaneRow;
 
 /// Field separator for the `list-panes` format: US (`\x1f`) never appears in a pane title or command
 /// in practice, so a plain split is unambiguous; the free-form title is placed last for extra safety.

@@ -1,7 +1,8 @@
 //! The interactive/effect surface: single-value `display-message` reads, `focus`
 //! (switch-client/select-window/select-pane), key delivery, the `display-menu`, the
-//! status-line message (fanned out to every attached client), and the two pane-tty notification
-//! sinks (the terminal bell and the OSC 9 desktop notification).
+//! status-line message (fanned out to every attached client), and the pane-tty notification sinks
+//! (the terminal bell, the OSC 9 and OSC 777 desktop notifications, and the OSC 9;4 taskbar
+//! progress indicator).
 
 use super::{Tmux, TmuxError};
 
@@ -232,8 +233,26 @@ impl Tmux {
     /// end of an ssh/mosh/tmate connection is what renders it, so this reaches the machine you are
     /// sitting at while `notify.command` runs on the machine running tmux. Support varies by emulator
     /// (hence the opt-in); an emulator that does not understand OSC 9 ignores the sequence.
+    ///
+    /// Wrapped for tmux's DCS passthrough ([`passthrough`]), which is what actually carries an OSC
+    /// out of a pane; see that function for why, and for the `allow-passthrough` requirement.
     pub fn osc_notify(&self, pane_id: &str, text: &str) {
-        self.write_pane_tty(pane_id, &osc9(text));
+        self.write_pane_tty(pane_id, &passthrough(&osc9(text)));
+    }
+
+    /// [`Self::osc_notify`]'s OSC 777 twin (`notify.osc_777`): the sequence Ghostty and WezTerm
+    /// honour, which carries a title and a body rather than one string. Emitted alongside OSC 9, and
+    /// an emulator that understands only one of the two renders exactly one notification.
+    pub fn osc777_notify(&self, pane_id: &str, title: &str, body: &str) {
+        self.write_pane_tty(pane_id, &passthrough(&osc777(title, body)));
+    }
+
+    /// Set the terminal's taskbar/tab progress indicator (`notify.osc_progress`): OSC 9;4, which
+    /// Ghostty, WezTerm and Windows Terminal render on the tab itself, so it survives a minimized
+    /// window in a way a transient banner does not. Written to the pane's tty like every other sink
+    /// here, and emitted only on an edge, never per cycle.
+    pub fn osc_progress(&self, pane_id: &str, progress: Progress) {
+        self.write_pane_tty(pane_id, &passthrough(&osc9_4(progress)));
     }
 
     /// Write bytes to a pane's tty, best-effort: every failure is swallowed, and the tty is opened
@@ -288,6 +307,83 @@ fn osc9(text: &str) -> Vec<u8> {
 /// Cap on the OSC 9 body. The text tma sends is a short `<agent> <state>`; the cap is a backstop so
 /// no caller can push an unbounded escape sequence at the emulator.
 const OSC_TEXT_MAX: usize = 200;
+
+/// Build the OSC 777 notification sequence `ESC ] 777 ; notify ; <title> ; <body> BEL`. `;` is
+/// dropped from both fields on top of the control-byte filter [`osc9`] applies: it is this
+/// sequence's own field separator, so a `;` in the title would silently shift the body.
+fn osc777(title: &str, body: &str) -> Vec<u8> {
+    let mut out = Vec::with_capacity(title.len() + body.len() + 14);
+    out.extend_from_slice(b"\x1b]777;notify;");
+    out.extend(osc_field(title));
+    out.push(b';');
+    out.extend(osc_field(body));
+    out.push(0x07);
+    out
+}
+
+/// One OSC 777 field: printable bytes only, no `;`, bounded by [`OSC_TEXT_MAX`].
+fn osc_field(text: &str) -> Vec<u8> {
+    text.bytes()
+        .filter(|b| *b >= 0x20 && *b != 0x7f && *b != b';')
+        .take(OSC_TEXT_MAX)
+        .collect()
+}
+
+/// What the OSC 9;4 progress indicator should show.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Progress {
+    /// State 3: work is running, with no percentage to report (a pulsing/indeterminate bar).
+    Indeterminate,
+    /// State 0: no work running, which removes the indicator.
+    Clear,
+}
+
+impl Progress {
+    /// The OSC 9;4 state digit.
+    fn state(self) -> u8 {
+        match self {
+            Progress::Indeterminate => b'3',
+            Progress::Clear => b'0',
+        }
+    }
+}
+
+/// Build the OSC 9;4 progress sequence `ESC ] 9 ; 4 ; <state> ; 0 BEL`. The trailing `0` is the
+/// percentage field, which every state tma emits ignores.
+fn osc9_4(progress: Progress) -> Vec<u8> {
+    vec![
+        0x1b,
+        b']',
+        b'9',
+        b';',
+        b'4',
+        b';',
+        progress.state(),
+        b';',
+        b'0',
+        0x07,
+    ]
+}
+
+/// Wrap an escape sequence in tmux's DCS passthrough: `ESC P tmux ; <seq, ESC doubled> ESC \`.
+///
+/// tmux parses pane output itself and forwards only the OSC codes it handles (title, colours,
+/// clipboard); 9, 777 and 9;4 are not among them, so an unwrapped sequence written to a pane tty is
+/// consumed by tmux and never reaches the emulator (verified against tmux 3.6a). Wrapped, it does,
+/// provided the user has `set -g allow-passthrough on`. With that option off tmux drops the whole
+/// DCS silently, printing nothing into the pane, so the wrapper is never worse than not wrapping.
+fn passthrough(sequence: &[u8]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(sequence.len() + 10);
+    out.extend_from_slice(b"\x1bPtmux;");
+    for byte in sequence {
+        if *byte == 0x1b {
+            out.push(0x1b); // an ESC inside the payload has to be doubled
+        }
+        out.push(*byte);
+    }
+    out.extend_from_slice(b"\x1b\\");
+    out
+}
 
 /// Build the `display-message` argv for reading one format, optionally against a specific client
 /// (`-c <client>`). Split out so client targeting is unit-testable without a live server.
@@ -355,6 +451,43 @@ mod tests {
         let long = osc9(&"x".repeat(OSC_TEXT_MAX * 2));
         assert_eq!(long.len(), OSC_TEXT_MAX + 5);
         assert_eq!(*long.last().unwrap(), 0x07);
+    }
+
+    #[test]
+    fn osc777_carries_a_title_and_a_body() {
+        assert_eq!(
+            osc777("claude", "blocked"),
+            b"\x1b]777;notify;claude;blocked\x07".to_vec()
+        );
+        // `;` is this sequence's field separator, so it never survives into a field.
+        assert_eq!(
+            osc777("a;b", "c\x07d"),
+            b"\x1b]777;notify;ab;cd\x07".to_vec()
+        );
+        let long = osc777(&"x".repeat(OSC_TEXT_MAX * 2), "s");
+        assert_eq!(long.len(), OSC_TEXT_MAX + 16);
+    }
+
+    #[test]
+    fn osc9_4_encodes_the_two_progress_states() {
+        assert_eq!(
+            osc9_4(Progress::Indeterminate),
+            b"\x1b]9;4;3;0\x07".to_vec()
+        );
+        assert_eq!(osc9_4(Progress::Clear), b"\x1b]9;4;0;0\x07".to_vec());
+    }
+
+    #[test]
+    fn passthrough_wraps_and_doubles_the_escape() {
+        assert_eq!(
+            passthrough(b"\x1b]9;4;3;0\x07"),
+            b"\x1bPtmux;\x1b\x1b]9;4;3;0\x07\x1b\\".to_vec()
+        );
+        // Two escapes in the payload are both doubled; nothing else is touched.
+        assert_eq!(
+            passthrough(b"\x1ba\x1b"),
+            b"\x1bPtmux;\x1b\x1ba\x1b\x1b\x1b\\".to_vec()
+        );
     }
 
     #[test]

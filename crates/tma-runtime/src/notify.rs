@@ -180,6 +180,12 @@ pub fn fire(
         tmux.osc_notify(&n.pane, &format!("{} {}", n.agent, n.state));
     }
 
+    // The OSC 777 companion: the same two words, split into the title and body that sequence takes.
+    // Ghostty and WezTerm read 777 and ignore 9, so enabling both covers either emulator.
+    if sinks.osc_777 {
+        tmux.osc777_notify(&n.pane, &n.agent, &n.state);
+    }
+
     // One decision for all three carriers below; `display-message` above already ran with the real
     // title, because it is host-local and never leaves the machine.
     let title = TitlePolicy::from_include(sinks.include_title);
@@ -608,6 +614,9 @@ pub fn fire_completion(
     }
     if sinks.osc {
         tmux.osc_notify(&c.pane, &format!("{} {}", c.action, c.outcome));
+    }
+    if sinks.osc_777 {
+        tmux.osc777_notify(&c.pane, &c.action, &c.outcome);
     }
 
     // Audit line before the command, so a hung or missing hook cannot cost the record.

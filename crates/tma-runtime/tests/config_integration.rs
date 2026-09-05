@@ -630,6 +630,42 @@ fn notify_bell_rings_the_firing_pane() {
     );
 }
 
+/// `notify.osc_777`: the OSC 777 companion rides the same daemonless fire as `notify.osc`, and
+/// neither sequence ever lands on the user's screen. The escapes go to the pane's tty wrapped in
+/// tmux's DCS passthrough, so tmux either forwards them to its clients (`allow-passthrough on`) or
+/// drops them; a wrapper that got the framing wrong would instead print the raw bytes into the pane,
+/// which is exactly what this asserts against. Run with passthrough both off and on, since the two
+/// take different paths through tmux's parser.
+#[test]
+fn notify_osc_sequences_never_land_on_the_pane_screen() {
+    if !common::tmux_available() {
+        return;
+    }
+    for passthrough in ["off", "on"] {
+        let s = Scratch::new(&format!("osc777_{passthrough}"));
+        s.tmux(&["set-option", "-g", "allow-passthrough", passthrough]);
+        let pane = daemonless_blocked_fire(
+            &s,
+            "[notify]\nfrom_event = true\nosc = true\nosc_777 = true\n",
+        );
+        // The fire writes the tty; tmux reads it asynchronously, so give the server a moment.
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        let out = s.tmux(&["capture-pane", "-p", "-t", &pane]);
+        let screen = String::from_utf8_lossy(&out.stdout);
+        for stray in ["777", "notify;", "Ptmux", "]9;"] {
+            assert!(
+                !screen.contains(stray),
+                "allow-passthrough {passthrough}: {stray:?} leaked onto the pane: {screen:?}"
+            );
+        }
+        // The pane is still the pane: its own chrome survived the escape write intact.
+        assert!(
+            screen.contains("READY"),
+            "allow-passthrough {passthrough}: the pane's own output is gone: {screen:?}"
+        );
+    }
+}
+
 /// Harness isolation: pinning `TMA_CONFIG` to the shared empty file shields `tma status` from a
 /// hostile config at the `$XDG_CONFIG_HOME/tma/config.toml` default location, because `TMA_CONFIG`
 /// outranks the XDG/`HOME` lookup. The no-pin control reads the hostile config, proving the pin is

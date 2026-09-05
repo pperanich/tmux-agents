@@ -53,9 +53,73 @@ blocked`. It deliberately omits the pane title: a title is written by whatever
 runs in the pane, and an escape sequence is a poor place for text tma does not
 control.
 
-The tmux status-line message that accompanies every fire now goes to **every**
+The tmux status-line message that accompanies every fire goes to **every**
 attached client, so both terminals in a pairing setup see it, not just the one
 that was active most recently.
+
+### Let the sequences out of tmux
+
+tmux parses everything a pane prints and forwards only the escape sequences it
+handles itself: window titles, colours, the clipboard. OSC 9 is not one of them,
+so tma wraps every sequence on this page in tmux's own passthrough envelope. That
+envelope needs one line in your tmux config:
+
+```tmux
+set -g allow-passthrough on
+```
+
+Without it tmux drops the sequence silently: nothing reaches your emulator, and
+nothing is printed into the pane either. This applies to `osc`, `osc_777` and
+`osc_progress` alike, and it is the first thing to check when a supported
+emulator shows no banner.
+
+### The OSC 777 form
+
+Ghostty and WezTerm implement OSC 777 and ignore OSC 9. `osc_777` writes that
+form beside the OSC 9 one, with the same text split the way 777 wants it: the
+agent as the title, the state as the body:
+
+```toml
+[notify]
+on = ["blocked", "done"]
+osc = true
+osc_777 = true
+```
+
+Turn on the one your emulator reads, or both: they are independent keys because
+an emulator that understands both would show one banner per sequence. Which is
+which today:
+
+| sequence | key | emulators |
+|---|---|---|
+| OSC 9 | `osc` | iTerm2, kitty, WezTerm |
+| OSC 777 | `osc_777` | Ghostty, WezTerm |
+| OSC 9;4 | `osc_progress` | Ghostty, WezTerm, Windows Terminal |
+
+## Show progress on the tab
+
+A banner is a moment; `osc_progress` is a state. It writes the OSC 9;4 progress
+sequence, which those emulators render on the tab or in the taskbar, so it is
+still there after you have switched away or minimized the window:
+
+```toml
+[notify]
+osc_progress = true
+```
+
+It is scoped to a tmux **window**, not a pane: the indeterminate state goes out
+when a window's rollup gains its first `working` agent, and the clear when its
+last one finishes. Nothing is written in between, so a window full of working
+agents costs exactly two sequences for the whole run.
+
+Two things follow from the sequence being a terminal-level state. The indicator
+belongs to the terminal tab rather than to the tmux window, so with agents
+working in several tmux windows at once the most recent edge is what the tab
+shows. And because it persists, the daemon clears it on shutdown and when you
+turn the key off and reload, rather than leaving a lit tab behind.
+
+This one needs a running daemon: the edge is a comparison against the previous
+pass, which only a resident process has.
 
 ## Run a command
 
@@ -279,9 +343,10 @@ Three things do work across a connection:
 - **The bell.** `bell = true` writes a BEL to the pane's tty, which travels down
   the ssh/mosh/tmate connection like any other output, and your local terminal
   (or tmux's `monitor-bell`) reacts.
-- **The OSC sink.** `osc = true` does the same with an OSC 9 sequence, so a
-  supporting emulator raises a real desktop notification on the machine you are
-  sitting at. Zero configuration on the remote side.
+- **The OSC sinks.** `osc = true` (and `osc_777 = true`) do the same with an
+  escape sequence, so a supporting emulator raises a real desktop notification on
+  the machine you are sitting at. The remote side needs only `allow-passthrough
+  on` in the tmux running there.
 - **A push service.** Send the notification out over the network instead of to a
   desktop. [ntfy](https://ntfy.sh) is the smallest version — the whole payload
   is on stdin, so a one-liner works:

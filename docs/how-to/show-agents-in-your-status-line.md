@@ -68,6 +68,47 @@ per-window rollup costs no extra process:
 set -g window-status-format '#I:#W #{@agent_summary}'
 ```
 
+## Name windows after their agents
+
+The rollup above renders beside the window name. The other option is to make it
+*be* the window name, which is what you want when the window list is your only
+view of the fleet (a narrow terminal, or a tab bar outside tmux reading
+`#{window_name}`). This one needs the daemon, and it writes:
+
+```toml
+[daemon.window_names]
+format = "{repo}:{state}"
+```
+
+A window with one blocked Claude in the `tma` checkout reads `tma:blocked`. The
+tokens are `{agent}`, `{state}`, `{detail}`, `{repo}` and `{branch}`; the full
+reference is in
+[Configuration](../reference/configuration.md#window_names). `{state}` is the
+window's highest-attention state, the same order the rollup prints in, so a
+window holding a blocked agent and two working ones reads `blocked`.
+
+Only windows with at least one agent pane are renamed, and only when the name
+actually changes. A window whose rollup has not moved costs one read and no
+write, which matters here for the reason [above](#what-a-refresh-costs): a
+`rename-window` is an option write and every one of those redraws every attached
+client.
+
+**It gives the window back.** On its first rename tma saves the window's name in
+`@tma_window_name_orig` and its `automatic-rename` setting in
+`@tma_window_autorename_orig` (`rename-window` turns that off as a side effect,
+so it has to be saved to be put back). Both are restored, and both options
+dropped, when the last agent pane leaves the window or the daemon stops. Turning
+the feature off and reloading (`tma reload`) restores them too.
+
+**It does not fight you.** tma records what it last wrote in
+`@tma_window_name_last`. Rename a window yourself and the current name no longer
+matches that, so tma leaves that window alone until the next restore hands it
+back.
+
+The zero-write alternative is the `window-status-format` recipe above: it reads
+the same rollup, costs no option write of its own, and needs no daemon. Reach for
+`window_names` when something outside tmux's status line has to see the state.
+
 ## Scope it to one session
 
 The counts `tma status` prints obey the [selector

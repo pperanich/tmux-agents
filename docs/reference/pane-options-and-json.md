@@ -94,6 +94,9 @@ options carry rollups and hints.
 | `@agent_session_summary` | session | the same rollup grammar over every agent pane in the session, written by the same writers under the same guards. A distinct key rather than `@agent_summary` at session scope because a pane-context format read falls back pane → window → session: one shared name would make an agentless window render its session's counts |
 | `@tma_last_poll` | server | hint only; the per-pane `@agent_stamped_at` is authoritative for freshness |
 | `@tma_watch_pid` | pane (on the watcher's own pane) | the focus-nudge target; `tma watch` advertises its pid here on its own `$TMUX_PANE` at startup and unsets it on every quit path, so it dies with the pane |
+| `@tma_window_name_orig` | window | the window's name before `[daemon] window_names` first renamed it. Present exactly while tma owns the name, and its presence is what licenses the restore |
+| `@tma_window_autorename_orig` | window | the window-scope `automatic-rename` saved beside it, since `rename-window` turns that option off. The sentinel `-` records "was not set at window scope", so the restore unsets rather than pinning an inherited value |
+| `@tma_window_name_last` | window | the last name tma wrote. A current `#{window_name}` that differs means you renamed the window yourself, and tma stops renaming it until the next restore |
 
 Values that depend on a previous value (the write-once `@agent_since`, the
 notification dedup, the hook-versus-capture arbitration) are governed by
