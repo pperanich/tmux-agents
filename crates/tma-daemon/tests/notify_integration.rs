@@ -397,7 +397,7 @@ fn blocked_transition_fires_once_and_dedups_within_episode() {
         marker2.parse::<u64>().unwrap_or(0) > marker1.parse::<u64>().unwrap_or(u64::MAX),
         "the re-fire wrote a fresh marker for the new episode (got {marker2}, was {marker1})"
     );
-    assert_eq!(s.status_u64("notify_fires"), 2, "exactly two fires total");
+    s.expect_status("notify_fires", "2");
 
     // The ring this daemon accumulated is readable over the socket (`tma debug transitions`), both
     // renderings off the one wire document.
@@ -1265,7 +1265,7 @@ fn context_high_fires_once_then_rearms_and_refires() {
         2,
         "the next crossing after a rearm fires exactly one more"
     );
-    assert_eq!(s.status_u64("notify_fires"), 2, "exactly two context fires");
+    s.expect_status("notify_fires", "2");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1361,7 +1361,8 @@ fn stall_fires_once_per_working_run_and_rearms_when_the_run_ends() {
         2,
         "the next working run past the threshold fires exactly one more"
     );
-    assert_eq!(s.status_u64("notify_fires"), 2, "exactly two stall fires");
+    // The sink line lands before the daemon rewrites its status file, so poll the counter.
+    s.expect_status("notify_fires", "2");
 }
 
 // ---------------------------------------------------------------------------------------------
