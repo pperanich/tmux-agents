@@ -372,6 +372,18 @@ pub struct NotifySection {
     /// emulator you are actually sitting at.
     #[serde(default)]
     pub osc: bool,
+    /// Also post an OSC 777 desktop notification beside the OSC 9 one (default `false`). Same text,
+    /// split into a title (the agent) and a body (the state). Ghostty and WezTerm honour 777 and
+    /// ignore 9, so the two together cover both camps; an emulator that reads both would show one
+    /// notification per sequence, which is why this is its own key rather than a replacement.
+    #[serde(default)]
+    pub osc_777: bool,
+    /// Emit the OSC 9;4 taskbar/tab progress indicator on a window's working edges (default
+    /// `false`): state 3 when a window's rollup gains its first `working` pane, cleared when its
+    /// last one leaves. Ghostty, WezTerm and Windows Terminal render it on the tab, so it survives a
+    /// minimized window. Daemon-only: the edge is a comparison against the previous pass.
+    #[serde(default)]
+    pub osc_progress: bool,
     /// Append one JSON line per fired notification to this path (default unset). The daemonless
     /// answer to the daemon's in-memory transition ring: durable, and a record of what was sent.
     #[serde(default)]
@@ -428,6 +440,12 @@ pub fn notify_cmd_env() -> Option<String> {
 pub struct NotifySinks {
     pub bell: bool,
     pub osc: bool,
+    /// `notify.osc_777`: the OSC 777 companion of the OSC 9 notification.
+    pub osc_777: bool,
+    /// `notify.osc_progress`: the OSC 9;4 taskbar progress lane. Not a per-fire sink like the
+    /// others (it rides a window's working edges), but it is carried here so both fire paths and
+    /// the SIGHUP reload resolve it exactly where they resolve the rest of `[notify]`.
+    pub osc_progress: bool,
     /// `notify.log`: the JSONL audit file every fire appends to, `None` when unconfigured.
     pub log: Option<PathBuf>,
     /// `notify.include_title`: let the pane title out to the carriers. Default `false` — see
@@ -489,6 +507,8 @@ impl Default for NotifySection {
             on: default_notify_on(),
             bell: false,
             osc: false,
+            osc_777: false,
+            osc_progress: false,
             log: None,
             include_title: false,
             context_high: None,
@@ -514,6 +534,8 @@ impl NotifySection {
         NotifySinks {
             bell: self.bell,
             osc: self.osc,
+            osc_777: self.osc_777,
+            osc_progress: self.osc_progress,
             log: self
                 .log
                 .as_ref()
@@ -867,6 +889,8 @@ mod tests {
         // Both tty sinks are opt-in: off by default (display-message-only behavior unchanged).
         assert!(!c.notify.bell);
         assert!(!c.notify.osc);
+        assert!(!c.notify.osc_777);
+        assert!(!c.notify.osc_progress);
         assert!(c.notify.log.is_none());
         assert_eq!(c.notify.sinks(), NotifySinks::default());
         // context_high is opt-in: absent by default (no context-utilization notifications).
@@ -1302,6 +1326,14 @@ mod tests {
                 toml::Value::Boolean(c.notify.bell),
             ),
             ("notify.osc".to_string(), toml::Value::Boolean(c.notify.osc)),
+            (
+                "notify.osc_777".to_string(),
+                toml::Value::Boolean(c.notify.osc_777),
+            ),
+            (
+                "notify.osc_progress".to_string(),
+                toml::Value::Boolean(c.notify.osc_progress),
+            ),
             (
                 "notify.on".to_string(),
                 toml::Value::Array(

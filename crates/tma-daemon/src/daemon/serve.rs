@@ -455,6 +455,9 @@ pub(super) fn serve(
             }
         }
     }
+    // Take down any OSC 9;4 progress indicator this daemon lit: it is state the emulator keeps, so
+    // nothing else would ever clear it once the daemon that raised it is gone.
+    notify.shutdown_progress(tmux);
     // Hand every window tma renamed back to the user before this process goes away: a name frozen on
     // the state some agent was in when the daemon stopped is worse than never having renamed it.
     if window_names.enabled() {

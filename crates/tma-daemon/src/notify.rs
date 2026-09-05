@@ -7,7 +7,7 @@
 //! predates `@agent_since`: one predicate that is dedup, cold-start, and episode re-arming.
 //! Write-before-fire commits the marker BEFORE the action, so a crash drops one fire, never doubles.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::process::Child;
 
 use tma_core::render;
@@ -17,6 +17,10 @@ use tma_core::{AgentState, Provenance, ReadResult, StampedState};
 use tma_runtime::config::{trigger_enabled, NotifyCommands, NotifySinks, NotifyTrigger};
 use tma_runtime::notify::{evaluate_context_high, fire, notification_for, trigger_for};
 use tma_tmux::tmux::{PaneRecord, Tmux, TmuxError};
+
+mod progress;
+
+use progress::WindowKey;
 
 /// Env var that OVERRIDES the `notify.command` config (a test/CI seam; config is canonical). Unset ⇒
 /// use `notify.command`; both unset ⇒ `display-message` only.
@@ -86,12 +90,17 @@ pub(crate) struct NotifyState {
     last_state: HashMap<String, AgentState>,
     /// In-flight fire-and-forget command children awaiting reap (bounded by [`MAX_PENDING`]).
     pending: Vec<PendingFire>,
+    /// `notify.osc_progress`: the windows that held a `working` pane at the last pass. The progress
+    /// sequence sets a state the emulator keeps, so only the edges against this set are written.
+    working_windows: BTreeSet<WindowKey>,
 
     // ---- introspection counters (status file; tests + operators) ----
     /// Notifications fired over the daemon's life (monotone).
     fires: u64,
     /// Transitions pushed into the history ring over the daemon's life (monotone).
     transitions_recorded: u64,
+    /// OSC 9;4 progress edges written over the daemon's life (monotone).
+    progress_edges: u64,
 }
 
 impl NotifyState {
@@ -112,8 +121,10 @@ impl NotifyState {
             history: VecDeque::new(),
             last_state: HashMap::new(),
             pending: Vec::new(),
+            working_windows: BTreeSet::new(),
             fires: 0,
             transitions_recorded: 0,
+            progress_edges: 0,
         }
     }
 
@@ -186,7 +197,49 @@ impl NotifyState {
 
         // Prune the last-seen map to live agent panes: a closed/exited pane drops its entry.
         self.last_state.retain(|p, _| live.contains(p));
+        self.dispatch_progress(tmux, &panes);
         Ok(())
+    }
+
+    /// The `notify.osc_progress` lane, off the same `list-panes` read: write the working edges this
+    /// pass produced and remember the new set. With the sink off it only takes down whatever a
+    /// previously-enabled pass left lit, then costs nothing (the set stays empty).
+    fn dispatch_progress(&mut self, tmux: &Tmux, panes: &[PaneRecord]) {
+        if !self.sinks.osc_progress {
+            if !self.working_windows.is_empty() {
+                self.clear_progress(tmux, panes);
+            }
+            return;
+        }
+        let lanes = progress::progress_panes(panes);
+        let (working, edges) = progress::progress_edges(&self.working_windows, &lanes);
+        for (pane, state) in edges {
+            tmux.osc_progress(&pane, state);
+            self.progress_edges += 1;
+        }
+        self.working_windows = working;
+    }
+
+    /// Take every remembered window's progress indicator down and forget them.
+    fn clear_progress(&mut self, tmux: &Tmux, panes: &[PaneRecord]) {
+        let lanes = progress::progress_panes(panes);
+        for (pane, state) in progress::clear_edges(&self.working_windows, &lanes) {
+            tmux.osc_progress(&pane, state);
+            self.progress_edges += 1;
+        }
+        self.working_windows.clear();
+    }
+
+    /// The daemon's shutdown pass for the progress lane: one `list-panes` and a clear per window
+    /// tma lit. A lit tab is state the emulator keeps, so it has to be handed back explicitly.
+    pub(crate) fn shutdown_progress(&mut self, tmux: &Tmux) {
+        if self.working_windows.is_empty() {
+            return;
+        }
+        let Ok(panes) = tmux.list_panes() else {
+            return;
+        };
+        self.clear_progress(tmux, &panes);
     }
 
     /// Write-before-fire for one blocked pane: commit `@agent_notified_at` FIRST, and fire only on a
@@ -317,12 +370,13 @@ impl NotifyState {
     pub(crate) fn status_lines(&self) -> String {
         format!(
             "notify_fires={}\ntransitions_recorded={}\nhistory_len={}\nhistory_cap={}\n\
-             notify_pending={}\n",
+             notify_pending={}\nprogress_edges={}\n",
             self.fires,
             self.transitions_recorded,
             self.history.len(),
             HISTORY_CAP,
             self.pending.len(),
+            self.progress_edges,
         )
     }
 }
@@ -588,6 +642,8 @@ mod tests {
         let both = NotifySinks {
             bell: true,
             osc: true,
+            osc_777: true,
+            osc_progress: true,
             log: None,
             include_title: false,
         };

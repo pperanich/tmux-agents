@@ -22,7 +22,7 @@ mod options;
 mod read;
 mod window;
 
-pub use display::{escape_menu_label, MenuItem};
+pub use display::{escape_menu_label, MenuItem, Progress};
 pub use read::{normalize_comm, ps_all, DepartureKind, PaneRecord};
 pub use window::WindowPaneRow;
 

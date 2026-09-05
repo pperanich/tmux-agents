@@ -12,6 +12,14 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Added
 
+- **Two more terminal notification sequences beside OSC 9.** `[notify] osc_777` writes the OSC 777
+  form of the same alert, with the agent as its title and the state as its body, for the emulators
+  that read 777 and ignore 9 (Ghostty, WezTerm). `[notify] osc_progress` writes the OSC 9;4 taskbar
+  indicator instead of a banner: it goes up when a tmux window's rollup gains its first `working`
+  agent and comes down when the last one finishes, so a minimized window still shows that something
+  is running. Both are off by default, and both, like `osc`, now travel out of tmux through its DCS
+  passthrough, which needs `set -g allow-passthrough on` in your tmux config.
+
 - **tmux window names derived from the agents in them.** `[daemon] window_names = { format =
   "{repo}:{state}" }` renames each window holding an agent pane after that window's
   highest-attention state, with `{agent}`, `{state}`, `{detail}`, `{repo}` and `{branch}` to build
@@ -21,6 +29,14 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   puts both back when the last agent pane leaves or the daemon stops, so the feature hands the
   window list back exactly as it found it. Rename a window yourself and tma notices its own last
   write no longer matches and leaves that window alone.
+
+### Fixed
+
+- **`[notify] osc` never left tmux.** A raw OSC 9 written to a pane's tty is one of the sequences
+  tmux does not forward to its client, so the sink documented as raising a desktop banner raised
+  nothing (verified on tmux 3.6a with a recorded client). The sequence now travels inside tmux's DCS
+  passthrough, which reaches the emulator when `allow-passthrough` is `on`; with it off the
+  behaviour is unchanged (nothing is shown and nothing lands on the pane).
 
 ## [0.5.11] - 2026-09-04
 
