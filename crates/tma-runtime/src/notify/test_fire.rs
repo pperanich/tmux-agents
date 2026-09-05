@@ -12,6 +12,7 @@ use tma_tmux::tmux::PaneRecord;
 
 use super::{
     failure, hook_command, notification_for, payload_json, TitlePolicy, CONTEXT_HIGH_WORD,
+    STALL_WORD,
 };
 use crate::config::{NotifyCommands, NotifySinks, NotifyTrigger};
 
@@ -21,6 +22,7 @@ pub enum TestTrigger {
     Blocked,
     Done,
     ContextHigh,
+    Stall,
 }
 
 impl std::str::FromStr for TestTrigger {
@@ -31,8 +33,9 @@ impl std::str::FromStr for TestTrigger {
             "blocked" => Ok(TestTrigger::Blocked),
             "done" => Ok(TestTrigger::Done),
             "context_high" => Ok(TestTrigger::ContextHigh),
+            "stall" => Ok(TestTrigger::Stall),
             other => Err(format!(
-                "unknown trigger {other:?} (blocked|done|context_high)"
+                "unknown trigger {other:?} (blocked|done|context_high|stall)"
             )),
         }
     }
@@ -45,6 +48,7 @@ impl TestTrigger {
             TestTrigger::Blocked => NotifyTrigger::Blocked.word(),
             TestTrigger::Done => NotifyTrigger::Done.word(),
             TestTrigger::ContextHigh => CONTEXT_HIGH_WORD,
+            TestTrigger::Stall => STALL_WORD,
         }
     }
 
@@ -54,6 +58,7 @@ impl TestTrigger {
             TestTrigger::Blocked => commands.for_trigger(NotifyTrigger::Blocked),
             TestTrigger::Done => commands.for_trigger(NotifyTrigger::Done),
             TestTrigger::ContextHigh => commands.for_context_high(),
+            TestTrigger::Stall => commands.for_stall(),
         }
     }
 }
@@ -209,10 +214,11 @@ mod tests {
     }
 
     #[test]
-    fn trigger_parses_the_three_words() {
+    fn trigger_parses_the_four_words() {
         assert_eq!("blocked".parse(), Ok(TestTrigger::Blocked));
         assert_eq!("done".parse(), Ok(TestTrigger::Done));
         assert_eq!("context_high".parse(), Ok(TestTrigger::ContextHigh));
+        assert_eq!("stall".parse(), Ok(TestTrigger::Stall));
         assert!("finished".parse::<TestTrigger>().is_err());
     }
 

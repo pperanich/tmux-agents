@@ -53,6 +53,7 @@ bell = false                 # also ring the firing pane's terminal bell
 osc = false                  # also post an OSC 9 desktop notification to the pane's tty
 # log = "~/.local/state/tma/notifications.jsonl"  # append one JSON line per fired notification
 # context_high = { threshold = 75 }  # also fire once when a pane's context crosses this percent
+# stall = { threshold_s = 900 }      # also fire once when a pane has been working this long
 # blocked = { command = "..." }      # per-trigger routing; unset falls back to `command`
 # done = { command = "..." }
 
@@ -127,11 +128,16 @@ surface split changes.
 | `blocked` | unset | A sub-table routing the `blocked` trigger: `{ command = "..." }`. |
 | `done` | unset | The same for the `done` trigger. |
 | `context_high` | unset | A sub-table `{ threshold = <percent>, command = "..." }`. When present, fire once when a pane's context utilization crosses `threshold`; naming the sub-table is the opt-in, so `threshold` is required (`command` is not). Unset means no context notifications. |
+| `stall` | unset | A sub-table `{ threshold_s = <seconds>, command = "..." }`. When present, fire once when a pane has been continuously `working` for `threshold_s` seconds; naming the sub-table is the opt-in, so `threshold_s` is required (`command` is not) and `0` is refused. Unset means no stall notifications. |
 
-`context_high` is separate from `on` because it rides its own armed flag
-(`@agent_context_notified_at`), not the state lane's marker: it fires once on the
-crossing, holds while the gauge stays high, and rearms only after the gauge dips
-below `threshold - 10`. See [Set up notifications](../how-to/notifications.md#notify-on-high-context).
+`context_high` and `stall` are separate from `on` because each rides its own armed
+flag (`@agent_context_notified_at`, `@agent_stall_notified_at`), not the state
+lane's marker. `context_high` fires once on the crossing, holds while the gauge
+stays high, and rearms only after the gauge dips below `threshold - 10`. `stall`
+measures `now - @agent_since` on every poll, fires once per working run, and rearms
+when the pane leaves `working`. See [Notify on high
+context](../how-to/notifications.md#notify-on-high-context) and [Notify on a stalled
+agent](../how-to/notifications.md#notify-on-a-stalled-agent).
 
 ### Per-trigger routing
 

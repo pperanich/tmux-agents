@@ -15,7 +15,9 @@ use tma_core::stamp::opt;
 use tma_core::{AgentState, Provenance, ReadResult, StampedState};
 
 use tma_runtime::config::{trigger_enabled, NotifyCommands, NotifySinks, NotifyTrigger};
-use tma_runtime::notify::{evaluate_context_high, fire, notification_for, trigger_for};
+use tma_runtime::notify::{
+    evaluate_context_high, evaluate_stall, fire, notification_for, trigger_for,
+};
 use tma_tmux::tmux::{PaneRecord, Tmux, TmuxError};
 
 /// Env var that OVERRIDES the `notify.command` config (a test/CI seam; config is canonical). Unset ⇒
@@ -79,6 +81,9 @@ pub(crate) struct NotifyState {
     /// `notify.context_high.threshold`: the context-utilization notify threshold, `None` when
     /// unconfigured. The daemon inherits context-high dispatch by reading the gauge each reconcile.
     context_high: Option<u8>,
+    /// `notify.stall.threshold_s` as milliseconds, `None` when unconfigured. Evaluated per
+    /// observation rather than per edge: a stalled pane draws no edge, which is the whole point.
+    stall_ms: Option<u64>,
     /// Bounded ring of recent transitions (disposable daemon memory).
     history: VecDeque<Transition>,
     /// Last-observed state per agent pane, for from→to transition detection. Pruned to live
@@ -97,18 +102,21 @@ pub(crate) struct NotifyState {
 impl NotifyState {
     /// `config_commands` is the `[notify]` routing (overridden by `TMA_NOTIFY_CMD`); `on` is the
     /// `notify.on` trigger set (`["blocked"]` default); `bell` is the `notify.bell` companion;
-    /// `context_high` is the `notify.context_high.threshold`, `None` when unconfigured.
+    /// `context_high` is the `notify.context_high.threshold` and `stall_ms` the
+    /// `notify.stall.threshold_s` in milliseconds, each `None` when unconfigured.
     pub(crate) fn new(
         config_commands: NotifyCommands,
         on: Vec<NotifyTrigger>,
         sinks: NotifySinks,
         context_high: Option<u8>,
+        stall_ms: Option<u64>,
     ) -> NotifyState {
         NotifyState {
             commands: resolve_commands(config_commands),
             on,
             sinks,
             context_high,
+            stall_ms,
             history: VecDeque::new(),
             last_state: HashMap::new(),
             pending: Vec::new(),
@@ -117,7 +125,7 @@ impl NotifyState {
         }
     }
 
-    /// Swap the config-derived command + `on` set + `bell` + `context_high` (SIGHUP reload of
+    /// Swap the config-derived command + `on` set + `bell` + `context_high` + `stall` (SIGHUP reload of
     /// `[notify]`), preserving the history ring, last-seen state map, and in-flight children: a reload
     /// changes only *what* fires. A changed threshold applies from the next observation with the armed
     /// flag as-is, so no marker is touched here.
@@ -127,11 +135,13 @@ impl NotifyState {
         on: Vec<NotifyTrigger>,
         sinks: NotifySinks,
         context_high: Option<u8>,
+        stall_ms: Option<u64>,
     ) {
         self.commands = resolve_commands(config_commands);
         self.on = on;
         self.sinks = sinks;
         self.context_high = context_high;
+        self.stall_ms = stall_ms;
     }
 
     /// The single notification-dispatch pass (see module docs): one `list-panes` read that records
@@ -141,8 +151,9 @@ impl NotifyState {
         let panes = tmux.list_panes()?;
         let now = tma_runtime::now_ms();
         let mut live: HashSet<String> = HashSet::new();
-        // `-F` support, probed once and only when context-high is configured (a reader-model dispatch
-        // reading the gauge each reconcile, so the daemon inherits the notify without a new lane).
+        // `-F` support, probed once and only when a marker-lane trigger is configured (a
+        // reader-model dispatch deciding off each reconcile's read, so the daemon inherits both
+        // notifications without a new lane).
         let mut guarded_supported: Option<bool> = None;
 
         for rec in &panes {
@@ -181,6 +192,14 @@ impl NotifyState {
                 let g = *guarded_supported
                     .get_or_insert_with(|| tma_tmux::stamp::guarded_writes_supported(tmux, &panes));
                 self.fire_context_high(tmux, rec, threshold, g, now);
+            }
+
+            // Stall dispatch: the same shape on the pane's own `@agent_stall_notified_at` marker,
+            // measuring `now - @agent_since` while the pane reads `working`.
+            if let Some(threshold_ms) = self.stall_ms {
+                let g = *guarded_supported
+                    .get_or_insert_with(|| tma_tmux::stamp::guarded_writes_supported(tmux, &panes));
+                self.fire_stall(tmux, rec, threshold_ms, g, now);
             }
         }
 
@@ -266,6 +285,32 @@ impl NotifyState {
         }
     }
 
+    /// Stall dispatch for one pane: read the state tuple + armed flag and run the shared
+    /// [`evaluate_stall`], which arms-and-fires (guarded, read-back) or rearms. Its own armed flag,
+    /// never the state lane's `@agent_notified_at` and never the context lane's marker.
+    fn fire_stall(
+        &mut self,
+        tmux: &Tmux,
+        rec: &PaneRecord,
+        threshold_ms: u64,
+        guarded: bool,
+        now: u64,
+    ) {
+        let command = self.commands.for_stall().map(str::to_string);
+        if let Some(child) = evaluate_stall(
+            tmux,
+            guarded,
+            rec,
+            threshold_ms,
+            command.as_deref(),
+            &self.sinks,
+            now,
+        ) {
+            self.track_child(child, command);
+            self.fires += 1;
+        }
+    }
+
     /// Track a freshly-spawned fire-and-forget child under the cap ([`bound_pending`] makes room),
     /// so the push never exceeds [`MAX_PENDING`]. The marker is committed, so displacing never affects dedup.
     fn track_child(&mut self, child: Child, command: Option<String>) {
@@ -333,6 +378,7 @@ impl Default for NotifyState {
             NotifyCommands::default(),
             vec![NotifyTrigger::Blocked],
             NotifySinks::default(),
+            None,
             None,
         )
     }
@@ -541,6 +587,7 @@ mod tests {
             blocked_only(),
             NotifySinks::default(),
             None,
+            None,
         );
         for i in 0..(HISTORY_CAP + 500) {
             ns.push_transition(Transition {
@@ -575,6 +622,7 @@ mod tests {
             blocked_only(),
             NotifySinks::default(),
             None,
+            None,
         );
         ns.push_transition(Transition {
             pane: "%1".to_string(),
@@ -595,6 +643,7 @@ mod tests {
             NotifyCommands::default(),
             blocked_and_done(),
             both.clone(),
+            None,
             None,
         );
         assert_eq!(ns.on, blocked_and_done(), "the trigger set was swapped");
@@ -646,6 +695,7 @@ mod tests {
             NotifyCommands::default(),
             blocked_only(),
             NotifySinks::default(),
+            None,
             None,
         );
         let s = ns.status_lines();

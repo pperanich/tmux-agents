@@ -563,7 +563,7 @@ undone by one `--clear`. `--pane` and the selector flags are mutually exclusive.
 What mute changes is the *fire*, nothing else. A muted pane is still detected,
 still stamped, still counted by `tma status`, still `blocked` in `tma ls` and in
 the JSON — it simply rings nothing: no `display-message`, no bell or OSC, no
-`[notify] command`, for both the state triggers and `context_high`. The episode's
+`[notify] command`, for the state triggers and for `context_high` and `stall`. The episode's
 `@agent_notified_at` marker is written as usual, so a mute that expires mid-episode
 does not then ring for a transition you already muted. A detached action's
 completion notification is deliberately outside the mute: you asked for that one,
@@ -1079,7 +1079,7 @@ Usage: tma debug [OPTIONS] <COMMAND>
 | `capture` | Print exactly what the detector saw for a pane, in fixture format. |
 | `explain` | Run identity, the rule engine, and fold for a pane; print evidence, matched and failed rules, and the verdict. `--json` emits the versioned schema. |
 | `transitions` | Print the running daemon's recent state transitions (its in-memory ring). `--json` emits the versioned schema. |
-| `notify-test` | Fire the notify command a trigger resolves to against a representative payload. `--trigger blocked\|done\|context_high` (default `blocked`). |
+| `notify-test` | Fire the notify command a trigger resolves to against a representative payload. `--trigger blocked\|done\|context_high\|stall` (default `blocked`). |
 | `stamp` | Internal, unstable: apply a guarded stamp to a pane, for testing the pane-option write guards directly. Not a public interface. |
 
 ### `tma debug transitions`

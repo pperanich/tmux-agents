@@ -125,7 +125,7 @@ command = "curl -s -d \"$TMA_AGENT blocked in $TMA_LOCATOR\" https://ntfy.sh/you
 command = "cat >> ~/.local/state/tma/done.jsonl"
 ```
 
-`context_high` takes a `command` the same way, beside its `threshold`. A trigger
+`context_high` and `stall` take a `command` the same way, beside their threshold. A trigger
 with no sub-table, or a sub-table that sets no `command`, falls back to the global
 `notify.command`, so routing one leaves the others alone. An unknown key inside a
 sub-table is a parse error rather than a silent fallback.
@@ -170,6 +170,33 @@ The gauge itself comes from a telemetry channel the agent's manifest declares, s
 marker and command as the other triggers; the full key reference is in
 [Configuration](../reference/configuration.md#notify-notifications).
 
+## Notify on a stalled agent
+
+`stall` fires when a pane has been continuously `working` for longer than you
+expect a turn to take, which is how you find out an agent is wedged on a hung tool
+call instead of discovering it an hour later. Like `context_high` it is separate
+from `on`: name it as a sub-table with a threshold in seconds.
+
+```toml
+[notify]
+on = ["blocked"]
+stall = { threshold_s = 900 }
+```
+
+The clock is the pane's own `@agent_since`, so the measurement is the current
+working run and nothing else; a pane that finishes and starts again begins from
+zero. It fires once per run and then holds, however long the run goes on, and
+rearms when the pane leaves `working`. The payload's `state` field carries `stall`
+and `since_ms` is how long the pane had been working when it fired.
+
+Pick the threshold from your own turns: long enough that a normal build or test
+run does not trip it, short enough that you would rather be told. There is no
+default, because a good one is per-agent and per-repo.
+
+The daemon is what notices. A stalled pane produces no events by definition, so
+the check runs on the poll cycle rather than on a transition, which means a
+daemonless setup (`[notify] from_event`) never fires it.
+
 ## Silence one pane for a while
 
 Config decides what fires everywhere; `tma mute` silences a single pane you are
@@ -183,8 +210,8 @@ tma mute --clear --session build
 ```
 
 Mute suppresses the *fire* and nothing else: every sink stays quiet (the
-`display-message` line, `bell`, `osc`, the `[notify] command`, `context_high`
-included) while detection, stamping, and the `tma status` counts carry on
+`display-message` line, `bell`, `osc`, the `[notify] command`, `context_high` and
+`stall` included) while detection, stamping, and the `tma status` counts carry on
 exactly as before, so the pane still reads `blocked` in `tma ls` and in the JSON
 (where the row gains `"muted": true`). Nothing is queued either — a mute that
 expires mid-episode does not then ring for the transition it silenced. A detached

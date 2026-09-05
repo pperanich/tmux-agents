@@ -36,7 +36,8 @@ const AGENT_OPTIONS: &[&str] = &[
 /// [`StampedState`] tuple, so keeping them separate leaves [`AGENT_OPTIONS`] "exactly the tuple
 /// keys": the flicker-stickiness anchor, the dead-registration reaper marker, the user-set
 /// `@agent_ignore` escape hatch and `@agent_mute_until` deadline (both read here so their gates cost
-/// no second round-trip), the context metric
+/// no second round-trip), the two notify armed flags (`@agent_context_notified_at` and
+/// `@agent_stall_notified_at`, both decided off this read), the context metric
 /// pair and the quota/cost lane (both parallel lanes, not part of the state tuple; surfaces read
 /// them for the JSON rows),
 /// the model label (`@agent_model`, read by `tma doctor`'s recognized-model check), and the OpenCode
@@ -52,6 +53,7 @@ const EXTRA_PANE_OPTIONS: &[&str] = &[
     opt::TOKENS,
     opt::TOKENS_AT,
     opt::CONTEXT_NOTIFIED_AT,
+    opt::STALL_NOTIFIED_AT,
     opt::QUOTA_PCT,
     opt::QUOTA_WINDOW,
     opt::QUOTA_RESETS_AT,

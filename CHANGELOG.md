@@ -56,6 +56,14 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   tma write produces), is reported as "another tool may be writing @agent_state" with the value and
   a pointer at the contract. Both ride the existing `stamp_issues` lane, so both count toward
   `--exit-code` exactly as an undecodable stamp already did.
+- **A notification for an agent that has been working too long.** `[notify] stall = { threshold_s
+  = 900 }` fires once when a pane has been continuously `working` for that many seconds, measured
+  off the pane's own `@agent_since`, and rearms when the run ends. Nothing in tma was time-based
+  before this, so a wedged turn (the hangs filed as claude-code #28482, #33949 and #49150) simply
+  looked like a busy one until you went and looked. It rides its own armed flag
+  (`@agent_stall_notified_at`), takes a `command` of its own like the other triggers, and the
+  payload's `state` reads `stall`. The daemon is what notices, since a stalled pane produces no
+  events to notice it by.
 
 ## [0.5.11] - 2026-09-04
 
