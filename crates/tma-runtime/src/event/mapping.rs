@@ -263,6 +263,18 @@ pub(crate) fn parse_session_id(payload: &str) -> Option<String> {
     json_string_field(payload, "session_id")
 }
 
+/// The `@agent_transcript` value one event stamps: the payload's `transcript_path` (claude, codex,
+/// gemini and cursor all carry it) when it is non-empty and differs from what the pane already
+/// holds, else `None`. Never a clear, so an event whose payload carries no path leaves the stored
+/// one alone.
+///
+/// Claude's SubagentStop `agent_transcript_path` is deliberately NOT read: one session spawns many
+/// subagents and one pane option cannot hold them.
+pub(crate) fn transcript_stamp(payload: &str, current: Option<&str>) -> Option<String> {
+    json_string_field(payload, "transcript_path")
+        .filter(|p| !p.is_empty() && current != Some(p.as_str()))
+}
+
 /// The source text of a JSON **object**-valued field, braces included (`{"command":"ls"}`), for the
 /// one payload field tma reads inside: Claude's `PermissionRequest` `tool_input`. Scans for the
 /// matching close brace, tracking string literals so a `}` inside a value does not end it early.

@@ -635,6 +635,7 @@ const REMOVABLE: &[&str] = &[
     opt::PID,
     opt::NAME,
     opt::SESSION,
+    opt::TRANSCRIPT,
     opt::SUBAGENTS,
     opt::CONTEXT_PCT,
     opt::CONTEXT_AT,

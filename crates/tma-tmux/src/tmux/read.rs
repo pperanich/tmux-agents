@@ -67,6 +67,8 @@ const EXTRA_PANE_OPTIONS: &[&str] = &[
     opt::PENDING_CALL,
     opt::PENDING_SUMMARY,
     opt::ACT_REPEAT,
+    // The hook payload's transcript path, read back for the `ls --json` `transcript` key.
+    opt::TRANSCRIPT,
 ];
 
 /// Which focus hook is asking [`Tmux::departed_pane`], which decides where "the pane I just left"

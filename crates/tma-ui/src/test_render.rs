@@ -75,6 +75,7 @@ pub(crate) fn row(
         title: "task".to_string(),
         attention: false,
         agent_session: None,
+        transcript: None,
         context_pct: None,
         context_at: None,
         tokens: None,

@@ -114,6 +114,7 @@ mod tests {
             title: "t".to_string(),
             attention,
             agent_session: None,
+            transcript: None,
             context_pct: None,
             context_at: None,
             tokens: None,

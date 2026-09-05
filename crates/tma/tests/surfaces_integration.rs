@@ -938,3 +938,40 @@ fn ls_json_carries_the_pending_call_stamped_on_the_pane() {
         "{json}"
     );
 }
+
+/// The `transcript` key: the path the hook intake stamped on the pane, and `null` before anything
+/// stamped one. It travels the same `list-panes -F` read set the `pending_*` keys needed, so this
+/// covers both the read set and the serialization.
+#[test]
+fn ls_json_carries_the_transcript_stamped_on_the_pane() {
+    if !tma_test_support::tmux_available() {
+        return;
+    }
+    let s = Scratch::new("transcript");
+    let rules = "[[rules]]\nstate = \"blocked\"\npriority = 50\n\
+                 region = \"tail_lines(50)\"\nmatch = { contains = \"READY\" }\n";
+    let pane = setup_agent(&s, "READY\\n", rules);
+    assert!(tma(&s, &["status"]).status.success()); // one cycle to stamp
+
+    let before = tma(&s, &["ls", "--json"]);
+    let json = String::from_utf8_lossy(&before.stdout);
+    assert!(
+        json.contains("\"transcript\":null"),
+        "a pane no hook has registered carries no transcript: {json}"
+    );
+
+    let path = "/w/.claude/projects/p/abc.jsonl";
+    assert!(
+        s.tmux(&["set-option", "-p", "-t", &pane, "@agent_transcript", path])
+            .status
+            .success(),
+        "seed @agent_transcript"
+    );
+
+    let after = tma(&s, &["ls", "--json"]);
+    let json = String::from_utf8_lossy(&after.stdout);
+    assert!(
+        json.contains(&format!("\"transcript\":\"{path}\"")),
+        "{json}"
+    );
+}

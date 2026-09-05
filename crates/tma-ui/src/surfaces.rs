@@ -122,6 +122,12 @@ fn write_row_fields(j: &mut JsonWriter, r: &AgentRow, origin: &Origin) {
         Some(s) => j.string("session", s),
         None => j.null("session"),
     }
+    // Additive (schema stays 1): the agent's own transcript file, as its hook payload named it.
+    // `null` for an agent that publishes none (OpenCode, pi) and for a screen-only pane.
+    match &r.transcript {
+        Some(p) => j.string("transcript", p),
+        None => j.null("transcript"),
+    }
     match r.context_pct {
         Some(pct) => j.number("context", pct as i64),
         None => j.null("context"),
@@ -443,6 +449,7 @@ mod tests {
             title: "a task".to_string(),
             attention: false,
             agent_session: None,
+            transcript: None,
             context_pct: None,
             context_at: None,
             tokens: None,
@@ -683,6 +690,25 @@ mod tests {
             .contains(r#""quota":{"pct":63,"window":"spend","resets_at_ms":null}"#));
     }
 
+    /// The transcript path is a plain nullable string on both row surfaces: the file the agent's own
+    /// hook payload named, `null` for a pane that never carried one (no hook coverage, or an agent
+    /// whose payloads have no `transcript_path`).
+    #[test]
+    fn the_transcript_path_renders_on_both_row_surfaces_or_null() {
+        let mut r = quota_row("%1");
+        r.transcript = Some("/w/.claude/projects/p/abc.jsonl".to_string());
+        for json in [
+            render_wait_json_t(&r),
+            render_ls_json_t(&report(vec![r.clone()])),
+        ] {
+            assert!(
+                json.contains(r#""transcript":"/w/.claude/projects/p/abc.jsonl""#),
+                "{json}"
+            );
+        }
+        assert!(render_wait_json_t(&quota_row("%1")).contains(r#""transcript":null"#));
+    }
+
     /// The complete `ls --json` key inventory (additive-only): a dropped, renamed, or new key fails
     /// here. `since`/`since_ms` share a value; `since` is the compat key, `since_ms` names the unit.
     #[test]
@@ -720,6 +746,7 @@ mod tests {
                 "state",
                 "title",
                 "tokens",
+                "transcript",
                 "window",
                 "worktree",
             ]
@@ -763,6 +790,7 @@ mod tests {
                 "state",
                 "title",
                 "tokens",
+                "transcript",
                 "window",
                 "worktree",
             ]
@@ -809,6 +837,7 @@ mod tests {
                 "state",
                 "title",
                 "tokens",
+                "transcript",
                 "window",
                 "worktree",
             ]

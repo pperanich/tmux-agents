@@ -33,6 +33,9 @@ pub mod opt {
     pub const HASH: &str = "@agent_hash";
     pub const PID: &str = "@agent_pid";
     pub const SESSION: &str = "@agent_session";
+    /// Path to the agent's own transcript file, from the hook payload's `transcript_path`. Stamped
+    /// beside [`SESSION`] and removed with it; not part of the [`super::StampedState`] tuple.
+    pub const TRANSCRIPT: &str = "@agent_transcript";
     pub const SUBAGENTS: &str = "@agent_subagents";
     /// Context-utilization metric percent: integer `0..=100`, or absent when the agent has no
     /// telemetry coverage or the channel reported no window (a null-clear). Stamped under the
@@ -669,6 +672,7 @@ mod tests {
         opt::HASH,
         opt::PID,
         opt::SESSION,
+        opt::TRANSCRIPT,
         opt::SUBAGENTS,
         opt::IGNORE,
         opt::MUTE_UNTIL,

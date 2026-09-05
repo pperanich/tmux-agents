@@ -84,6 +84,9 @@ pub struct AgentRow {
     /// Owning agent session id (`@agent_session`), `None` when the pane never registered one. The
     /// `session` key of the JSON rows.
     pub agent_session: Option<String>,
+    /// Path to the agent's transcript file (`@agent_transcript`), `None` when no hook payload ever
+    /// carried one. The `transcript` key of the JSON rows.
+    pub transcript: Option<String>,
     /// Context-utilization percent (`@agent_context_pct`), `None` when absent. The `context`
     /// key of the JSON rows.
     pub context_pct: Option<u8>,
@@ -315,6 +318,7 @@ mod tests {
             title: String::new(),
             attention: false,
             agent_session: None,
+            transcript: None,
             context_pct: None,
             context_at: None,
             tokens: None,

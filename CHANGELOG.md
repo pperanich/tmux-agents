@@ -10,6 +10,19 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **The agent's own transcript file, stamped on the pane as `@agent_transcript`.** Claude Code,
+  Codex, Gemini and Cursor name the session's transcript in their hook payloads
+  (`transcript_path`); tma read the `session_id` beside it and threw the rest away. The path now
+  rides the same guarded write as `@agent_session`, and `tma ls --json` and `tma wait --json` carry
+  it as an additive `transcript` key (the schema stays `1`), so a script that finds a blocked pane
+  can open what that agent has been writing. It is rewritten only when a payload names a different
+  file and removed with the rest of the tuple on session end. OpenCode and pi publish no such path,
+  and a pane detected from the screen alone has none, so both read `null`. Claude's `SubagentStop`
+  `agent_transcript_path` is deliberately not stamped: one session spawns many subagents and one
+  pane option cannot hold them.
+
 ## [0.5.11] - 2026-09-04
 
 ### Fixed

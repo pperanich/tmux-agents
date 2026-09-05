@@ -583,6 +583,7 @@ mod tests {
             title: String::new(),
             attention,
             agent_session: None,
+            transcript: None,
             context_pct: None,
             context_at: None,
             tokens: None,
