@@ -258,40 +258,42 @@ pub fn apply_quota(
     tmux.apply(&cmds)
 }
 
-/// Arm the `context_high` notify marker on `pane_id`: a guarded set-from-absent plus a
-/// mandatory read-back, so two concurrent firers resolve to one bell. Returns `true` when THIS call
-/// won the marker (its value is the stored one), so only the winner fires. Degrades to a producer-side
-/// read-decide-write on a server without `-F`. `now` is the marker value (debuggability only).
-pub fn arm_context_notify(
+/// Arm a notify marker on `pane_id` (`key` is `@agent_context_notified_at` or
+/// `@agent_stall_notified_at`): a guarded set-from-absent plus a mandatory read-back, so two
+/// concurrent firers resolve to one bell. Returns `true` when THIS call won the marker (its value is
+/// the stored one), so only the winner fires. Degrades to a producer-side read-decide-write on a
+/// server without `-F`. `now` is the marker value (debuggability only).
+pub fn arm_notify_marker(
     tmux: &Tmux,
     pane_id: &str,
+    key: &str,
     now: u64,
     guarded: bool,
 ) -> Result<bool, TmuxError> {
     if guarded {
-        let cmd = render::render_context_notify_fire(pane_id, now);
+        let cmd = render::render_notify_arm(pane_id, key, now);
         tmux.apply(std::slice::from_ref(&cmd))?;
         // Read-back: the winner sees its own value; a loser reads the winner's older marker.
-        let stored = tmux.get_pane_option(pane_id, opt::CONTEXT_NOTIFIED_AT)?;
+        let stored = tmux.get_pane_option(pane_id, key)?;
         Ok(stored.as_deref() == Some(now.to_string().as_str()))
     } else {
         // Advisory degrade: only set when currently absent (racy, the documented no-`-F` posture).
         if tmux
-            .get_pane_option(pane_id, opt::CONTEXT_NOTIFIED_AT)?
+            .get_pane_option(pane_id, key)?
             .filter(|v| !v.is_empty())
             .is_some()
         {
             return Ok(false);
         }
-        let cmd = render::render_context_notify_fire_advisory(pane_id, now);
+        let cmd = render::render_notify_arm_advisory(pane_id, key, now);
         tmux.apply(std::slice::from_ref(&cmd))?;
         Ok(true)
     }
 }
 
-/// Rearm the `context_high` notify marker on `pane_id`: unset it so the next crossing fires.
-pub fn rearm_context_notify(tmux: &Tmux, pane_id: &str) -> Result<(), TmuxError> {
-    let cmd = render::render_context_notify_rearm(pane_id);
+/// Rearm a notify marker on `pane_id`: unset it so the next crossing fires.
+pub fn rearm_notify_marker(tmux: &Tmux, pane_id: &str, key: &str) -> Result<(), TmuxError> {
+    let cmd = render::render_notify_rearm(pane_id, key);
     tmux.apply(std::slice::from_ref(&cmd))
 }
 

@@ -65,6 +65,7 @@ pub(super) fn serve(
         config.notify.on.clone(),
         config.notify.sinks(),
         config.notify.context_high.as_ref().map(|c| c.threshold),
+        config.notify.stall.as_ref().map(|s| s.threshold_ms()),
     );
     // Mutable: a SIGHUP reload re-derives this from the reloaded `[daemon]` config.
     let mut empty_pool_recheck = config.daemon.zero_member_recheck();
@@ -252,6 +253,7 @@ pub(super) fn serve(
                             config.notify.on.clone(),
                             config.notify.sinks(),
                             config.notify.context_high.as_ref().map(|c| c.threshold),
+                            config.notify.stall.as_ref().map(|s| s.threshold_ms()),
                         );
                         empty_pool_recheck = config.daemon.zero_member_recheck();
                         sweep = resolve_sweep(probe, &config, sweep_ms);

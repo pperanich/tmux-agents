@@ -78,6 +78,9 @@ pub mod opt {
     /// comparison basis. Written only by the context-high notifier, guarded set-from-absent so
     /// concurrent firers resolve to one bell. Never the state lane's [`NOTIFIED_AT`]. Pane scope.
     pub const CONTEXT_NOTIFIED_AT: &str = "@agent_context_notified_at";
+    /// The `stall` notify marker: the same armed flag as [`CONTEXT_NOTIFIED_AT`], absent = armed,
+    /// its epoch **ms** fire instant rearmed by unsetting once the pane leaves `working`. Pane scope.
+    pub const STALL_NOTIFIED_AT: &str = "@agent_stall_notified_at";
     /// The agent's model name, a best-effort label the file-tail intake reads from the rollout
     /// window. Not part of the [`super::StampedState`] tuple and never load-bearing for a gauge; it
     /// only feeds `tma doctor`'s recognized-model line (a model no `[telemetry.windows]` entry
@@ -675,6 +678,7 @@ mod tests {
         opt::CONTEXT_PCT,
         opt::CONTEXT_AT,
         opt::CONTEXT_NOTIFIED_AT,
+        opt::STALL_NOTIFIED_AT,
         opt::MODEL,
         opt::PERMISSION_REQUEST,
         opt::PENDING_TOOL,

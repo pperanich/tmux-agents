@@ -401,7 +401,13 @@ pub fn evaluate_context_high(
         ContextNotify::Fire => {
             // Fire iff the guarded set-from-absent won: a loser reads the winner's marker and stays
             // silent, so concurrent firers resolve to one bell.
-            match tma_tmux::stamp::arm_context_notify(tmux, &rec.pane_id, now, guarded) {
+            match tma_tmux::stamp::arm_notify_marker(
+                tmux,
+                &rec.pane_id,
+                opt::CONTEXT_NOTIFIED_AT,
+                now,
+                guarded,
+            ) {
                 // Arm first, then check the mute: a muted alert is consumed like a fired one, so
                 // the gauge has to dip below the rearm band before it can ring again.
                 Ok(true) if muted(rec, now) => None,
@@ -435,10 +441,127 @@ pub fn evaluate_context_high(
             }
         }
         ContextNotify::Rearm => {
-            let _ = tma_tmux::stamp::rearm_context_notify(tmux, &rec.pane_id);
+            let _ =
+                tma_tmux::stamp::rearm_notify_marker(tmux, &rec.pane_id, opt::CONTEXT_NOTIFIED_AT);
             None
         }
         ContextNotify::Idle => None,
+    }
+}
+
+// ---- stall notify ------------------------------------------------------------------------------
+
+/// The trigger word carried in a `stall` notification's payload `state` field, so a hook can tell a
+/// stalled agent from a `blocked`/`done`/`context_high` alert.
+pub const STALL_WORD: &str = "stall";
+
+/// What the `stall` armed-flag decision resolves to for one observation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StallNotify {
+    /// Armed and the `working` run has run past the threshold: arm the marker and fire. Carries the
+    /// run's `@agent_since`, which is the episode the payload reports.
+    Fire { since: u64 },
+    /// Already fired and the run it fired for is over: clear the marker.
+    Rearm,
+    /// Hold the flag as-is (still short of the threshold, already fired this run, or a `working`
+    /// pane with no `@agent_since` to measure from).
+    Idle,
+}
+
+/// The `stall` armed-flag decision: given the pane's stored state, its `@agent_since` and the
+/// `@agent_stall_notified_at` marker (absent = armed, present = fired), decide for one observation.
+/// Fires only while `working`, only with a real `@agent_since`, and only once the run has lasted
+/// `threshold_ms`. A marker older than `@agent_since` belongs to a previous run, so it rearms the
+/// same way leaving `working` does: the daemon can miss a short non-working gap between two runs,
+/// and the marker's own value is what makes that gap detectable after the fact.
+pub fn decide_stall(
+    state: Option<AgentState>,
+    since: Option<u64>,
+    marker: Option<u64>,
+    threshold_ms: u64,
+    now: u64,
+) -> StallNotify {
+    if state != Some(AgentState::Working) {
+        // The run this pane fired for is over, so a standing flag is the only thing left to clear.
+        return match marker {
+            Some(_) => StallNotify::Rearm,
+            None => StallNotify::Idle,
+        };
+    }
+    let Some(since) = since else {
+        return StallNotify::Idle; // working with no stamped start: nothing to measure from
+    };
+    match marker {
+        Some(at) if at < since => StallNotify::Rearm, // fired for a run that has since ended
+        Some(_) => StallNotify::Idle,
+        None if now.saturating_sub(since) >= threshold_ms => StallNotify::Fire { since },
+        None => StallNotify::Idle,
+    }
+}
+
+/// Evaluate and apply the `stall` decision for one pane. The state tuple, the armed flag and the
+/// payload identity all come off the one `rec` the caller already holds, so this needs no read of
+/// its own. On [`StallNotify::Fire`] it arms the marker (guarded set-from-absent + read-back) and
+/// fires only when it won the race; on [`StallNotify::Rearm`] it clears the marker; otherwise
+/// nothing. Best-effort: every tmux failure is swallowed. Returns the notify child to reap, or `None`.
+pub fn evaluate_stall(
+    tmux: &Tmux,
+    guarded: bool,
+    rec: &PaneRecord,
+    threshold_ms: u64,
+    command: Option<&str>,
+    sinks: &NotifySinks,
+    now: u64,
+) -> Option<Child> {
+    let state = rec
+        .options
+        .get(opt::STATE)
+        .and_then(|v| v.parse::<AgentState>().ok());
+    let num = |key: &str| rec.options.get(key).and_then(|v| v.parse::<u64>().ok());
+    match decide_stall(
+        state,
+        num(opt::SINCE),
+        num(opt::STALL_NOTIFIED_AT),
+        threshold_ms,
+        now,
+    ) {
+        StallNotify::Fire { since } => {
+            match tma_tmux::stamp::arm_notify_marker(
+                tmux,
+                &rec.pane_id,
+                opt::STALL_NOTIFIED_AT,
+                now,
+                guarded,
+            ) {
+                // Arm first, then check the mute: a muted alert is consumed like a fired one, so the
+                // run has to end before the pane can ring again.
+                Ok(true) if muted(rec, now) => None,
+                Ok(true) => {
+                    // The `working` run's start, which is both the episode this fire belongs to and
+                    // the instant `since_ms` reports the age of: how long the agent has been stuck.
+                    let n = notification_for(
+                        rec,
+                        rec.options.get(opt::NAME).map(String::as_str).unwrap_or(""),
+                        STALL_WORD,
+                        None,
+                        rec.options
+                            .get(opt::SESSION)
+                            .filter(|v| !v.is_empty())
+                            .cloned(),
+                        since,
+                        now,
+                    );
+                    fire(tmux, &n, command, sinks)
+                }
+                _ => None, // lost the race, or a tmux error: no fire
+            }
+        }
+        StallNotify::Rearm => {
+            let _ =
+                tma_tmux::stamp::rearm_notify_marker(tmux, &rec.pane_id, opt::STALL_NOTIFIED_AT);
+            None
+        }
+        StallNotify::Idle => None,
     }
 }
 
@@ -1053,6 +1176,75 @@ mod tests {
         assert_eq!(
             decide_context_high(Some(90), None, None, 75),
             ContextNotify::Idle
+        );
+    }
+
+    // ---- stall armed-flag decision -----------------------------------------------------------
+
+    const STALL_MS: u64 = 60_000;
+    const NOW: u64 = 1_700_000_000_000;
+
+    /// Decide for a pane in `state` whose current run began `run_ms` ago, against [`STALL_MS`].
+    fn stall(state: AgentState, run_ms: u64, marker: Option<u64>) -> StallNotify {
+        decide_stall(Some(state), Some(NOW - run_ms), marker, STALL_MS, NOW)
+    }
+
+    #[test]
+    fn stall_fires_at_the_threshold_and_not_before() {
+        // Short of the threshold: nothing, however long the marker has been absent.
+        assert_eq!(stall(AgentState::Working, 59_999, None), StallNotify::Idle);
+        // At the threshold: fire, reporting the run start the payload's episode is built from.
+        assert_eq!(
+            stall(AgentState::Working, STALL_MS, None),
+            StallNotify::Fire {
+                since: NOW - STALL_MS
+            }
+        );
+    }
+
+    #[test]
+    fn stall_fires_once_then_holds_until_the_run_ends() {
+        // Armed marker written during this run: no re-fire while the run continues.
+        let fired_at = NOW - 20_000;
+        assert_eq!(
+            stall(AgentState::Working, 120_000, Some(fired_at)),
+            StallNotify::Idle
+        );
+        // The pane left `working`: the flag clears, so the next run can fire.
+        for state in [AgentState::Idle, AgentState::Blocked, AgentState::Unknown] {
+            assert_eq!(stall(state, 120_000, Some(fired_at)), StallNotify::Rearm);
+        }
+        // Rearmed (marker gone) and still not working: nothing to do.
+        assert_eq!(stall(AgentState::Idle, 120_000, None), StallNotify::Idle);
+    }
+
+    #[test]
+    fn stall_never_fires_on_a_pane_that_is_not_working() {
+        for state in [AgentState::Idle, AgentState::Blocked, AgentState::Unknown] {
+            assert_eq!(stall(state, 600_000, None), StallNotify::Idle);
+        }
+    }
+
+    #[test]
+    fn stall_rearms_when_the_marker_predates_the_run() {
+        // A working run that began AFTER the stored marker: the flag belongs to a previous run the
+        // daemon never saw end, so it rearms rather than muzzling this one forever.
+        assert_eq!(
+            stall(AgentState::Working, 120_000, Some(NOW - 200_000)),
+            StallNotify::Rearm
+        );
+    }
+
+    #[test]
+    fn stall_without_a_stamped_since_never_fires() {
+        assert_eq!(
+            decide_stall(Some(AgentState::Working), None, None, STALL_MS, NOW),
+            StallNotify::Idle
+        );
+        // An unreadable/absent `@agent_state` is the same non-answer.
+        assert_eq!(
+            decide_stall(None, Some(NOW - 600_000), None, STALL_MS, NOW),
+            StallNotify::Idle
         );
     }
 

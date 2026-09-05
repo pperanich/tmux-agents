@@ -371,6 +371,11 @@ pub struct NotifySection {
     /// a present sub-table with a `threshold` percent enables it. Rearms below `threshold - 10`.
     #[serde(default)]
     pub context_high: Option<ContextHighSection>,
+    /// `stall`: fire once when a pane has been continuously `working` for `threshold_s` seconds, on
+    /// its own `@agent_stall_notified_at` armed flag. Absent ⇒ disabled; a present sub-table with a
+    /// `threshold_s` enables it. Rearms when the pane leaves `working`.
+    #[serde(default)]
+    pub stall: Option<StallSection>,
 }
 
 /// `[notify.<trigger>]`: one trigger's routing. Only `command` for now, and unknown keys stay a loud
@@ -394,6 +399,38 @@ pub struct ContextHighSection {
     /// Per-trigger routing, like the state triggers' sub-tables. Unset ⇒ the global `notify.command`.
     #[serde(default)]
     pub command: Option<String>,
+}
+
+/// `[notify.stall]`: the stalled-agent notify trigger. Like `context_high` it rides its own armed
+/// flag rather than the `on` set, and carries a duration instead of a percent.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct StallSection {
+    /// Fire when the pane has been continuously `working` for at least this many seconds. No
+    /// default: naming the sub-table is the opt-in, so the threshold is required.
+    #[serde(deserialize_with = "positive_secs")]
+    pub threshold_s: u64,
+    /// Per-trigger routing, like the state triggers' sub-tables. Unset ⇒ the global `notify.command`.
+    #[serde(default)]
+    pub command: Option<String>,
+}
+
+impl StallSection {
+    /// The threshold as milliseconds, the unit every comparison downstream is in.
+    pub fn threshold_ms(&self) -> u64 {
+        self.threshold_s.saturating_mul(1_000)
+    }
+}
+
+/// Reject `threshold_s = 0`: a zero threshold fires the instant a pane starts working, which is a
+/// `working` notification and not a stall one.
+fn positive_secs<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    match u64::deserialize(d)? {
+        0 => Err(serde::de::Error::custom(
+            "notify.stall threshold_s must be greater than 0",
+        )),
+        secs => Ok(secs),
+    }
 }
 
 /// The `TMA_NOTIFY_CMD` test/CI seam, read in one place so every surface resolves it identically. An
@@ -426,6 +463,7 @@ pub struct NotifyCommands {
     pub blocked: Option<String>,
     pub done: Option<String>,
     pub context_high: Option<String>,
+    pub stall: Option<String>,
 }
 
 impl NotifyCommands {
@@ -441,6 +479,11 @@ impl NotifyCommands {
     /// The command the `context_high` trigger fires: its own override, else the global one.
     pub fn for_context_high(&self) -> Option<&str> {
         self.context_high.as_deref().or(self.global.as_deref())
+    }
+
+    /// The command the `stall` trigger fires: its own override, else the global one.
+    pub fn for_stall(&self) -> Option<&str> {
+        self.stall.as_deref().or(self.global.as_deref())
     }
 
     /// Apply the `TMA_NOTIFY_CMD` test/CI seam: a set override replaces the command for EVERY
@@ -474,6 +517,7 @@ impl Default for NotifySection {
             log: None,
             include_title: false,
             context_high: None,
+            stall: None,
         }
     }
 }
@@ -512,6 +556,7 @@ impl NotifySection {
             blocked: self.blocked.as_ref().and_then(|t| t.command.clone()),
             done: self.done.as_ref().and_then(|t| t.command.clone()),
             context_high: self.context_high.as_ref().and_then(|c| c.command.clone()),
+            stall: self.stall.as_ref().and_then(|s| s.command.clone()),
         }
     }
 }
@@ -1012,6 +1057,27 @@ mod tests {
         assert!(toml::from_str::<Config>("[notify.context_high]\n").is_err());
     }
 
+    /// `notify.stall` parses its `threshold_s` the same way, and rejects the one value that would
+    /// make the trigger meaningless.
+    #[test]
+    fn notify_stall_parses_threshold_s_and_rejects_zero() {
+        let c: Config = toml::from_str("[notify.stall]\nthreshold_s = 600\n").unwrap();
+        let stall = c.notify.stall.expect("naming the sub-table is the opt-in");
+        assert_eq!(stall.threshold_s, 600);
+        assert_eq!(stall.threshold_ms(), 600_000);
+        // Inline-table form parses identically.
+        let inline: Config = toml::from_str("[notify]\nstall = { threshold_s = 300 }\n").unwrap();
+        assert_eq!(inline.notify.stall.map(|s| s.threshold_s), Some(300));
+        // Absent stays disabled; a missing or zero threshold is a loud error.
+        assert!(Config::default().notify.stall.is_none());
+        assert!(toml::from_str::<Config>("[notify.stall]\n").is_err());
+        let zero = toml::from_str::<Config>("[notify.stall]\nthreshold_s = 0\n").unwrap_err();
+        assert!(
+            zero.to_string().contains("greater than 0"),
+            "the error says why zero is refused: {zero}"
+        );
+    }
+
     /// Per-trigger routing: each `[notify.<trigger>]` command wins for its own trigger, and every
     /// unrouted trigger falls back to the global `notify.command`.
     #[test]
@@ -1019,7 +1085,8 @@ mod tests {
         let c: Config = toml::from_str(
             "[notify]\ncommand = \"global\"\n\
              [notify.blocked]\ncommand = \"ntfy\"\n\
-             [notify.context_high]\nthreshold = 80\ncommand = \"log-it\"\n",
+             [notify.context_high]\nthreshold = 80\ncommand = \"log-it\"\n\
+             [notify.stall]\nthreshold_s = 900\n",
         )
         .unwrap();
         let cmds = c.notify.commands();
@@ -1030,6 +1097,11 @@ mod tests {
             "an unrouted trigger falls back to the global command"
         );
         assert_eq!(cmds.for_context_high(), Some("log-it"));
+        assert_eq!(
+            cmds.for_stall(),
+            Some("global"),
+            "a sub-table with no command of its own still falls back"
+        );
 
         // No global command: an unrouted trigger simply has none (display-message only).
         let only_done: Config = toml::from_str("[notify.done]\ncommand = \"say done\"\n").unwrap();
@@ -1037,6 +1109,7 @@ mod tests {
         assert_eq!(cmds.for_trigger(NotifyTrigger::Done), Some("say done"));
         assert_eq!(cmds.for_trigger(NotifyTrigger::Blocked), None);
         assert_eq!(cmds.for_context_high(), None);
+        assert_eq!(cmds.for_stall(), None);
 
         // Zero-config routes nothing at all.
         assert_eq!(
@@ -1060,6 +1133,7 @@ mod tests {
         assert_eq!(cmds.for_trigger(NotifyTrigger::Blocked), Some("sink"));
         assert_eq!(cmds.for_trigger(NotifyTrigger::Done), Some("sink"));
         assert_eq!(cmds.for_context_high(), Some("sink"));
+        assert_eq!(cmds.for_stall(), Some("sink"));
         // An unset or empty override leaves the config's routing intact.
         let kept = c.notify.commands().overridden_by(Some(String::new()));
         assert_eq!(kept.for_trigger(NotifyTrigger::Blocked), Some("ntfy"));
