@@ -10,6 +10,22 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **Claude Code's first-run workspace-trust dialog read `unknown` on 2.1.261.** That build redrew the
+  dialog without option numbers and with `No, exit` first and preselected, so the `❯ 1. Yes, I trust
+  this folder` anchor the trust rule was authored on stopped matching at every pane width. A second
+  rule reads the new layout off its refusal cursor plus the trust wording, and the numbered rule
+  stays for the builds that still draw it. Both stamp `blocked` / `trust`, so `approve` and `deny`
+  remain gated at a dialog whose affirmative option grants the whole folder.
+
+- **`@agent_pending_call` was stamped empty on every Claude permission prompt.** Claude Code 2.1.261
+  sends no `tool_use_id` in its `PermissionRequest` payload, though its `PreToolUse` and
+  `PostToolUse` for the same call both still carry one. tma now mints the id from the session id,
+  the prompt id, the tool name and the tool input when the field is missing: stable across repeated
+  fires of one call, different for the next one, so a status line or script can again tell two
+  prompts apart. A payload that carries a `tool_use_id` is stamped with it unchanged.
+
 ## [0.5.11] - 2026-09-04
 
 ### Fixed

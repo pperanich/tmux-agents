@@ -178,8 +178,8 @@ priority = 110
 region = "tail_lines(30)"
 match = { line_regex = '^\s*❯ 1\. Yes, and use auto mode' }
 
-# first-run trust gate — option 1 grants the whole folder read/edit/execute, and `1` is exactly what
-# approve fires.
+# first-run trust gate, numbered layout: option 1 grants the whole folder read/edit/execute, and `1`
+# is exactly what approve fires. Two rules because the dialog has two shipped layouts (see below).
 [[rules]]
 state = "blocked"
 detail = "trust"
@@ -264,3 +264,27 @@ detail = "rate_limit"
 priority = 95
 region = "tail_lines(30)"
 match = { line_regex = 'Your usage limit has reset.*press enter to continue' }
+
+# --- first-run trust gate, unnumbered layout (Claude Code 2.1.261) ---------------------------------
+# Appended, like the rules above, because `tests/claude_manifest.rs` maps rule indices by declaration
+# order.
+#
+# 2.1.261 drops the option numbers and puts `❯ No, exit` first, preselected. The `❯ 1. Yes` anchor
+# every other blocked rule shares therefore misses this dialog outright, and the pane read `unknown`
+# at every width. `❯ No, exit` alone is generic selection chrome, so the trust wording in the same
+# region is required with it; both halves sit inside `tail_lines(30)` at every captured width.
+# Captured live on 2.1.261 at w60/w80/w100/w120/w200, the same three lines at each, so the match is
+# structural rather than a wrap artefact.
+#
+# Priority 110 for the same reason the numbered rule has it: the affirmative option grants the whole
+# folder, so `approve` and `deny` must stay gated. Here it also runs unopposed, since the priority
+# 100 generic permission rule cannot see this layout at all.
+[[rules]]
+state = "blocked"
+detail = "trust"
+priority = 110
+region = "tail_lines(30)"
+match = { all = [
+  { line_regex = '^\s*❯ No, exit' },
+  { contains = "Yes, I trust this folder" },
+] }

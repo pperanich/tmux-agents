@@ -93,7 +93,7 @@ pub(crate) fn pending_call_effect(
             AgentState::Blocked => match json_string_field(payload, "tool_name") {
                 Some(tool) if !tool.is_empty() => PendingCall::Set {
                     summary: pending_summary(&tool, payload),
-                    call: json_string_field(payload, "tool_use_id").unwrap_or_default(),
+                    call: call_id(payload, &tool),
                     tool,
                 },
                 _ => PendingCall::None,
@@ -103,6 +103,105 @@ pub(crate) fn pending_call_effect(
         },
         _ => PendingCall::None,
     }
+}
+
+/// The pending call's id: the hook's own `tool_use_id` when it carries one, else a minted stand-in.
+/// Claude Code 2.1.261 omits the field from `PermissionRequest` (its `PreToolUse` and `PostToolUse`
+/// for the same call still carry it), which stamped `@agent_pending_call` empty on every prompt.
+fn call_id(payload: &str, tool: &str) -> String {
+    match json_string_field(payload, "tool_use_id") {
+        Some(id) if !id.is_empty() => id,
+        _ => mint_call_id(payload, tool),
+    }
+}
+
+/// Mint an id from what identifies one call: session, prompt, tool, and the canonicalized tool
+/// input. FNV-1a as 16 hex, not a digest: the tree carries no hash crate, and `DefaultHasher` is
+/// documented as unstable across releases, which a stamp read back by other processes cannot be.
+fn mint_call_id(payload: &str, tool: &str) -> String {
+    let parts = [
+        json_string_field(payload, "session_id").unwrap_or_default(),
+        json_string_field(payload, "prompt_id").unwrap_or_default(),
+        tool.to_string(),
+        json_object_field(payload, "tool_input")
+            .map(canonical_object)
+            .unwrap_or_default(),
+    ];
+    let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+    for byte in parts.join("\u{1f}").bytes() {
+        hash = (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    format!("{hash:016x}")
+}
+
+/// A JSON object's own entries sorted by key, so two orderings of one call hash alike. Values are
+/// their source text: a nested object keeps its order, which costs nothing when one producer
+/// serializes the payload. A shape this cannot walk hashes on its raw bytes instead.
+fn canonical_object(obj: &str) -> String {
+    let body = obj
+        .strip_prefix('{')
+        .and_then(|s| s.strip_suffix('}'))
+        .unwrap_or(obj);
+    let mut entries: Vec<(String, &str)> = Vec::new();
+    let mut rest = body.trim();
+    while let Some(after_quote) = rest.strip_prefix('"') {
+        let Some((key, used)) = read_json_string(after_quote) else {
+            break;
+        };
+        let Some(value) = after_quote[used..].trim_start().strip_prefix(':') else {
+            break;
+        };
+        let value = value.trim_start();
+        let end = json_value_len(value);
+        entries.push((key, value[..end].trim_end()));
+        rest = value[end..].trim_start();
+        rest = rest.strip_prefix(',').unwrap_or(rest).trim_start();
+    }
+    if !rest.is_empty() {
+        return obj.to_string();
+    }
+    entries.sort_unstable();
+    entries
+        .iter()
+        .map(|(k, v)| format!("{k}={v}"))
+        .collect::<Vec<_>>()
+        .join("\u{1e}")
+}
+
+/// The byte length of the JSON value starting at `src`: a quoted string, a balanced object or array,
+/// or a bare scalar up to the next `,` at depth 0.
+fn json_value_len(src: &str) -> usize {
+    let (mut depth, mut in_string, mut escaped) = (0usize, false, false);
+    for (i, c) in src.char_indices() {
+        if in_string {
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => {
+                    in_string = false;
+                    if depth == 0 {
+                        return i + 1;
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => in_string = true,
+            '{' | '[' => depth += 1,
+            '}' | ']' if depth == 0 => return i,
+            '}' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    return i + c.len_utf8();
+                }
+            }
+            ',' if depth == 0 => return i,
+            _ => {}
+        }
+    }
+    src.len()
 }
 
 /// The one-line summary of a pending call, from the hook's `tool_input`: the command for `Bash`,

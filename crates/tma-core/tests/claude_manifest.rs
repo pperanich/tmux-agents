@@ -128,6 +128,7 @@ mod rule {
     pub(crate) const WORKING_BACKGROUND_AGENT: usize = 8;
     pub(crate) const WORKING_RATE_LIMIT: usize = 9;
     pub(crate) const BLOCKED_RATE_LIMIT: usize = 10;
+    pub(crate) const BLOCKED_TRUST_UNNUMBERED: usize = 11;
 }
 
 fn matched(ev: &Evaluation, index: usize) -> bool {
@@ -208,11 +209,58 @@ fn blocked_trust_dialog_detected_at_wide_and_narrow() {
         "claude_blocked_trust_w60.txt",
     ] {
         assert_blocked_detail(name, "trust");
+        let ev = evaluate(name);
         assert!(
-            matched(&evaluate(name), rule::BLOCKED_TRUST),
+            matched(&ev, rule::BLOCKED_TRUST),
             "{name}: trust variant rule matched"
         );
+        assert!(
+            !matched(&ev, rule::BLOCKED_TRUST_UNNUMBERED),
+            "{name}: the numbered layout parks `❯` on option 1, not on `No, exit`"
+        );
     }
+}
+
+/// C5. Claude Code 2.1.261 redraws the same gate with no option numbers and `No, exit` first and
+/// preselected, so the `❯ 1. Yes` anchor the generic rule and the numbered variant share misses it
+/// entirely and the pane read `unknown` at every width. The second trust rule reads this layout off
+/// its own two anchors, and the numbered rule stays for the builds that still draw it.
+#[test]
+fn blocked_trust_dialog_detected_in_the_unnumbered_layout() {
+    for name in [
+        "claude_blocked_trust_unnumbered_w60.txt",
+        "claude_blocked_trust_unnumbered_w100.txt",
+    ] {
+        let ev = evaluate(name);
+        assert!(
+            !matched(&ev, rule::BLOCKED_PERMISSION) && !matched(&ev, rule::BLOCKED_TRUST),
+            "{name}: no numbered option line, so neither `❯ 1. Yes` rule can see it"
+        );
+        assert!(
+            matched(&ev, rule::BLOCKED_TRUST_UNNUMBERED),
+            "{name}: the unnumbered trust rule matched"
+        );
+        let v = fold_verdict(name, None);
+        assert_eq!(v.state, AgentState::Blocked, "{name}: verdict blocked");
+        assert_eq!(
+            v.detail.as_ref().map(|d| d.as_str()),
+            Some("trust"),
+            "{name}: verdict detail"
+        );
+    }
+}
+
+/// `❯ No, exit` on its own is generic selection chrome, so the rule requires the trust wording in
+/// the same region. A refusal cursor without it must not stamp a trust gate.
+#[test]
+fn a_bare_refusal_cursor_is_not_a_trust_gate() {
+    let mut snap = synthetic_snapshot();
+    snap.tail_text =
+        " Delete the stale worktrees?\n\n ❯ No, exit\n   Yes, remove them\n".to_string();
+    assert!(!matched(
+        &engine().evaluate(&snap),
+        rule::BLOCKED_TRUST_UNNUMBERED
+    ));
 }
 
 /// A-500. The plan-approval dialog, whose option 1 is `Yes, and use auto mode` — it does not
@@ -242,7 +290,7 @@ fn plan_and_trust_outrank_the_generic_permission_rule() {
     let m = manifest();
     assert_eq!(
         m.rules.len(),
-        11,
+        12,
         "the rule-index map in `mod rule` is positional; a rule was inserted or removed"
     );
     let generic = &m.rules[rule::BLOCKED_PERMISSION];
@@ -329,6 +377,8 @@ fn approve_and_deny_refuse_at_a_real_plan_or_trust_capture() {
         "claude_blocked_plan_w200.txt",
         "claude_blocked_trust_w60.txt",
         "claude_blocked_trust_w200.txt",
+        "claude_blocked_trust_unnumbered_w60.txt",
+        "claude_blocked_trust_unnumbered_w100.txt",
     ] {
         let v = fold_verdict(name, None);
         assert_eq!(v.state, AgentState::Blocked, "{name}: folds to blocked");
@@ -815,6 +865,7 @@ fn a_permission_prompt_outranks_the_rate_limit_rules() {
         rule::BLOCKED_PERMISSION,
         rule::BLOCKED_PLAN,
         rule::BLOCKED_TRUST,
+        rule::BLOCKED_TRUST_UNNUMBERED,
     ] {
         assert!(
             m.rules[index].priority > blocked_rate.priority,
