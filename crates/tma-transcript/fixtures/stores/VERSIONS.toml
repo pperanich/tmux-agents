@@ -1,0 +1,36 @@
+# The store versions the fixture corpus pins, and where each store writes its own version stamp.
+#
+# The inventory test (`src/tests/corpus.rs`) reads this file and asserts both directions: every
+# directory under `stores/<agent>/<version>/` is declared here, and every version declared here has
+# at least one fixture. It then checks each fixture's in-file stamp against the version in its path
+# and its filename, so a fixture refreshed from a newer session cannot keep an old name.
+#
+# Versions drift fast. Thirty-seven claude sessions on the spike machine spanned eight CLI versions
+# in two months, and within that window subagent transcripts moved out of the parent file entirely.
+# Pinning on the store's own stamp rather than on the installed CLI is what makes an old session
+# readable by a new tma.
+
+[claude]
+versions = ["2.1.236"]
+# Claude writes no header record; `version` rides every record instead.
+stamp_key = "version"
+stamp_scope = "record"
+
+[codex]
+versions = ["0.146.0"]
+stamp_key = "payload.cli_version"
+stamp_scope = "header"
+
+[gemini]
+versions = ["0.46.0"]
+stamp_key = "cliVersion"
+stamp_scope = "header"
+
+[pi]
+versions = ["0.84.2"]
+# pi's `session.version` is its session-schema number (3 in this fixture), not the CLI version, so
+# the CLI version this fixture imitates is carried by the filename alone. Cursor is in the same
+# position for a different reason (it writes no version anywhere), which is why the discipline has
+# to allow a stamp from outside rather than assuming every store self-describes.
+stamp_key = ""
+stamp_scope = "filename"

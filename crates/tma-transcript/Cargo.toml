@@ -1,0 +1,21 @@
+[package]
+name = "tma-transcript"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Host-side reader for agent transcript stores: normalized events, newest first, with bounded paging."
+
+[lints]
+workspace = true
+
+[dependencies]
+# The typed refusal set. That is the whole dependency list: the workspace has no serde_json and
+# hand-rolls its JSON writer, so `src/json.rs` is the matching reader, in about 200 lines.
+thiserror.workspace = true
+
+[dev-dependencies]
+# The fixture corpus declares its pinned store versions in `fixtures/stores/VERSIONS.toml`, which
+# the inventory test reads. Already in the tree via tma-core; dev-only here.
+toml.workspace = true

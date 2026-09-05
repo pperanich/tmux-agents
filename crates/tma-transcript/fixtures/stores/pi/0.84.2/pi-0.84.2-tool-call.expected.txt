@@ -1,0 +1,14 @@
+session_meta	agent=pi session=00000000-0000-0000-0000-00000000pi01 version=3 model=-
+bookkeeping	type=model_change
+bookkeeping	type=thinking_level_change
+user_message	bytes=17 attachments=0
+thinking	bytes=11 redacted=false
+tool_call	name=read call_id=read_0 args=[path] bytes=22
+usage	input=1000 output=40 total=1240 window=- cost=0.00111
+tool_result	call_id=read_0 status=ok bytes=45
+thinking	bytes=5 redacted=false
+assistant_text	bytes=16
+usage	input=1100 output=20 total=2020 window=- cost=0.00120
+tool_call	name=bash call_id=bash_0 args=[command] bytes=19
+usage	input=1200 output=30 total=2230 window=- cost=0.00135
+tool_result	call_id=bash_0 status=error bytes=48

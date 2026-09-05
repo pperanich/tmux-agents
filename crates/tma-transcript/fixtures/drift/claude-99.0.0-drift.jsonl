@@ -1,0 +1,3 @@
+{"sessionId":"00000000-0000-0000-0000-0000000dr01","cwd":"/synthetic/workdir","version":"99.0.0","timestamp":"2026-01-01T00:00:01.000Z","type":"user","message":{"role":"user","content":[{"type":"text","text":"xxxxx"}]}}
+{"sessionId":"00000000-0000-0000-0000-0000000dr01","cwd":"/synthetic/workdir","version":"99.0.0","timestamp":"2026-01-01T00:00:01.000Z","type":"frame-link","frame":{"id":"synthetic-frame"}}
+{"sessionId":"00000000-0000-0000-0000-0000000dr01","cwd":"/synthetic/workdir","version":"99.0.0","timestamp":"2026-01-01T00:00:01.000Z","type":"artifact-comment-monitor","state":"synthetic-state"}
