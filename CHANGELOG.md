@@ -19,15 +19,6 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   dispatches their approve some seconds later can no longer land it on the prompt that replaced it:
   a pane that has moved on refuses `episode-changed`, one that no longer carries the quoted id
   refuses `request-gone`, and both exit 4 having sent nothing.
-
-### Changed
-
-- **The JSON row writer has a title-free surface for consumers off this machine.** This is internal
-  plumbing with no user-visible effect: `tma ls --json`, `tma wait --json` and `tma subscribe` emit
-  the bytes they always did, and nothing tma ships today uses the new form. The serializer is public
-  now and takes a surface argument, so one key set stays defined in one place and the remote form
-  drops only `title`, agent-supplied pane text that stays local for the reason `pending_summary`
-  does.
 - **`tma attach --pane %5`, the way in from a terminal that is not a tmux client yet.** `tma jump`
   is `switch-client`, which moves a client that is *already attached*: from a fresh ssh session or
   a phone's terminal app there is nothing for it to move, so the pane you wanted stayed one manual
@@ -85,6 +76,15 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   "tell the agent what to do instead" composer, which takes an optional reason and skips on an empty
   one. [Agent coverage](docs/reference/agent-coverage.md#bundled-action-key-sequences) has the
   table.
+
+### Changed
+
+- **The JSON row writer has a title-free surface for consumers off this machine.** This is internal
+  plumbing with no user-visible effect: `tma ls --json`, `tma wait --json` and `tma subscribe` emit
+  the bytes they always did, and nothing tma ships today uses the new form. The serializer is public
+  now and takes a surface argument, so one key set stays defined in one place and the remote form
+  drops only `title`, agent-supplied pane text that stays local for the reason `pending_summary`
+  does.
 
 ## [0.5.12] - 2026-09-05
 
