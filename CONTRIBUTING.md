@@ -30,6 +30,55 @@ every source under `crates/` and panics on a stale one, so this reports itself i
 passing green. Run `cargo build --workspace` first, or just use the whole-workspace
 command above. `TMA_TEST_BIN_NO_STALE_CHECK` skips the scan.
 
+## Live-gated tests
+
+A handful of tests drive a **real agent binary** in a scratch pane instead of a synthetic stamp:
+the manifest rows they check are keystrokes into somebody else's TUI, and only a live fire proves
+one. They are ordinary `#[test]`s, not `#[ignore]`d ones, so they run in the same
+`cargo test --workspace` as everything else and **skip green** wherever the lane is off. There is
+nothing to pass to `--`:
+
+```
+TMA_LIVE_AGENTS=1 mise run test
+```
+
+Without `TMA_LIVE_AGENTS=1` each such test prints `skipping: live agents not enabled` and returns.
+With it, `tma_test_support::have_agent("<agent>")` **panics** when the agent's binary is not on
+`PATH`, the same fail-closed shape `tmux_available()` has under `TMA_REQUIRE_TMUX=1`: a run that
+opted into the lane cannot report all-green while running none of it. CI never sets the variable,
+because CI has neither the binaries nor the credentials.
+
+### The scratch home
+
+`tma_test_support::live_agent_env(agent, scratch_home)` returns the environment that pins that
+agent's own configuration under the scratch directory, so an approve fired at a live dialog cannot
+write a persistent grant ("always allow", a trusted folder) into your real configuration. `HOME` is
+pinned too, since that is what each variable falls back to.
+
+| agent | pinned by | resolves to |
+|---|---|---|
+| claude | `CLAUDE_CONFIG_DIR` | `<scratch>/.claude` |
+| codex | `CODEX_HOME` | `<scratch>/.codex` |
+| cursor | `CURSOR_CONFIG_DIR`, `CURSOR_DATA_DIR` | `<scratch>/.cursor`, `<scratch>/.local/share/cursor-agent` |
+| gemini | `GEMINI_CLI_HOME` | `<scratch>/.gemini` (gemini appends `.gemini` itself) |
+| opencode | `XDG_CONFIG_HOME`, `XDG_DATA_HOME` | `<scratch>/.config/opencode`, `<scratch>/.local/share/opencode` |
+| pi | `PI_CODING_AGENT_DIR` | `<scratch>/.pi/agent` |
+
+### Credentials
+
+A pinned home has no login in it, so an agent that needs a model call will not start until you put
+one there. **The harness never copies a credential**, and neither should a test: what reaches the
+scratch home is your own explicit act, once, for the run you are doing.
+
+| agent | what to copy into the scratch home, or export |
+|---|---|
+| codex | `~/.codex/auth.json` → `<scratch>/.codex/auth.json`. An OAuth login on macOS is kept in the Keychain and has no file; export `OPENAI_API_KEY` instead |
+| claude | `~/.claude/.credentials.json` → `<scratch>/.claude/`, where the login is file-backed; on macOS it is in the Keychain, so export `ANTHROPIC_API_KEY` |
+| gemini | `~/.gemini/google_accounts.json` and `oauth_creds.json` → `<scratch>/.gemini/`, or export `GEMINI_API_KEY` |
+| pi | `~/.pi/agent/auth.json` → `<scratch>/.pi/agent/` |
+| opencode | `~/.local/share/opencode/auth.json` → `<scratch>/.local/share/opencode/` |
+| cursor | the CLI's store is the macOS Keychain by default and has no file to copy; export `CURSOR_API_KEY` |
+
 ## Where things live
 
 Nine crates under `crates/`, stacked so the dependency graph enforces the

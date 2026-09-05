@@ -207,24 +207,39 @@ key element is one `send-keys` argument with named-key interpretation on, so
 `Enter`, `Escape`, and `/compact` mean what tmux says. An agent with no cell for
 an action is not covered by it (the action does not apply to that agent's panes).
 
-| action | claude | codex | gemini | opencode |
-|---|---|---|---|---|
-| `approve` | `1` | `y` | - | API `permission-reply` `once` |
-| `deny` | `Escape` | `Escape` | - | API `permission-reply` `reject` |
-| `interrupt` | `Escape` | `Escape` | `Escape` | - |
-| `compact` | `/compact` `Enter` | - | - | - |
-| `steer` | text + `Enter` | text + `Enter` | - | text + `Enter` |
-| `steer_now` | text + `Enter` | text + `Enter` | - | - |
+| action | claude | codex | cursor | gemini | opencode | pi |
+|---|---|---|---|---|---|---|
+| `approve` | `1` | `y` | `y` | `1` | API `once` | n/a |
+| `deny` | `Escape` | `Escape` | `n` | `3` | API `reject` | n/a |
+| `interrupt` | `Escape` | `Escape` | `C-c` | `Escape` | `Escape` | `Escape` |
+| `compact` | `/compact` `Enter` | n/a | n/a | n/a | n/a | n/a |
+| `steer` | text + `Enter` | text + `Enter` | n/a | n/a | text + `Enter` | n/a |
+| `steer_now` | text + `Enter` | text + `Enter` | n/a | n/a | n/a | n/a |
 
 These sequences derive from each agent's captured prompt chrome (the same
 captures the blocked/working screen rules anchor on): `approve` is the confirm
-key of the permission prompt (Claude's `❯ 1. Yes` selection cursor, Codex's own
-`Yes, proceed (y)` accelerator), `deny` and `interrupt` are the reject/cancel
-key (`esc`). Gemini has no captured confirm/reject key, so it carries only
-`interrupt`; `compact` is Claude-only until other agents' compact commands are
-captured. The sequences are provisional pending per-agent, per-version keystroke
-fixtures, the same discipline detection rules get (ACTIONS.md open question 2):
-where a prompt offers numbered choices, "approve" means option 1 by convention.
+key of the permission prompt, `deny` the reject key, `interrupt` the cancel key
+its working screen advertises. Where the option prints its own accelerator that
+accelerator wins over the option's position, because tma's read path never knows
+where a selection cursor is resting: that is why Codex approves with `y` (from
+`1. Yes, proceed (y)`) rather than `Enter`, and why Cursor, whose dialog has no
+digits at all, uses `y` and `n`.
+
+Two shapes are deliberately absent. **pi has no permission prompt**, so it
+carries no `approve` or `deny` row in any state; it has `interrupt` because it
+has a working state. **The always/session-wide options are never wired** (Claude's
+`2`, Codex's `p`, Cursor's `tab` and `shift+tab`): each writes a persistent grant
+and `approve` answers one request. `compact` stays Claude-only until other
+agents' compact commands are captured.
+
+Cursor's `n` registers the rejection and then opens its own "tell the agent what
+to do instead" composer, which takes an optional reason and skips on an empty
+one. And `interrupt` does not compose with a queued message everywhere: on Claude
+and Codex interrupting submits the queue immediately, but on Gemini it returns
+the queued text to the composer unsent.
+
+The sequences are provisional pending per-agent, per-version keystroke fixtures,
+the same discipline detection rules get (ACTIONS.md open question 2).
 
 The two steering rows are `text` actions: the keys shown are the manifest's
 wrapping, and the message itself is the caller's, delivered literally (see

@@ -75,7 +75,7 @@ they mean; the whole sequence is delivered in a single `send-keys` through the
 ```toml
 [keys]
 claude = ["1"]
-codex = ["Enter"]
+codex = ["y"]
 ```
 
 ## `[api]`: per-agent API-channel transports
@@ -214,9 +214,9 @@ script does, so this one bit is the author's honest declaration.
 
 | name | kind | gate | effect |
 |---|---|---|---|
-| `approve` | keys | `state = ["blocked"], detail = ["permission"]` | Affirmative answer to a permission prompt (`1` for Claude, `Enter` for Codex; an API `permission-reply` `once` for OpenCode). |
-| `deny` | keys | `state = ["blocked"], detail = ["permission"]` | Negative answer to a permission prompt (`Escape` for Claude/Codex; an API `permission-reply` `reject` for OpenCode). |
-| `interrupt` | keys | `state = ["working"]` | Interrupt a working agent. |
+| `approve` | keys | `state = ["blocked"], detail = ["permission"]` | Affirmative answer to a permission prompt (`1` for Claude and Gemini, `y` for Codex and Cursor; an API `permission-reply` `once` for OpenCode). |
+| `deny` | keys | `state = ["blocked"], detail = ["permission"]` | Negative answer to a permission prompt (`Escape` for Claude/Codex, `3` for Gemini, `n` for Cursor; an API `permission-reply` `reject` for OpenCode). |
+| `interrupt` | keys | `state = ["working"]` | Interrupt a working agent (`Escape` everywhere but Cursor, which takes `C-c`). |
 | `compact` | keys | `state = ["idle"], context_pct_min = 75` | Compact the context window once it is high (`/compact` Enter for Claude). |
 | `steer` | text | `state = ["idle"]` | Send one line of your own text to an idle agent, submitted with Enter (Claude, Codex, OpenCode). |
 | `steer_now` | text | `state = ["working"]` | The same delivery at a working pane, for the agents that declared they queue a mid-turn message (Claude, Codex). |
