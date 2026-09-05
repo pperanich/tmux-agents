@@ -19,6 +19,13 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   stays for the builds that still draw it. Both stamp `blocked` / `trust`, so `approve` and `deny`
   remain gated at a dialog whose affirmative option grants the whole folder.
 
+- **`@agent_pending_call` was stamped empty on every Claude permission prompt.** Claude Code 2.1.261
+  sends no `tool_use_id` in its `PermissionRequest` payload, though its `PreToolUse` and
+  `PostToolUse` for the same call both still carry one. tma now mints the id from the session id,
+  the prompt id, the tool name and the tool input when the field is missing: stable across repeated
+  fires of one call, different for the next one, so a status line or script can again tell two
+  prompts apart. A payload that carries a `tool_use_id` is stamped with it unchanged.
+
 ## [0.5.11] - 2026-09-04
 
 ### Fixed

@@ -1367,6 +1367,68 @@ mod tests {
         );
     }
 
+    /// Claude Code 2.1.261's `PermissionRequest`, captured live and redacted: no `tool_use_id`
+    /// anywhere, though the vendor reference still lists one and `PreToolUse`/`PostToolUse` for the
+    /// same call both send it. Keys and nesting are the capture's, field for field.
+    const CLAUDE_PERMISSION_REQUEST_NO_CALL_ID: &str = r#"{"session_id":"7c74ac42-d330-4c0f-a7b1-ba9a918ba98e","transcript_path":"<TRANSCRIPT>","cwd":"<CWD>","scratchpad_dir":"<SCRATCH>","prompt_id":"20edf0d8-a22b-43de-94ab-4ecce0c78d11","permission_mode":"default","effort":{"level":"xhigh"},"hook_event_name":"PermissionRequest","tool_name":"Bash","tool_input":{"command":"touch /tmp/e4t/marker-leg1 && echo leg1-done","description":"Create marker file and print confirmation"},"permission_suggestions":[{"type":"addDirectories","directories":["/tmp/e4t"],"destination":"session"},{"type":"setMode","mode":"acceptEdits","destination":"session"}]}"#;
+
+    fn pending_call_id(payload: &str) -> String {
+        match pending_call_effect("PermissionRequest", &blocked_plan(), None, None, payload) {
+            PendingCall::Set { call, .. } => call,
+            other => panic!("expected a Set, got {other:?}"),
+        }
+    }
+
+    /// C5. A payload with no `tool_use_id` stamped `@agent_pending_call` empty on every claude
+    /// permission, so no consumer could tell one prompt from the next. The id is now minted from
+    /// what identifies the call, and two fires of one call mint the same string.
+    #[test]
+    fn a_permission_request_without_a_tool_use_id_mints_a_stable_id() {
+        let minted = pending_call_id(CLAUDE_PERMISSION_REQUEST_NO_CALL_ID);
+        assert!(!minted.is_empty(), "the stamp is no longer empty");
+        assert_eq!(
+            minted,
+            pending_call_id(CLAUDE_PERMISSION_REQUEST_NO_CALL_ID),
+            "the same call mints the same id"
+        );
+        assert_eq!(
+            minted,
+            pending_call_id(
+                &CLAUDE_PERMISSION_REQUEST_NO_CALL_ID
+                    .replace(r#""tool_name""#, r#""tool_use_id":"","tool_name""#)
+            ),
+            "an empty tool_use_id is treated as absent, not stamped through"
+        );
+        // Key order inside `tool_input` is canonicalized away, so a reserialization is not a new id.
+        assert_eq!(
+            minted,
+            pending_call_id(&CLAUDE_PERMISSION_REQUEST_NO_CALL_ID.replace(
+                r#"{"command":"touch /tmp/e4t/marker-leg1 && echo leg1-done","description":"Create marker file and print confirmation"}"#,
+                r#"{"description":"Create marker file and print confirmation","command":"touch /tmp/e4t/marker-leg1 && echo leg1-done"}"#
+            )),
+            "tool_input key order does not change the id"
+        );
+    }
+
+    /// The other half of the mint: two prompts that differ only in what the tool was asked to do
+    /// must not collide, or the id would be a per-session constant rather than a call id.
+    #[test]
+    fn two_calls_differing_only_in_tool_input_mint_different_ids() {
+        assert_ne!(
+            pending_call_id(CLAUDE_PERMISSION_REQUEST_NO_CALL_ID),
+            pending_call_id(
+                &CLAUDE_PERMISSION_REQUEST_NO_CALL_ID.replace("marker-leg1", "marker-leg2")
+            )
+        );
+    }
+
+    /// A payload that carries a `tool_use_id` keeps using it verbatim: the mint is the fallback, not
+    /// a replacement, so a build whose hook still sends the vendor id stamps that id.
+    #[test]
+    fn a_present_tool_use_id_is_stamped_unchanged() {
+        assert_eq!(pending_call_id(CLAUDE_PERMISSION_REQUEST), "toolu_01ABC123");
+    }
+
     /// The per-tool summary shapes: the path for the file tools, the first string field for a tool
     /// tma has no shape for, and empty when `tool_input` carries no string at all.
     #[test]

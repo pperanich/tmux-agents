@@ -94,7 +94,8 @@ pub mod opt {
     /// cleared with them on every edge that ends the prompt. Pane scope.
     pub const PENDING_TOOL: &str = "@agent_pending_tool";
     /// The pending call's id (`tool_use_id`), so a consumer can tell one prompt from the next on a
-    /// pane that blocks twice on the same tool. Pane scope.
+    /// pane that blocks twice on the same tool. Minted from the call's identifying fields when the
+    /// payload omits the field, which Claude Code 2.1.261 does. Pane scope.
     pub const PENDING_CALL: &str = "@agent_pending_call";
     /// A one-line, 120-byte summary of the pending call derived from `tool_input`: the command for
     /// Bash, the path for Edit/Write/Read, else the first string field. **Agent-supplied text**, so
