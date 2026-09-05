@@ -1,7 +1,8 @@
 use tma_runtime::ipc;
 
 use super::{
-    daemon_version_matches, tier_reason_str, tmux_below_min, Report, COMM_MAX, MIN_TMUX_VERSION_STR,
+    daemon_version_matches, tier_reason_str, tmux_below_min, Report, COMM_MAX, CONTRACT_DOC,
+    MIN_TMUX_VERSION_STR,
 };
 use crate::install::{HookWiring, TmuxHookState};
 use crate::json::{JsonWriter, JSON_SCHEMA};
@@ -276,12 +277,13 @@ pub(super) fn render_text(r: &Report) -> String {
         }
     }
 
-    // Corrupt stamps: every reader treats one as no stamp at all, so without this line the pane
-    // simply reads as never-stamped and no surface ever says why.
+    // Stamps tma did not write or cannot read. An undecodable one reads as never-stamped
+    // everywhere else, silently and forever; both shapes here also point at a second writer.
     if !r.stamp_issues.is_empty() {
         out.push_str(&format!(
-            "stamps:  {} pane(s) with an undecodable @agent_* option — they read as never-stamped; \
-             clear the option or let the next poll rewrite it\n",
+            "stamps:  {} pane(s) carrying an @agent_* option tma did not write or cannot decode; \
+             clear the option, let the next poll rewrite it, or see {CONTRACT_DOC} if another \
+             tool writes these\n",
             r.stamp_issues.len()
         ));
         for s in &r.stamp_issues {

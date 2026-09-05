@@ -10,6 +10,23 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **The pane options are now a contract another tool can write to, not just read.** [The
+  `@agent_state` contract](docs/reference/agent-state-contract.md) is the one-page spec: the closed
+  four-token state set and what an out-of-set value silently costs, what `@agent_since` and
+  `@agent_stamped_at` each mean, the server-side conditional write two producers need to stay off
+  each other, and which options are tma's alone. It exists because tma is no longer the only writer:
+  [`getpipher/agent-status`](https://github.com/getpipher/agent-status) stamps `@agent_state` on pi
+  panes with a vocabulary of its own, and OpenAI's `codex app-server` publishes the same four
+  distinctions in its own `ThreadStatus` enum.
+
+- **`tma doctor` names a second writer instead of reporting anonymous corruption.** A pane whose
+  `@agent_state` sits outside the closed set, or carries no `@agent_stamped_at` beside it (which no
+  tma write produces), is reported as "another tool may be writing @agent_state" with the value and
+  a pointer at the contract. Both ride the existing `stamp_issues` lane, so both count toward
+  `--exit-code` exactly as an undecodable stamp already did.
+
 ## [0.5.11] - 2026-09-04
 
 ### Fixed

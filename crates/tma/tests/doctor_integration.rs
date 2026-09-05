@@ -731,3 +731,56 @@ fn doctor_degrades_when_the_process_walk_fails() {
     );
     assert!(!String::from_utf8_lossy(&tma(&s, &["doctor"]).stdout).contains("procs:"));
 }
+
+/// A pane whose `@agent_state` tma did not write, in both shapes a second producer leaves behind:
+/// a token outside the closed set, and a token inside it with no `@agent_stamped_at` beside it.
+/// Each is named with its value and the contract page, and each gates red under `--exit-code`.
+#[test]
+fn doctor_names_a_second_writer_on_at_agent_state() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new("foreign");
+    assert!(s
+        .tmux(&["new-session", "-d", "-x", "80", "-y", "24"])
+        .status
+        .success());
+    let pane = s.display("", "#{pane_id}");
+
+    // Shape one: a vocabulary of somebody else's. The whole tuple stops decoding.
+    s.set_opt(&pane, "@agent_state", "busy");
+    let text = String::from_utf8_lossy(&tma(&s, &["doctor"]).stdout).to_string();
+    assert!(
+        text.contains("stamps:") && text.contains(&pane),
+        "the pane is named: {text}"
+    );
+    assert!(
+        text.contains("another tool may be writing @agent_state") && text.contains("busy"),
+        "with the possibility and the value: {text}"
+    );
+    assert!(
+        text.contains("agent-state-contract.md"),
+        "and the spec that ends the collision: {text}"
+    );
+    assert!(
+        !tma(&s, &["doctor", "--exit-code"]).status.success(),
+        "a foreign stamp gates red"
+    );
+
+    // Shape two: a token tma understands, written by something that stamps no freshness marker.
+    s.set_opt(&pane, "@agent_state", "working");
+    let json = String::from_utf8_lossy(&tma(&s, &["doctor", "--json"]).stdout).to_string();
+    assert!(
+        json.contains("\"stamp_issues\":[{") && json.contains("@agent_stamped_at"),
+        "the missing marker rides the JSON document: {json}"
+    );
+
+    // A stamp with the marker beside it is tma's own shape, and says nothing.
+    s.set_opt(&pane, "@agent_stamped_at", "1700000000000");
+    let text = String::from_utf8_lossy(&tma(&s, &["doctor"]).stdout).to_string();
+    assert!(
+        !text.contains("stamps:"),
+        "a complete stamp is quiet: {text}"
+    );
+}
