@@ -409,6 +409,14 @@ The `--json` result object, the `--all` envelope, and the `--list` document are
 specified in
 [Pane options and JSON contracts](pane-options-and-json.md#tma-act-json-result).
 
+A `keys` action can also carry a per-agent `[hook]` arm. On a claude pane whose
+[hook reply
+lane](../how-to/install-agent-hooks.md#answer-claudes-prompts-over-the-hook-lane) is
+holding a prompt open, `approve` and `deny` hand the verdict to that hook rather
+than sending the key sequence: outcome `replied`, exit 0, `kind` `hook` in the audit
+log. With no hook holding, the same fire sends the keys as it always did. `--dry-run`
+names which of the two it would take.
+
 ### Binding a dispatch to the pane you saw
 
 A surface that reads a pane, shows a person the prompt, and dispatches their
@@ -502,7 +510,7 @@ The key set, in order:
 | `pane` | string | target pane id |
 | `agent` | string \| null | `@agent_name` as read under the lock; `null` when the pane vanished before any read |
 | `action` | string | the action name |
-| `kind` | string | `keys`, `api`, or `exec`: the transport the fire used, not just the manifest kind |
+| `kind` | string | `keys`, `api`, `hook`, or `exec`: the transport the fire used, not just the manifest kind |
 | `outcome` | string | the [`--json` outcome vocabulary](pane-options-and-json.md#tma-act-json-result) |
 | `reason` | string \| null | the refusal or vanish token, `null` for every other outcome |
 | `source` | string | which surface asked: `cli` (a person at a TTY), `cli-yes` (`--yes`, or no TTY to prompt on: a script, a hook, an agent), `menu` (the tmux action menu) |
@@ -555,11 +563,11 @@ lives on the pane as `@agent_act_repeat`.
 
 | code | meaning |
 |---|---|
-| `0` | Acted: keys delivered, an API-channel answer delivered (2xx), a synchronous exec child exited `0`, or a detached supervisor spawned. |
+| `0` | Acted: keys delivered, an API-channel answer delivered (2xx), a hook-lane verdict written, a synchronous exec child exited `0`, or a detached supervisor spawned. |
 | `124` | A synchronous exec child was killed at `timeout_ms`. |
 | `4` | The gate refused: state did not satisfy `when`, `requires` was unmet (including an API `permission-reply` op with no pending request id or no resolvable endpoint), the action does not apply to this agent, or the gated metric has no coverage. Also the two binder refusals, `episode-changed` and `request-gone`, when the fire carried an `--expect-*` the pane no longer satisfies (see [Binding a dispatch to the pane you saw](#binding-a-dispatch-to-the-pane-you-saw)). The refusing fact goes to stderr. |
 | `5` | The pane action lock is held by another invocation. |
-| `3` | The act's target disappeared mid-act: tmux reports the pane gone (`can't find pane` / `no such pane`), `reason` `pane-gone`; or an API permission was answered/withdrawn between the gate and the act (a 404), `reason` `request-gone` — the pane itself is still there. |
+| `3` | The act's target disappeared mid-act: tmux reports the pane gone (`can't find pane` / `no such pane`), `reason` `pane-gone`; or the permission was answered or withdrawn between the gate and the act (an API 404, or a hook-lane verdict file that already exists), `reason` `request-gone` — the pane itself is still there. |
 | `2` | Usage error (bad flag combination, selector flags alongside `--pane`, or `--all` whose selector matched no pane). |
 | `1` | A runtime failure (no tmux server, a broker error, or an ambiguous selection without `--all`). A tmux command the server refused lands here, with tmux's own stderr in the message — only a pane tmux reports as gone is exit `3`. |
 

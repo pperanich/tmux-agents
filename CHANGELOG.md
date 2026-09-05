@@ -19,6 +19,14 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   dispatches their approve some seconds later can no longer land it on the prompt that replaced it:
   a pane that has moved on refuses `episode-changed`, one that no longer carries the quoted id
   refuses `request-gone`, and both exit 4 having sent nothing.
+- **A third reply transport: claude's permission hook can be answered with a decision instead of a
+  keystroke.** Name `[hooks] claude_reply_lane` in `config.toml` and a `PermissionRequest` hook
+  parks the pending call under `$XDG_RUNTIME_DIR/tma/requests/` and holds (25 seconds by default,
+  bounded under claude's own hook timeout) while `tma act approve` / `deny` writes the verdict its
+  new `[hook]` transport declares, so the tool runs or refuses with nothing typed into the pane.
+  Nothing degrades when no one answers: claude draws its dialog immediately either way, the keyboard
+  answers it throughout, and a hold that expires hands the prompt back untouched, with the next
+  dispatch sending the key sequence tma has always sent.
 
 ## [0.5.12] - 2026-09-05
 
