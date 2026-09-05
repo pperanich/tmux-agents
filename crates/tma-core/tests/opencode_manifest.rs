@@ -128,6 +128,7 @@ mod rule {
     pub(crate) const BLOCKED_PERMISSION: usize = 0;
     pub(crate) const WORKING_STATUS_ROW: usize = 1;
     pub(crate) const IDLE_COMPOSER_HINT: usize = 2;
+    pub(crate) const BLOCKED_QUESTION: usize = 3;
 }
 
 fn matched(ev: &Evaluation, index: usize) -> bool {
@@ -419,6 +420,79 @@ fn working_screen_also_matches_the_idle_rule_but_still_folds_working() {
             "{name}: working outranks the co-rendered idle claim"
         );
     }
+}
+
+// ---- rule #3: blocked/question, anchored on the question dialog's footer ------------
+
+/// The `question` tool's dialog reads `blocked/question` at both promoted widths. The detail is the
+/// whole point: it is a question to answer, not a permission to grant, and `tma act approve` gates
+/// on `detail = permission` precisely so it cannot fire here.
+#[test]
+fn question_dialog_reads_blocked_question() {
+    for name in [
+        "opencode_blocked_question_w60.txt",
+        "opencode_blocked_question_w100.txt",
+    ] {
+        let ev = evaluate(name);
+        assert!(
+            matched(&ev, rule::BLOCKED_QUESTION),
+            "{name}: the dialog footer must read as blocked"
+        );
+        // The dialog replaces the composer, so neither the idle hint nor the interrupt hint is on
+        // screen: this is the only rule the capture matches.
+        assert_eq!(ev.evidence.len(), 1, "{name}: exactly one claim");
+        assert!(
+            !matched(&ev, rule::IDLE_COMPOSER_HINT) && !matched(&ev, rule::WORKING_STATUS_ROW),
+            "{name}: the composer is gone, so neither composer rule fires"
+        );
+
+        let v = fold_verdict(name, None);
+        assert_eq!(v.state, AgentState::Blocked, "{name}: verdict blocked");
+        assert_eq!(
+            v.detail.as_ref().map(|d| d.as_str()),
+            Some("question"),
+            "{name}: and it is a question, not a permission"
+        );
+    }
+}
+
+/// The other half of the anchor. The footer is composer-exclusive chrome, so a settled pane and a
+/// permission dialog must both stay silent: a false `blocked/question` would park a working agent
+/// in the attention queue for a prompt nobody can answer.
+#[test]
+fn settled_and_permission_screens_do_not_read_as_a_question() {
+    for name in [
+        "opencode_idle_w100.txt",
+        "opencode_idle_w60.txt",
+        "opencode_working_w100.txt",
+        "opencode_working_w60.txt",
+        "opencode_blocked_permission_w100.txt",
+        "opencode_blocked_permission_w60.txt",
+        "opencode_blocked_edit_w60.txt",
+    ] {
+        let ev = evaluate(name);
+        assert!(
+            !matched(&ev, rule::BLOCKED_QUESTION),
+            "{name}: no question footer, so no question claim"
+        );
+    }
+    // And the permission dialog keeps its own detail: the two blocked rules do not collide.
+    let v = fold_verdict("opencode_blocked_permission_w100.txt", None);
+    assert_eq!(v.detail.as_ref().map(|d| d.as_str()), Some("permission"));
+}
+
+/// A question drawn while a hook still says `working` must win. `blocked` is capture-visible for
+/// OpenCode, so the fold's carve-out lets the fresh dialog override the stale claim, exactly as it
+/// does for a permission prompt. Without this a question would sit unreported behind the last hook.
+#[test]
+fn question_dialog_overrides_a_stale_working_hook() {
+    let name = "opencode_blocked_question_w60.txt";
+    let at = ev_now(name);
+    let mut stale = working_prior(at.saturating_sub(5));
+    stale.source = Provenance::Hook;
+    let v = fold_verdict(name, Some(stale));
+    assert_eq!(v.state, AgentState::Blocked);
+    assert_eq!(v.detail.as_ref().map(|d| d.as_str()), Some("question"));
 }
 
 /// The pinned-`working` trap, end to end: a screen-stamped `working` prior meets a settled screen

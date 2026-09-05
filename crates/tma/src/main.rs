@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 mod act;
+mod attach;
 mod cli;
 mod cli_support;
 mod completions;
@@ -125,6 +126,14 @@ fn main() -> ExitCode {
             run_status(args, &server, manifest_dir, debug_timing, &config)
         }
         Some(Command::Jump(args)) => run_jump_cmd(args, &server, manifest_dir, &config, client),
+        Some(Command::Attach(args)) => attach::run(attach::AttachOpts {
+            pane: args.pane,
+            print: args.print,
+            server: server.clone(),
+            manifest_dir,
+            config,
+            client,
+        }),
         Some(Command::Wait(args)) => wait::run(wait::WaitOpts {
             target_pane: args.pane,
             target_any: args.any,
@@ -386,6 +395,7 @@ fn autostart_eligible(command: &Option<Command>) -> bool {
             Command::Ls(_)
                 | Command::Status(_)
                 | Command::Jump(_)
+                | Command::Attach(_)
                 | Command::Wait(_)
                 | Command::Watch(_)
                 | Command::Subscribe(_)
@@ -515,6 +525,8 @@ mod tests {
             vec!["ls"],
             vec!["status"],
             vec!["jump"],
+            // `attach` is a navigation surface too: inside tmux it IS a jump.
+            vec!["attach", "--pane", "%1"],
             vec!["wait", "--any", "--until", "idle"],
             vec!["watch"],
             vec!["subscribe"],

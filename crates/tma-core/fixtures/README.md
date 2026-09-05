@@ -42,6 +42,19 @@ The two `_unnumbered_` fixtures are the workspace-trust dialog as Claude Code
 numbered `claude_blocked_trust_w{60,100,200}.txt` captures are the older
 layout, and both are live in the field, so both keep a rule.
 
+Two more came the same way, from the OpenCode corpus
+(`docs/internal/mobile/research/captures/opencode/`):
+
+- `opencode_blocked_question_w{60,100}.txt`
+
+They are two of the five widths OpenCode 1.18.29's `question` dialog was captured
+at, bodies verbatim (ANSI-stripped at capture time, nothing to redact: no home
+path, username, host or id appears). Their headers, including `command`, are
+synthesized, so no test may assert on the title, command, pid or `captured_at` of
+either. The other three widths (80/120/200) and the post-`Escape` capture stay in
+the corpus as the evidence that the anchor is structural rather than a wrap
+artefact.
+
 ## Synthesized bodies
 
 Two fixtures are synthesized whole, header *and* body, and their names say so:

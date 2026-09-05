@@ -160,7 +160,9 @@ impl Tmux {
     /// tmux would call current), and it resolves from a window target or a pane target alike.
     /// An unreadable answer is `false`, which falls through to the plain `select-window` this
     /// guards — the behaviour before the guard existed.
-    fn window_is_current(&self, window_target: &str) -> bool {
+    ///
+    /// Shared with the attach path, whose `select-window` carries the same hook cost.
+    pub(super) fn window_is_current(&self, window_target: &str) -> bool {
         self.display(window_target, "#{window_active}")
             .is_ok_and(|v| v.trim() == "1")
     }

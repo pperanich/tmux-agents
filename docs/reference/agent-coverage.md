@@ -298,6 +298,23 @@ matched, since the `■`/`⬝` progress bar beside it animates. `idle` is anchor
 is per-pane: token count, cost, cwd). The permission dialog replaces the composer, so a
 blocked screen never raises it.
 
+A second blocked rule reads OpenCode's `question` tool, which asks *you* to pick an option
+mid-turn: `blocked` with `detail = question`. The turn is technically still in flight, but
+nothing advances until somebody answers, so the ball is with the human. It is anchored on
+the dialog's footer, `↑↓ select  enter submit  esc dismiss`, verbatim at every captured
+width (60 through 200, opencode 1.18.29). The options render as `1. Red` / `2. Blue`, the
+same numbered shape as claude's permission dialog, so the numbering alone is deliberately
+not matched; the tool's own `3. Type your own answer` line is corroboration rather than a
+required token, since it is appended only while the tool's `custom` flag is not false.
+
+**`tma act approve` does not answer a question.** `approve` and `deny` gate on `detail =
+permission`, so a question pane simply offers neither, which is the intended result: for
+OpenCode those two POST a `permission-reply` for a pending request id, and a question is
+not a pending permission. Answering one means typing into the pane, or a `question-reply`
+lane on the API that does not exist yet. It is also a screen read only: the bundled plugin
+forwards no question event, so a pane whose screen tma cannot see, a remote shell, reports
+nothing here even with hooks wired.
+
 The OSC title is not usable. The original audit found it static (`OpenCode`); on 1.18.18
 it is state-bearing (`OC | Running <command>`) but goes stale, still reading `Running`
 a minute after the turn settled, which would pin such a pane to `working` forever. That makes registration the only thing standing between a quiet pane

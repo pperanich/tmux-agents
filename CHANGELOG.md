@@ -28,6 +28,26 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   now and takes a surface argument, so one key set stays defined in one place and the remote form
   drops only `title`, agent-supplied pane text that stays local for the reason `pending_summary`
   does.
+- **`tma attach --pane %5`, the way in from a terminal that is not a tmux client yet.** `tma jump`
+  is `switch-client`, which moves a client that is *already attached*: from a fresh ssh session or
+  a phone's terminal app there is nothing for it to move, so the pane you wanted stayed one manual
+  `tmux attach` and some navigation away. `attach` selects the pane's window and pane on its
+  session, then replaces itself with `tmux attach-session -t <session>` (carrying
+  `--socket-name`/`--socket-path` through), so the terminal you are holding becomes the client
+  showing that pane. Inside tmux (`$TMUX` set) it is exactly `tma jump --pane`, which makes it the
+  one command that works from both ends. It refuses with exit 2 when stdin is not a terminal, since
+  it has no tty to hand over, and exit 3 when the pane vanished; `--print` shows the argv it would
+  run instead of running it.
+- **An OpenCode pane waiting on a `question` now reads `blocked/question` instead of `working`.**
+  OpenCode's `question` tool asks you to pick an option mid-turn. The turn is technically still in
+  flight, so the pane kept the `working` glyph and stayed out of `tma jump --attention` and the
+  blocked count while nothing at all was happening. A new screen rule, anchored on the dialog's
+  `↑↓ select  enter submit  esc dismiss` footer (verbatim at every width from 60 to 200 on
+  opencode 1.18.29), types it as `blocked` with a detail that says which kind of stop it is. The
+  detail matters for what does *not* happen next: `tma act approve` and `deny` gate on `detail =
+  permission`, so they keep offering nothing at a question, which is right, since answering one
+  means choosing an option rather than granting a request. This is a screen read only; the plugin
+  forwards no question event yet.
 
 ## [0.5.12] - 2026-09-05
 

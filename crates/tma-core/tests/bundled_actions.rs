@@ -101,6 +101,37 @@ fn approve_refuses_at_the_plan_and_trust_dialogs() {
     );
 }
 
+/// The OpenCode `question` dialog is `blocked`, but it is a question to answer rather than a
+/// permission to grant, so neither `approve` nor `deny` resolves at it. Nothing in either manifest
+/// says `question`: they gate on `detail = permission` by exact string, which is what makes a new
+/// blocked detail orphan them by default instead of silently inheriting a reply.
+///
+/// Pinned rather than assumed: OpenCode is the one agent whose `approve`/`deny` answer over HTTP,
+/// and a `permission-reply` POST fired at a question would quote a request id that is not pending.
+#[test]
+fn approve_and_deny_refuse_at_the_opencode_question_dialog() {
+    for (stem, src) in [("approve", APPROVE), ("deny", DENY)] {
+        let a = ActionManifest::parse(src, stem, &format!("{stem}.toml")).unwrap();
+        assert_eq!(
+            a.evaluate_gate(&GateInput {
+                detail: Some("question"),
+                ..row("opencode", AgentState::Blocked)
+            }),
+            GateOutcome::Refused(RefusalReason::Gated),
+            "{stem} must not answer a blocked/question pane"
+        );
+        // The dialog it does exist for is untouched on the same agent.
+        assert_eq!(
+            a.evaluate_gate(&GateInput {
+                detail: Some("permission"),
+                ..row("opencode", AgentState::Blocked)
+            }),
+            GateOutcome::Fireable,
+            "{stem} still resolves an OpenCode permission prompt"
+        );
+    }
+}
+
 /// A-506. The resolved action table for a claude pane, asserted as data across the whole blocked
 /// detail vocabulary. The split's entire intended effect is the two `plan`/`trust` rows: approve and
 /// deny stop resolving there, and nothing else moves.
