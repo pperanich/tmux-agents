@@ -307,6 +307,7 @@ struct RawAction {
     api: BTreeMap<String, RawApiTransport>,
     #[serde(default)]
     text: BTreeMap<String, RawTextTransport>,
+    #[serde(default)]
     hook: BTreeMap<String, RawHookTransport>,
     /// `Option` so the absent case takes [`DEFAULT_SIGILS`] and mere presence is rejectable on a
     /// non-`text` kind; `Some(vec![])` is a deliberate opt-out.
