@@ -106,6 +106,7 @@ your other sessions exactly as an unscoped one does.
 | `act` | Fire a guarded action into an agent pane (`--all` for every pane in scope), or enumerate/menu the fireable ones (`--list` / `--menu`). |
 | `mute` | Suppress notifications for the panes in scope, for `--for <DURATION>` or until `--clear`. |
 | `subscribe` | Stream the read path: one complete `ls --json` document per line, pushed when a daemon is present. |
+| `transcript` | Read what the agent in a pane has been writing, as normalized events, newest first, a bounded page at a time. |
 | `watch` | Persistent live dashboard for a pane, window, or terminal of its own. |
 | `daemon` | Run the event-hub daemon in the foreground; `--ensure` spawns it if absent then exits. |
 | `reload` | Signal the running daemon to hot-reload its config and manifests (SIGHUP). |
@@ -703,6 +704,133 @@ as you read it that way.
 The jsonl logging recipe is in
 [Stream state
 changes](../how-to/stream-state-changes.md#log-every-transition-to-jsonl).
+
+## `tma transcript`
+
+Read what the agent in a pane has been writing. Every state surface above tells
+you *that* a pane is blocked; this one tells you what it was doing when it
+stopped, out of the agent's own transcript file. The events are normalized
+across stores, so a claude pane and a codex pane answer in the same vocabulary.
+
+```
+Usage: tma transcript --pane <ID> [OPTIONS]
+```
+
+| option | meaning |
+|---|---|
+| `--pane <ID>` | Required. The agent pane to read (e.g. `%5`). |
+| `--last <N>` | How many events to return, counting back from the newest (default `50`). |
+| `--before <CURSOR>` | Return only events older than this cursor: the `older` a previous page reported. |
+| `--headers` | Drop bodies and cap every string at the header budget (256 bytes). Without it a local run carries each event's body inline. |
+| `--event <CURSOR>` | Fetch one event's body instead of a window. Excludes `--last`, `--before` and `--headers`. |
+| `--subagent <ID>` | Read a nested agent's own transcript (the `child_id` a `subagent_ref` event carries). Claude only. |
+| `--json` | Emit the schema-1 document instead of one tab-separated line per event. |
+
+Text mode is one line per event, newest first: kind, the store's own timestamp,
+and the first line of the body.
+
+```
+$ tma transcript --pane %0 --last 5
+user_message     2026-01-01T00:00:11.000Z  can you check the failing test
+compaction       2026-01-01T00:00:10.000Z  compact_boundary
+turn_boundary    2026-01-01T00:00:09.000Z  end turn_duration
+bookkeeping      2026-01-01T00:00:08.000Z  mode
+attachment       2026-01-01T00:00:07.000Z  file (64 bytes)
+tma: more before this page: --before t1.1000013.a3e191d3.e36.8c6.0
+```
+
+The `older` line goes to stderr, so a pipe gets only the events.
+
+### Which agents are served
+
+Four stores are read: **claude**, **codex**, **gemini** and **pi**.
+**cursor-agent** and **OpenCode** are refused by name rather than served empty;
+[Agent transcript stores](../explanation/transcript-stores.md) is the argument
+for why, and what else the reader cannot tell you.
+
+Discovery prefers the pane's `@agent_transcript` stamp (the path the agent's own
+hook payload named) and falls back to walking the store's layout from
+`@agent_session`. A pane detected from the screen alone, with no session id, has
+neither, and is refused.
+
+### Paging
+
+The window is end-anchored: `--last` counts back from the newest event, never
+forward from the head. Take the `older` cursor a page reports and pass it back
+as `--before` for the page behind it; repeat until `older` is null, which means
+the head of the file is in the page you are holding. Pages never overlap and
+never skip, including when a page boundary lands inside a record that produced
+several events.
+
+Cursors are opaque. They encode the file's identity and its size when the cursor
+was minted, so a cursor into a file that has since been compacted, truncated or
+replaced is refused (`cursor-invalid`) rather than silently reinterpreted
+against whatever now sits at that offset. Re-request without `--before` to get a
+fresh window.
+
+Three budgets bound one call: at most 1 MiB read from disk, at most 32 KiB of
+headers returned, and at most 256 bytes per string. When one of them bites
+before `--last` does, the page comes back short with `budget_truncated` set and
+a usable `older`. A 44 MiB claude session costs the same first page as a 4 KiB
+pi one.
+
+### `--json`
+
+A schema-1 document. `events` is newest-first, and each event carries an opaque
+`cursor`, its `kind`, the store's `ts`, a `preview` (the body's first line), the
+keys that kind defines, and `body` (null under `--headers`).
+
+```json
+{
+  "schema": 1,
+  "pane": "%0",
+  "agent": "claude",
+  "path": "/Users/you/.claude/projects/-Users-you-app/0f3c….jsonl",
+  "session": { "agent": "claude", "session_id": "0f3c…", "cwd": "/Users/you/app",
+               "version": "2.1.236", "model": null },
+  "older": "t1.1000013.a3e191d3.e36.c0c.0",
+  "budget_truncated": false,
+  "unknown": 0,
+  "events": [
+    { "cursor": "t1.1000013.a3e191d3.e36.d20.0", "kind": "user_message",
+      "ts": "2026-01-01T00:00:11.000Z", "preview": "can you check the failing test",
+      "bytes": 30, "attachments": 0, "body": null }
+  ]
+}
+```
+
+The kinds are `session_meta`, `user_message`, `assistant_text`, `thinking`,
+`tool_call`, `tool_result`, `permission_request`, `turn_boundary`, `usage`,
+`subagent_ref`, `compaction`, `attachment`, `bookkeeping` and `unknown`. The
+last two are the pair that matters for drift: `bookkeeping` is a record tma
+knows and deliberately does not draw, `unknown` is one no adapter claimed, and
+the document's `unknown` count is how many of the latter this page held. A store
+that grows a record type raises that count; it never fails the read.
+
+`--event <cursor> --json` answers with the same envelope and a single `event`
+key carrying that one event with its `body` filled in.
+
+A refusal is a document too, so a `--json` consumer parses one shape either way:
+
+```json
+{"schema":1,"pane":"%0","refusal":{"code":"store-incomplete","message":"…"}}
+```
+
+The codes are `no-transcript`, `unsupported-store`, `store-incomplete`,
+`cursor-invalid`, `record-too-large` and `io-error`.
+
+### Exit codes
+
+```
+0    the window (or the body) was served
+3    no such pane
+4    a typed refusal: no transcript, a store this reader does not serve, or a stale cursor
+1    a runtime failure
+2    usage error
+```
+
+Exit 4 is separate from exit 1 on purpose: "there is nothing to show you, and
+here is why" is a different fact from "something broke".
 
 ## `tma watch`
 
