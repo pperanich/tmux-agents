@@ -78,6 +78,7 @@ zero_member_recheck_secs = 1 # clientless liveness recheck
 demote_edges = 5             # hook-liveness demotion threshold
 autostart = false            # auto-start the daemon on first use of a surface
 restart_on_upgrade = true    # let a newer tma replace an older resident daemon
+# window_names = { format = "{repo}:{state}" }  # rename each window after the agents in it
 
 [[agent]]                    # per-agent overrides (repeatable)
 name = "claude"
@@ -283,6 +284,35 @@ The daemon is strictly additive; these knobs apply only when it runs.
 | `demote_edges` | `5` | Hook-liveness demotion threshold: activity edges the pane's hooks do not account for before its coverage is treated as suspect. An edge landing on a fresh hook claim does not count, and neither does one on a pane whose hooks last said `working` and have not yet been contradicted by capture, so a single long tool call cannot demote a healthy pane. |
 | `autostart` | `false` | Auto-start the daemon on first use of a surface (`ls`/`status`/`jump`/picker/`watch`/`wait`/`subscribe`). |
 | `restart_on_upgrade` | `true` | Replace a resident daemon whose build is **strictly older** than the binary running the check. Runs from every user surface, from `tma event`, and from `tma daemon --ensure`. Set `false` to opt out. |
+| `window_names` | unset | A sub-table `{ format = "..." }` that renames each tmux window after the agents in it. Naming the sub-table is the opt-in; `format` is optional and defaults to `"{repo}:{state}"`. See [`window_names`](#window_names) below. |
+
+### `window_names`
+
+Rename each tmux window after the agents running in it. Off until you name the
+sub-table:
+
+```toml
+[daemon.window_names]
+format = "{repo}:{state}"
+```
+
+| token | expands to |
+|---|---|
+| `{agent}` | the agent name (`claude`, `codex`, …) |
+| `{state}` | the window's highest-attention state: `blocked`, `working`, `idle`, `unknown` |
+| `{detail}` | the winning pane's `@agent_detail` (`permission`, `plan`, …), empty when it has none |
+| `{repo}` | the repo the winning pane's working directory belongs to |
+| `{branch}` | that checkout's branch |
+
+Any other token is a config error naming the token, so a typo fails the load
+instead of ending up in every window name. A token that resolves to nothing takes
+its separator with it: with `{repo}:{state}`, a pane outside a checkout reads
+`working`, not `:working`. Names are stripped of control bytes and capped at 64
+characters.
+
+Only the daemon renames, and only windows holding at least one agent pane. The
+recipe and the restore rules are in [Name windows after their
+agents](../how-to/show-agents-in-your-status-line.md#name-windows-after-their-agents).
 
 ### `restart_on_upgrade`
 

@@ -10,6 +10,18 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **tmux window names derived from the agents in them.** `[daemon] window_names = { format =
+  "{repo}:{state}" }` renames each window holding an agent pane after that window's
+  highest-attention state, with `{agent}`, `{state}`, `{detail}`, `{repo}` and `{branch}` to build
+  the name from; an unknown token fails the config load rather than surviving into every window.
+  Only the daemon renames, only when the rendered name actually changes, and only windows that hold
+  an agent. tma saves the window's name and its `automatic-rename` setting on the first rename and
+  puts both back when the last agent pane leaves or the daemon stops, so the feature hands the
+  window list back exactly as it found it. Rename a window yourself and tma notices its own last
+  write no longer matches and leaves that window alone.
+
 ## [0.5.11] - 2026-09-04
 
 ### Fixed

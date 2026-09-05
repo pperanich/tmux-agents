@@ -13,6 +13,8 @@ use std::time::Duration;
 use serde::Deserialize;
 use tma_core::{AgentState, FoldConfig};
 
+use crate::window_name::NameTemplate;
+
 /// The whole `config.toml`. Every section is optional and every leaf defaults to the value it
 /// replaced, so [`Config::default`] is byte-for-byte the pre-config behavior (`deny_unknown_fields`).
 #[derive(Debug, Clone, Default, Deserialize)]
@@ -244,6 +246,21 @@ pub struct DaemonSection {
     /// [`crate::ipc::restart_decision`].
     #[serde(default = "default_restart_on_upgrade")]
     pub restart_on_upgrade: bool,
+    /// `[daemon.window_names]`: rename each tmux window after the agents in it. Absent ⇒ off, so
+    /// naming the sub-table is the opt-in; `format` inside it is optional.
+    #[serde(default)]
+    pub window_names: Option<WindowNamesSection>,
+}
+
+/// `[daemon.window_names]`: the state-derived window-name feature. One key, and an unknown one stays
+/// a loud error, so a mistyped `format` never leaves the windows silently unnamed.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowNamesSection {
+    /// The name template. Tokens are `{agent}`, `{state}`, `{detail}`, `{repo}` and `{branch}`;
+    /// an unknown one fails the load. Default [`crate::window_name::DEFAULT_FORMAT`].
+    #[serde(default)]
+    pub format: NameTemplate,
 }
 
 fn default_sweep_secs() -> u64 {
@@ -271,6 +288,7 @@ impl Default for DaemonSection {
             demote_edges: default_demote_edges(),
             autostart: false,
             restart_on_upgrade: default_restart_on_upgrade(),
+            window_names: None,
         }
     }
 }
@@ -861,6 +879,8 @@ mod tests {
         assert!(c.agent_overrides.is_empty());
         // Per-agent API config is empty by default: the broker relies on the pane stamp.
         assert!(c.api.api_base("opencode").is_none());
+        // State-derived window names are opt-in: absent by default, so tma renames nothing.
+        assert!(c.daemon.window_names.is_none());
         // Telemetry windows: zero-config recognizes the shipped names and nothing else.
         assert!(c.telemetry.windows.knows("gemini-1.5-pro"));
         assert!(!c.telemetry.windows.knows("some-unknown-model"));
@@ -880,6 +900,29 @@ mod tests {
         assert!(c.telemetry.windows.knows("gemini-1.5-pro"));
         // Still unknown outside the union.
         assert!(!c.telemetry.windows.knows("mystery-model"));
+    }
+
+    /// `[daemon.window_names]`: naming the sub-table is the opt-in, `format` inside it optional,
+    /// and an unknown token in the format fails the load rather than surviving into every name.
+    #[test]
+    fn window_names_opts_in_by_name_and_rejects_an_unknown_token() {
+        let c: Config = toml::from_str("[daemon]\nwindow_names = {}\n").unwrap();
+        let names = c.daemon.window_names.expect("named the sub-table");
+        assert_eq!(names.format.to_string(), crate::window_name::DEFAULT_FORMAT);
+
+        let c: Config =
+            toml::from_str("[daemon.window_names]\nformat = \"{agent} {state}\"\n").unwrap();
+        assert_eq!(
+            c.daemon.window_names.unwrap().format.to_string(),
+            "{agent} {state}"
+        );
+
+        let err = toml::from_str::<Config>("[daemon.window_names]\nformat = \"{model}\"\n")
+            .expect_err("an unknown token is a config error");
+        assert!(
+            err.to_string().contains("unknown token `{model}`"),
+            "the error names the token: {err}"
+        );
     }
 
     /// A partial section fills only the named field; the rest stay at their per-field defaults.

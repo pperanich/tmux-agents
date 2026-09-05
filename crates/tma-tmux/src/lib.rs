@@ -5,6 +5,7 @@
 //! - [`control`]: the daemon's per-session `tmux -C` control-mode client pool.
 //! - [`stamp`]: the guarded write adapter that renders a verdict into a chained, server-side
 //!   guarded `set-option` invocation and applies it.
+//! - [`window_name`]: the `rename-window` chains behind `[daemon] window_names`, and their restore.
 //! - [`lock`]: the `@agent_action` single-flight lock, a server-side conditional acquire/reclaim
 //!   with nonce read-back plus nonce-conditional clear/rewrite (the action broker's mutex).
 //!
@@ -16,3 +17,4 @@ pub mod control;
 pub mod lock;
 pub mod stamp;
 pub mod tmux;
+pub mod window_name;

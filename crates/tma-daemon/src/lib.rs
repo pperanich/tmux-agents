@@ -13,5 +13,6 @@
 
 mod daemon;
 mod notify;
+mod window_names;
 
 pub use daemon::{evict_older_daemon, run_cli, DaemonOpts};
