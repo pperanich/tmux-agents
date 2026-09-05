@@ -12,7 +12,10 @@ use crate::manifest::{is_safe_token, Version};
 use crate::state::{AgentState, Detail};
 
 use super::gate::{Requirement, When};
-use super::{ActionError, ActionKind, ActionManifest, ApiOp, ApiReply, ApiTransport};
+use super::{
+    ActionError, ActionKind, ActionManifest, ApiOp, ApiReply, ApiTransport, TextTransport,
+    DEFAULT_SIGILS,
+};
 
 /// Default synchronous execution / lock-expiry bound for an exec action, in milliseconds.
 const DEFAULT_TIMEOUT_MS: u64 = 30_000;
@@ -79,6 +82,7 @@ impl ActionManifest {
         let kind = match raw.kind {
             RawKind::Keys => ActionKind::Keys,
             RawKind::Exec => ActionKind::Exec,
+            RawKind::Text => ActionKind::Text,
         };
 
         // Per-kind structural rules.
@@ -110,6 +114,9 @@ impl ActionManifest {
                         agent: agent.clone(),
                     });
                 }
+                if !raw.text.is_empty() {
+                    return Err(structural(StructuralRule::KeysForbidsText));
+                }
             }
             ActionKind::Exec => {
                 if raw.command.is_none() {
@@ -121,7 +128,32 @@ impl ActionManifest {
                 if !raw.api.is_empty() {
                     return Err(structural(StructuralRule::ExecForbidsApi));
                 }
+                if !raw.text.is_empty() {
+                    return Err(structural(StructuralRule::ExecForbidsText));
+                }
             }
+            ActionKind::Text => {
+                if raw.text.is_empty() {
+                    return Err(structural(StructuralRule::TextEmpty));
+                }
+                if raw.command.is_some() {
+                    return Err(structural(StructuralRule::TextForbidsCommand));
+                }
+                if raw.detach.is_some() {
+                    return Err(structural(StructuralRule::TextForbidsDetach));
+                }
+                if !raw.agents.is_empty() {
+                    return Err(structural(StructuralRule::TextForbidsAgents));
+                }
+                // One transport table per action: a `text` action that also carried `[keys]` or
+                // `[api]` would leave the broker two deliveries to pick between for one agent.
+                if !raw.keys.is_empty() || !raw.api.is_empty() {
+                    return Err(structural(StructuralRule::TextForbidsOtherTransports));
+                }
+            }
+        }
+        if raw.sigils.is_some() && kind != ActionKind::Text {
+            return Err(structural(StructuralRule::SigilsNeedText));
         }
 
         // Agent-name tokens (keys keys, api keys, and `agents` entries) obey the safe-token rules.
@@ -143,6 +175,15 @@ impl ActionManifest {
                 });
             }
         }
+        for agent in raw.text.keys() {
+            if !is_safe_token(agent) {
+                return Err(ActionError::BadToken {
+                    file: file.to_string(),
+                    field: "[text] agent",
+                    token: agent.clone(),
+                });
+            }
+        }
         for agent in &raw.agents {
             if !is_safe_token(agent) {
                 return Err(ActionError::BadToken {
@@ -153,6 +194,7 @@ impl ActionManifest {
             }
         }
 
+        let sigils = validate_sigils(raw.sigils, file)?;
         let when = validate_when(raw.when, file)?;
 
         Ok(ActionManifest {
@@ -182,6 +224,21 @@ impl ActionManifest {
                     )
                 })
                 .collect(),
+            text: raw
+                .text
+                .into_iter()
+                .map(|(agent, t)| {
+                    (
+                        agent,
+                        TextTransport {
+                            prefix: t.prefix,
+                            suffix: t.suffix,
+                            steer_now: t.steer_now,
+                        },
+                    )
+                })
+                .collect(),
+            sigils,
         })
     }
 }
@@ -223,6 +280,25 @@ struct RawAction {
     keys: BTreeMap<String, Vec<String>>,
     #[serde(default)]
     api: BTreeMap<String, RawApiTransport>,
+    #[serde(default)]
+    text: BTreeMap<String, RawTextTransport>,
+    /// `Option` so the absent case takes [`DEFAULT_SIGILS`] and mere presence is rejectable on a
+    /// non-`text` kind; `Some(vec![])` is a deliberate opt-out.
+    #[serde(default)]
+    sigils: Option<Vec<String>>,
+}
+
+/// The raw `[text]` per-agent transport. Both key lists default to empty, so the common
+/// `{ suffix = ["Enter"] }` is the whole entry.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawTextTransport {
+    #[serde(default)]
+    prefix: Vec<String>,
+    #[serde(default)]
+    suffix: Vec<String>,
+    #[serde(default)]
+    steer_now: bool,
 }
 
 /// The raw `[api]` per-agent transport. `op` and `reply` are closed serde enums, so an unknown
@@ -239,6 +315,7 @@ struct RawApiTransport {
 enum RawKind {
     Keys,
     Exec,
+    Text,
 }
 
 #[derive(Deserialize)]
@@ -252,6 +329,29 @@ struct RawWhen {
     context_pct_min: Option<u8>,
     #[serde(default)]
     context_pct_max: Option<u8>,
+}
+
+/// Resolve the `sigils` list: absent takes [`DEFAULT_SIGILS`], and every declared entry must be
+/// exactly one non-whitespace character (the payload check reads the first character, so a
+/// multi-character "sigil" would silently never match).
+fn validate_sigils(raw: Option<Vec<String>>, file: &str) -> Result<Vec<char>, ActionError> {
+    let Some(list) = raw else {
+        return Ok(DEFAULT_SIGILS.to_vec());
+    };
+    let mut out = Vec::with_capacity(list.len());
+    for sigil in list {
+        let mut chars = sigil.chars();
+        match (chars.next(), chars.next()) {
+            (Some(c), None) if !c.is_whitespace() => out.push(c),
+            _ => {
+                return Err(ActionError::BadSigil {
+                    file: file.to_string(),
+                    sigil,
+                })
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Validate the optional `when` gate: detail tokens are safe tokens, context bounds sit in
@@ -316,6 +416,22 @@ pub enum StructuralRule {
     ExecForbidsKeys,
     /// `kind = "exec"` carrying an `[api]` table (a keys-kind-only transport).
     ExecForbidsApi,
+    /// `kind = "keys"` carrying a `[text]` table (a text-only transport).
+    KeysForbidsText,
+    /// `kind = "exec"` carrying a `[text]` table (a text-only transport).
+    ExecForbidsText,
+    /// `kind = "text"` with no `[text]` entry: no agent can receive it.
+    TextEmpty,
+    /// `kind = "text"` carrying `command` (an exec-only field).
+    TextForbidsCommand,
+    /// `kind = "text"` carrying `detach` (an exec-only field).
+    TextForbidsDetach,
+    /// `kind = "text"` carrying `agents` (applicability comes from `[text]`).
+    TextForbidsAgents,
+    /// `kind = "text"` carrying a `[keys]` or `[api]` table.
+    TextForbidsOtherTransports,
+    /// `sigils` on a kind that sends no caller-supplied string.
+    SigilsNeedText,
 }
 
 impl fmt::Display for StructuralRule {
@@ -334,6 +450,20 @@ impl fmt::Display for StructuralRule {
             StructuralRule::ExecNeedsCommand => "kind = \"exec\" requires command",
             StructuralRule::ExecForbidsKeys => "kind = \"exec\" must not set a [keys] table",
             StructuralRule::ExecForbidsApi => "kind = \"exec\" must not set an [api] table",
+            StructuralRule::KeysForbidsText => "kind = \"keys\" must not set a [text] table",
+            StructuralRule::ExecForbidsText => "kind = \"exec\" must not set a [text] table",
+            StructuralRule::TextEmpty => "kind = \"text\" requires at least one [text] entry",
+            StructuralRule::TextForbidsCommand => {
+                "kind = \"text\" must not set command (exec only)"
+            }
+            StructuralRule::TextForbidsDetach => "kind = \"text\" must not set detach (exec only)",
+            StructuralRule::TextForbidsAgents => {
+                "kind = \"text\" must not set agents; applicability comes from the [text] table"
+            }
+            StructuralRule::TextForbidsOtherTransports => {
+                "kind = \"text\" must not set a [keys] or [api] table"
+            }
+            StructuralRule::SigilsNeedText => "sigils belongs to kind = \"text\" only",
         };
         f.write_str(msg)
     }
@@ -754,6 +884,123 @@ opencode = { op = "permission-reply" }
 "#;
         assert!(matches!(
             ActionManifest::parse(no_reply, "x", "t.toml").unwrap_err(),
+            ActionError::Parse { .. }
+        ));
+    }
+
+    // ---- [text] transport --------------------------------------------------------
+
+    #[test]
+    fn parses_text_action_with_defaults() {
+        let src = r#"
+min_engine_version = "0.1"
+name = "steer"
+label = "Steer"
+kind = "text"
+when = { state = ["idle"] }
+
+[text]
+claude = { suffix = ["Enter"] }
+codex = { prefix = ["i"], suffix = ["Enter"], steer_now = true }
+"#;
+        let a = ActionManifest::parse(src, "steer", "steer.toml").unwrap();
+        assert_eq!(a.kind, ActionKind::Text);
+        assert!(a.applies_to("claude"));
+        assert!(!a.applies_to("gemini"));
+        let claude = a.text_for("claude").unwrap();
+        assert!(claude.prefix.is_empty(), "prefix defaults to empty");
+        assert_eq!(claude.suffix, ["Enter"]);
+        assert!(!claude.steer_now, "steer_now defaults to false");
+        let codex = a.text_for("codex").unwrap();
+        assert_eq!(codex.prefix, ["i"]);
+        assert!(codex.steer_now);
+        // The default sigil list applies when the manifest declares none.
+        assert_eq!(a.sigils, DEFAULT_SIGILS.to_vec());
+    }
+
+    #[test]
+    fn text_structural_rules() {
+        let base = |extra: &str| {
+            format!(
+                "min_engine_version = \"0.1\"\nname = \"x\"\nlabel = \"X\"\nkind = \"text\"\n{extra}\n[text]\nclaude = {{ suffix = [\"Enter\"] }}\n"
+            )
+        };
+        let empty = "min_engine_version = \"0.1\"\nname = \"x\"\nlabel = \"X\"\nkind = \"text\"\n";
+        assert_eq!(structural_rule(empty, "x"), StructuralRule::TextEmpty);
+        assert_eq!(
+            structural_rule(&base("command = \"echo hi\""), "x"),
+            StructuralRule::TextForbidsCommand
+        );
+        assert_eq!(
+            structural_rule(&base("detach = true"), "x"),
+            StructuralRule::TextForbidsDetach
+        );
+        assert_eq!(
+            structural_rule(&base("agents = [\"claude\"]"), "x"),
+            StructuralRule::TextForbidsAgents
+        );
+        assert_eq!(
+            structural_rule(&base("[keys]\ncodex = [\"1\"]"), "x"),
+            StructuralRule::TextForbidsOtherTransports
+        );
+        assert_eq!(
+            structural_rule(
+                &base("[api]\nopencode = { op = \"permission-reply\", reply = \"once\" }"),
+                "x"
+            ),
+            StructuralRule::TextForbidsOtherTransports
+        );
+    }
+
+    #[test]
+    fn keys_and_exec_forbid_a_text_table() {
+        let keys = "min_engine_version = \"0.1\"\nname = \"x\"\nlabel = \"X\"\nkind = \"keys\"\n[keys]\nclaude = [\"1\"]\n[text]\ncodex = {}\n";
+        assert_eq!(structural_rule(keys, "x"), StructuralRule::KeysForbidsText);
+        let exec = "min_engine_version = \"0.1\"\nname = \"x\"\nlabel = \"X\"\nkind = \"exec\"\ncommand = \"true\"\n[text]\ncodex = {}\n";
+        assert_eq!(structural_rule(exec, "x"), StructuralRule::ExecForbidsText);
+    }
+
+    #[test]
+    fn sigils_are_text_only_and_single_characters() {
+        let on_keys = "min_engine_version = \"0.1\"\nname = \"x\"\nlabel = \"X\"\nkind = \"keys\"\nsigils = [\"/\"]\n[keys]\nclaude = [\"1\"]\n";
+        assert_eq!(
+            structural_rule(on_keys, "x"),
+            StructuralRule::SigilsNeedText
+        );
+
+        let overridden = "min_engine_version = \"0.1\"\nname = \"x\"\nlabel = \"X\"\nkind = \"text\"\nsigils = [\"/\", \"@\"]\n[text]\nclaude = {}\n";
+        let a = ActionManifest::parse(overridden, "x", "t.toml").unwrap();
+        assert_eq!(a.sigils, ['/', '@']);
+
+        // An explicit empty list is the opt-out, not a mistake.
+        let none = "min_engine_version = \"0.1\"\nname = \"x\"\nlabel = \"X\"\nkind = \"text\"\nsigils = []\n[text]\nclaude = {}\n";
+        assert!(ActionManifest::parse(none, "x", "t.toml")
+            .unwrap()
+            .sigils
+            .is_empty());
+
+        for bad in ["\"//\"", "\"\"", "\" \""] {
+            let src = format!("min_engine_version = \"0.1\"\nname = \"x\"\nlabel = \"X\"\nkind = \"text\"\nsigils = [{bad}]\n[text]\nclaude = {{}}\n");
+            assert!(
+                matches!(
+                    ActionManifest::parse(&src, "x", "t.toml").unwrap_err(),
+                    ActionError::BadSigil { .. }
+                ),
+                "sigil {bad} should be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn bad_text_agent_token_and_unknown_field_rejected() {
+        let bad_agent = "min_engine_version = \"0.1\"\nname = \"x\"\nlabel = \"X\"\nkind = \"text\"\n[text]\n\"cla ude\" = {}\n";
+        assert!(matches!(
+            ActionManifest::parse(bad_agent, "x", "t.toml").unwrap_err(),
+            ActionError::BadToken { field, .. } if field == "[text] agent"
+        ));
+        let unknown = "min_engine_version = \"0.1\"\nname = \"x\"\nlabel = \"X\"\nkind = \"text\"\n[text]\nclaude = { surprise = true }\n";
+        assert!(matches!(
+            ActionManifest::parse(unknown, "x", "t.toml").unwrap_err(),
             ActionError::Parse { .. }
         ));
     }

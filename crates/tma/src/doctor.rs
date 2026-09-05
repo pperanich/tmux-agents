@@ -445,6 +445,7 @@ fn diagnose_actions(known_agents: &[String]) -> (usize, Vec<ActionLint>) {
                     tma_core::ActionKind::Exec => {
                         action.agents.iter().map(String::as_str).collect()
                     }
+                    tma_core::ActionKind::Text => action.text.keys().map(String::as_str).collect(),
                 };
                 for agent in refs {
                     if !known_agents.iter().any(|k| k == agent) {

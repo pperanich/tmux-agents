@@ -167,6 +167,7 @@ fn main() -> ExitCode {
             all: args.all,
             dry_run: args.dry_run,
             args: args.args,
+            text: args.text,
             force: args.force,
             expect_episode_ms: args.expect_episode_ms,
             expect_permission_request: args.expect_permission_request,

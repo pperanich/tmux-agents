@@ -48,6 +48,19 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   permission`, so they keep offering nothing at a question, which is right, since answering one
   means choosing an option rather than granting a request. This is a screen read only; the plugin
   forwards no question event yet.
+- **Steering: send an agent a line of your own text, through the same reviewable manifest every
+  other action goes through.** A third action kind, `kind = "text"`, takes one string at the call
+  (`tma act steer --pane %5 --text "use the existing helper"`) and delivers it with `send-keys -l
+  --`, so a message containing the word `Enter` types five characters instead of pressing Return
+  and one beginning with `-` is data rather than a flag; the manifest still owns the wrapping keys,
+  the agents, and the gate, and the host refuses a payload that is empty, over 4096 bytes, carries
+  a control byte, or begins with one of the action's `sigils` (`/` and `!` by default) before it
+  runs a single tmux command, so `/clear` and `/compact` stay out of reach of anything that can
+  only send a message. Two bundled actions use it: `steer` at an idle pane (Claude, Codex,
+  OpenCode) and `steer_now` at a working one, offered only where the agent declared `steer_now =
+  true` because it was watched queueing a mid-turn message rather than losing it (Claude and
+  Codex; never Gemini, which hands the queued text back to the composer, unsent, when the turn is
+  interrupted).
 
 ## [0.5.12] - 2026-09-05
 

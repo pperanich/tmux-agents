@@ -180,6 +180,27 @@ impl Tmux {
         self.run(&argv).map(|_| ())
     }
 
+    /// Deliver a caller-supplied string into a pane as literal characters, wrapped in the
+    /// manifest's `prefix` and `suffix` key sequences. Three invocations at most, ordered
+    /// prefix → text → suffix, and the broker holds the pane's single-flight lock across all of
+    /// them.
+    ///
+    /// The middle one is the whole point: `-l` turns off named-key interpretation, so a message
+    /// containing the word `Enter` types five characters instead of pressing Return, and `--`
+    /// terminates the flags, so a message beginning with `-` is data rather than something tmux's
+    /// own getopt reads. Neither is optional; both are asserted by the send-keys source guard.
+    pub fn send_text(
+        &self,
+        pane_id: &str,
+        prefix: &[String],
+        text: &str,
+        suffix: &[String],
+    ) -> Result<(), TmuxError> {
+        self.send_keys(pane_id, prefix)?;
+        self.run(&["send-keys", "-t", pane_id, "-l", "--", text])?;
+        self.send_keys(pane_id, suffix)
+    }
+
     /// Run `command` through the server's own `run-shell -b`, returning as soon as tmux has taken
     /// custody. The child is the tmux server's, not the caller's: it survives the caller exiting and
     /// is reaped by tmux, which is what a surface needs when it hands a menu off and keeps drawing

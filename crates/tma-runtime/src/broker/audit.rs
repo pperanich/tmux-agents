@@ -102,6 +102,7 @@ pub fn kind_token(kind: ActionKind, api: bool) -> &'static str {
         (ActionKind::Keys, true) => "api",
         (ActionKind::Keys, false) => "keys",
         (ActionKind::Exec, _) => "exec",
+        (ActionKind::Text, _) => "text",
     }
 }
 
@@ -277,5 +278,6 @@ mod tests {
         assert_eq!(kind_token(ActionKind::Keys, false), "keys");
         assert_eq!(kind_token(ActionKind::Keys, true), "api");
         assert_eq!(kind_token(ActionKind::Exec, false), "exec");
+        assert_eq!(kind_token(ActionKind::Text, false), "text");
     }
 }

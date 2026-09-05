@@ -426,7 +426,9 @@ fn describe_argv(args: &[&str]) -> String {
 /// Keep the subcommand and the leading flag block (tmux places all flags before positionals), with
 /// `-t <pane>` kept whole so the target stays visible; redact every positional payload argument to
 /// `[redacted N chars]`. A realistic key (`Enter`, `C-c`, `/compact`) does not lead with `-`, so the
-/// flag scan stops at the first key and the whole payload is redacted.
+/// flag scan stops at the first key and the whole payload is redacted. The literal-send path's `--`
+/// ends the scan too: everything after it is a caller's message, and a message that happens to begin
+/// with `-` must not be mistaken for one more flag to print verbatim.
 fn redact_payload_argv(args: &[&str]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len());
     let mut i = 0;
@@ -435,6 +437,10 @@ fn redact_payload_argv(args: &[&str]) -> Vec<String> {
         if i == 0 {
             out.push(arg.to_string());
             i += 1;
+        } else if arg == "--" {
+            out.push(arg.to_string());
+            i += 1;
+            break;
         } else if arg.starts_with('-') {
             out.push(arg.to_string());
             if arg == "-t" && i + 1 < args.len() {
@@ -537,6 +543,17 @@ mod tests {
             desc.contains("[redacted"),
             "no redaction placeholder: {desc}"
         );
+    }
+
+    /// The literal-send argv, whose payload is a person's message rather than a key name. The `--`
+    /// stays visible (it is the safety, not the secret) and everything after it is redacted, a
+    /// leading `-` included.
+    #[test]
+    fn literal_send_redacts_the_message_after_the_terminator() {
+        let desc = describe_argv(&["send-keys", "-t", "%3", "-l", "--", "-my message"]);
+        assert!(desc.contains("-l --"), "the literal flags are kept: {desc}");
+        assert!(!desc.contains("my message"), "message leaked: {desc}");
+        assert!(desc.contains("[redacted 11 chars]"), "not redacted: {desc}");
     }
 
     #[test]
