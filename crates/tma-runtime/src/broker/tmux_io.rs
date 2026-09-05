@@ -87,6 +87,16 @@ impl BrokerIo for TmuxBroker<'_> {
         self.tmux.send_keys(pane_id, keys)
     }
 
+    fn send_text(
+        &self,
+        pane_id: &str,
+        prefix: &[String],
+        text: &str,
+        suffix: &[String],
+    ) -> Result<(), TmuxError> {
+        self.tmux.send_text(pane_id, prefix, text, suffix)
+    }
+
     fn api_reply(
         &self,
         endpoint: &str,

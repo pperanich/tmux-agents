@@ -49,7 +49,13 @@ pub enum Effect {
     },
     /// The `exec` command string (passed to `sh -c` verbatim).
     Command(String),
-    /// Nothing resolvable (the pane is gone, or a `keys` action does not cover the agent).
+    /// A `text` action's wrapping for the resolved agent. The caller's own string is not part of
+    /// it: the manifest half is what a dry-run is for.
+    Text {
+        prefix: Vec<String>,
+        suffix: Vec<String>,
+    },
+    /// Nothing resolvable (the pane is gone, or the action does not cover the agent).
     None,
 }
 
@@ -110,6 +116,13 @@ pub fn dry_run<T: BrokerIo>(io: &T, action: &ActionManifest, pane_id: &str) -> D
                     .keys_for(a)
                     .map(|seq| Effect::Keys(seq.to_vec()))
                     .unwrap_or(Effect::None),
+            },
+            None => Effect::None,
+        },
+        ActionKind::Text => match agent.as_deref().and_then(|a| action.text_for(a)) {
+            Some(t) => Effect::Text {
+                prefix: t.prefix.clone(),
+                suffix: t.suffix.clone(),
             },
             None => Effect::None,
         },

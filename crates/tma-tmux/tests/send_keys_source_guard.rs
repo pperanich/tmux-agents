@@ -6,6 +6,10 @@
 //! token and fails if any crate other than `tma-tmux` carries one. Integration tests under `tests/`
 //! legitimately drive panes with raw `send-keys`, so only production `src/` is scanned. A doc
 //! comment mentioning send-keys uses backticks, not the double-quoted argv form, so it never trips.
+//!
+//! The second test covers the literal-text path the same way: `send_text` is the one construction
+//! that carries a caller's arbitrary string, so its argv must keep `-l` (or the word `Enter` in a
+//! message presses Return) and `--` (or a message starting with `-` is read by tmux as a flag).
 
 use std::fs;
 use std::path::Path;
@@ -57,5 +61,27 @@ fn send_keys_is_constructed_only_in_tma_tmux() {
         offenders.is_empty(),
         "`send-keys` is constructed outside tma-tmux in {offenders:?}; the keys write path must \
          route through `tma_tmux::tmux::Tmux::send_keys`",
+    );
+}
+
+/// The literal-send argv, verbatim. Drop `-l` and a steered `Enter` presses Return; drop `--` and a
+/// steered `-foo` is read as a flag. Both live in one source line, so both are pinned by one needle.
+const LITERAL_ARGV: &str = r#"&["send-keys", "-t", pane_id, "-l", "--", text]"#;
+
+#[test]
+fn the_literal_send_keeps_l_and_the_argv_terminator() {
+    let display = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/tmux/display.rs");
+    let text = fs::read_to_string(&display).expect("read display.rs");
+    // Anti-vacuity: the needle is worthless if the function it guards has been renamed away.
+    assert!(
+        text.contains("pub fn send_text("),
+        "send_text has moved out of {}; move this guard with it",
+        display.display()
+    );
+    assert!(
+        text.contains(LITERAL_ARGV),
+        "the literal send must construct {LITERAL_ARGV} in {}: `-l` keeps a caller's `Enter` five \
+         characters of text, and `--` keeps a leading `-` from being read as a flag",
+        display.display()
     );
 }

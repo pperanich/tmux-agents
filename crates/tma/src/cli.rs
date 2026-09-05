@@ -594,6 +594,18 @@ pub(crate) struct ActArgs {
     /// one is a usage error.
     #[arg(long = "arg", value_name = "VALUE", conflicts_with_all = ["list", "menu"])]
     pub(crate) args: Vec<String>,
+    /// The string a `text` action delivers into the pane, literally and as one line. Required for
+    /// a `text` action and a usage error for any other kind; the host refuses a payload that is
+    /// empty, over 4096 bytes, carries a control byte, or starts with one of the action's sigils.
+    /// A message beginning with `-` is a message, not a flag, so the token after `--text` is always
+    /// taken as its value.
+    #[arg(
+        long = "text",
+        value_name = "STRING",
+        allow_hyphen_values = true,
+        conflicts_with_all = ["list", "menu"]
+    )]
+    pub(crate) text: Option<String>,
     /// Skip the `when` gate only (never `requires`, never the lock).
     #[arg(long, conflicts_with_all = ["list", "menu"])]
     pub(crate) force: bool,

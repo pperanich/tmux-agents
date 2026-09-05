@@ -158,6 +158,7 @@ fn main() -> ExitCode {
             all: args.all,
             dry_run: args.dry_run,
             args: args.args,
+            text: args.text,
             force: args.force,
             yes: args.yes,
             json: args.json,

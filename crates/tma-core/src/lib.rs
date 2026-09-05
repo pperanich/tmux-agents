@@ -27,7 +27,7 @@ pub mod verdict;
 
 pub use action::{
     ActionError, ActionKind, ActionManifest, ApiOp, ApiReply, ContextKeys, GateInput, GateOutcome,
-    RefusalReason, Requirement, When,
+    RefusalReason, Requirement, TextRefusal, TextTransport, When, DEFAULT_SIGILS, TEXT_MAX_BYTES,
 };
 pub use edge::{diff_rows, Edge};
 pub use engine::{EngineError, Evaluation, RuleEngine, RuleReport};

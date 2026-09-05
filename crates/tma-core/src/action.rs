@@ -1,12 +1,14 @@
-//! Action manifests: user-declared actions the broker fires into an agent pane. Two kinds under
-//! one TOML form — `keys` (a guarded key sequence) and `exec` (a guarded process spawn with
-//! context env). This module owns the schema, the validating loader, and the pure applicability +
-//! gate evaluation over a snapshot row; the broker, the pane lock, and process spawning are I/O and
+//! Action manifests: user-declared actions the broker fires into an agent pane. Three kinds under
+//! one TOML form: `keys` (a guarded key sequence), `exec` (a guarded process spawn with context
+//! env), and `text` (a guarded caller-supplied string, delivered literally between manifest-declared
+//! keys). This module owns the schema, the validating loader, and the pure applicability + gate
+//! evaluation over a snapshot row; the broker, the pane lock, and process spawning are I/O and
 //! live above the core.
 //!
 //! The gate vocabulary is closed and shared with `tma act --list` and the broker: an action
 //! is `Fireable` or `Refused` with one of `wrong-agent` / `no-coverage` / `requires-unmet` /
-//! `gated`. `locked` is a broker-time verdict, not a gate outcome, so it is absent here.
+//! `gated`. `locked` is a broker-time verdict, not a gate outcome, so it is absent here, and so is
+//! the `text` payload vocabulary ([`TextRefusal`]), which refuses before the gate is ever read.
 //!
 //! The parent holds the public schema types (`ActionManifest`, the transport and kind enums, and
 //! the `ActionError` boundary); `schema` owns the TOML loader and structural rules, `gate` the
@@ -60,6 +62,13 @@ pub struct ActionManifest {
     /// the broker delivers over HTTP instead of keystrokes. Applicability is the union of `keys` and
     /// `api`; an agent in both is a parse error (no silent transport fallback).
     pub api: BTreeMap<String, ApiTransport>,
+    /// Per-agent text transports (`text` only): agent name ⇒ the keys that wrap the caller's
+    /// string. An agent with no entry cannot receive the action.
+    pub text: BTreeMap<String, TextTransport>,
+    /// Leading characters a `text` payload may not start with, because the agent reads them as its
+    /// own command rather than as a message. [`DEFAULT_SIGILS`] when the manifest sets none; only a
+    /// `text` action may set it, and an explicit empty list opts out.
+    pub sigils: Vec<char>,
 }
 
 /// One agent's API-channel transport: a closed built-in operation, extended only with
@@ -108,13 +117,73 @@ impl ApiReply {
     }
 }
 
-/// The two action kinds under one manifest form.
+/// One agent's `text` transport: the keys sent before and after the caller's string, and whether
+/// the agent takes text while it is `working`.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct TextTransport {
+    /// Keys sent before the string (often empty: most composers are already focused).
+    pub prefix: Vec<String>,
+    /// Keys sent after it, e.g. `["Enter"]` to submit.
+    pub suffix: Vec<String>,
+    /// The agent queues a message typed while it is working rather than losing it. Declared per
+    /// agent because an engine cannot infer it: gemini queues and then hands the text back to the
+    /// composer, unsent, when the turn is interrupted.
+    pub steer_now: bool,
+}
+
+/// The three action kinds under one manifest form.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ActionKind {
     /// A guarded key sequence delivered into the pane.
     Keys,
     /// A guarded process spawn with context env.
     Exec,
+    /// A guarded caller-supplied string, delivered literally between manifest-declared keys.
+    Text,
+}
+
+impl ActionKind {
+    /// Whether firing this kind puts keystrokes into a live pane, and so must gate on a fresh state
+    /// stamp. A method rather than an equality test: a new kind has to answer the question.
+    pub const fn sends_keystrokes(self) -> bool {
+        match self {
+            ActionKind::Keys | ActionKind::Text => true,
+            ActionKind::Exec => false,
+        }
+    }
+}
+
+/// The `text` payload cap, in bytes. One steer is one message, not a file.
+pub const TEXT_MAX_BYTES: usize = 4096;
+
+/// The sigils a `text` action refuses by default: the leading characters every T1 agent reads as
+/// the start of its own slash/bang command rather than as prose.
+pub const DEFAULT_SIGILS: [char; 2] = ['/', '!'];
+
+/// Why the host refused a `text` payload, before anything reached the pane. A closed vocabulary
+/// that rides the same `reason` field as the gate's own tokens.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TextRefusal {
+    /// Nothing to send: the string is empty or all whitespace.
+    Empty,
+    /// Over [`TEXT_MAX_BYTES`].
+    TooLong,
+    /// A C0 control byte (newline and tab included), DEL, or a C1 control: a steer is one line.
+    ControlBytes,
+    /// The first non-whitespace character is one of the action's declared sigils.
+    Sigil,
+}
+
+impl TextRefusal {
+    /// The `reason` token, in the same closed vocabulary as the gate reasons.
+    pub const fn token(self) -> &'static str {
+        match self {
+            TextRefusal::Empty => "empty",
+            TextRefusal::TooLong => "too-long",
+            TextRefusal::ControlBytes => "control-bytes",
+            TextRefusal::Sigil => "sigil",
+        }
+    }
 }
 
 /// Action manifest load/validation errors. Every variant names the offending file.
@@ -163,6 +232,8 @@ pub enum ActionError {
          transports to the same agent"
     )]
     AgentInBothTransports { file: String, agent: String },
+    #[error("{file}: sigil {sigil:?} must be exactly one non-whitespace character")]
+    BadSigil { file: String, sigil: String },
 }
 
 #[cfg(test)]
@@ -175,5 +246,26 @@ mod tests {
         assert_eq!(ApiReply::Once.token(), "once");
         assert_eq!(ApiReply::Always.token(), "always");
         assert_eq!(ApiReply::Reject.token(), "reject");
+    }
+
+    #[test]
+    fn text_refusal_tokens_are_pinned() {
+        assert_eq!(TextRefusal::Empty.token(), "empty");
+        assert_eq!(TextRefusal::TooLong.token(), "too-long");
+        assert_eq!(TextRefusal::ControlBytes.token(), "control-bytes");
+        assert_eq!(TextRefusal::Sigil.token(), "sigil");
+    }
+
+    /// The re-verify predicate: every kind that reaches a live pane with keystrokes answers yes, so
+    /// a stale stamp can never fire one blind. Exhaustive, so a fourth kind has to rule on itself.
+    #[test]
+    fn only_the_pane_writing_kinds_send_keystrokes() {
+        for kind in [ActionKind::Keys, ActionKind::Exec, ActionKind::Text] {
+            let expected = match kind {
+                ActionKind::Keys | ActionKind::Text => true,
+                ActionKind::Exec => false,
+            };
+            assert_eq!(kind.sends_keystrokes(), expected, "{kind:?}");
+        }
     }
 }

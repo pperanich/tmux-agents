@@ -35,8 +35,10 @@ pub(crate) struct ActOpts {
     /// Fire on every selector-matched pane instead of requiring a unique one.
     pub all: bool,
     pub dry_run: bool,
-    /// The `--arg` values, for an `exec` action's environment (`keys` actions reject them).
+    /// The `--arg` values, for an `exec` action's environment (every other kind rejects them).
     pub args: Vec<String>,
+    /// The `--text` string a `text` action delivers (every other kind rejects it).
+    pub text: Option<String>,
     pub force: bool,
     pub yes: bool,
     pub json: bool,
@@ -98,13 +100,10 @@ pub(crate) fn run(opts: ActOpts) -> ExitCode {
         eprintln!("tma: unknown action {name:?} (run `tma act --list` to see them)");
         return ExitCode::from(2);
     };
-    // A `keys` action's sequence is manifest-static by design (that is what makes it reviewable), so
-    // there is nowhere for a value to go: refuse rather than accept and silently drop it.
-    if !opts.args.is_empty() && action.kind == ActionKind::Keys {
-        eprintln!(
-            "tma: `{name}` is a keys action and takes no --arg \
-             (its key sequence comes from the manifest); use an exec action to pass values"
-        );
+    // Each kind takes exactly one caller payload flag, or none. A value with nowhere to go is
+    // refused rather than accepted and silently dropped.
+    if let Some(usage) = payload_flag_usage_error(action, &opts) {
+        eprintln!("tma: {usage}");
         return ExitCode::from(2);
     }
 
@@ -173,12 +172,42 @@ pub(crate) fn run(opts: ActOpts) -> ExitCode {
                 broker::FireArgs {
                     force: opts.force,
                     args: &opts.args,
+                    text: opts.text.as_deref(),
                     audit,
                 },
             )
         })
         .collect();
     emit_all(&results, opts.json, opts.all)
+}
+
+/// Which caller payload flag this action's kind takes: `exec` takes `--arg`, `text` takes exactly
+/// one `--text`, and `keys` takes neither (its sequence is manifest-static, which is what makes it
+/// reviewable). Returns the usage sentence for a mismatch, `None` when the flags fit the kind.
+fn payload_flag_usage_error(action: &ActionManifest, opts: &ActOpts) -> Option<String> {
+    let name = &action.name;
+    let kind = kind_token(action.kind);
+    if !opts.args.is_empty() && action.kind != ActionKind::Exec {
+        let instead = match action.kind {
+            ActionKind::Text => "the string it sends is --text",
+            _ => "use an exec action to pass values",
+        };
+        return Some(format!(
+            "`{name}` is a {kind} action and takes no --arg \
+             (its sequence comes from the manifest); {instead}"
+        ));
+    }
+    match (action.kind, opts.text.is_some()) {
+        (ActionKind::Text, false) => Some(format!(
+            "`{name}` is a text action and needs the string to send: \
+             `tma act {name} --pane <ID> --text \"<string>\"`"
+        )),
+        (ActionKind::Keys | ActionKind::Exec, true) => Some(format!(
+            "`{name}` is a {kind} action and takes no --text \
+             (only a text action delivers a caller's string)"
+        )),
+        _ => None,
+    }
 }
 
 // ---- audit context -----------------------------------------------------------------------------
@@ -521,8 +550,17 @@ fn render_dry_run_targets(runs: &[broker::DryRun]) -> String {
     out
 }
 
+/// One half of a `text` action's wrapping for `--dry-run`, or `empty` when it declares none.
+fn render_wrap(keys: &[String], empty: &str) -> String {
+    if keys.is_empty() {
+        empty.to_string()
+    } else {
+        keys.join(" ")
+    }
+}
+
 /// Human `--dry-run` output: the resolved context with each value's age, the gate verdict,
-/// and the would-be keys or command — no side effects.
+/// and the would-be keys, text wrapping, or command, with no side effects.
 fn render_dry_run(d: &broker::DryRun) -> String {
     use broker::{DryGate, Effect};
 
@@ -547,6 +585,12 @@ fn render_dry_run(d: &broker::DryRun) -> String {
             reply,
         } => format!("api: POST {endpoint}/permission/<id>/reply  op={op} reply={reply}"),
         Effect::Command(cmd) => format!("command: {cmd}"),
+        // The caller's own string is deliberately absent: what a dry-run is for is the wrapping.
+        Effect::Text { prefix, suffix } => format!(
+            "text: {} <--text> {}",
+            render_wrap(prefix, "(no prefix)"),
+            render_wrap(suffix, "(no suffix)")
+        ),
         Effect::None => "none".to_string(),
     };
     out.push_str(&format!("effect:  {effect}\n"));
@@ -625,6 +669,7 @@ fn applicability(action: &ActionManifest) -> Vec<&str> {
             agents
         }
         ActionKind::Exec => action.agents.iter().map(String::as_str).collect(),
+        ActionKind::Text => action.text.keys().map(String::as_str).collect(),
     }
 }
 
@@ -632,6 +677,7 @@ fn kind_token(kind: ActionKind) -> &'static str {
     match kind {
         ActionKind::Keys => "keys",
         ActionKind::Exec => "exec",
+        ActionKind::Text => "text",
     }
 }
 
@@ -779,10 +825,12 @@ fn run_menu(
         }
     };
 
+    // A `text` action needs a string the menu has nowhere to ask for, so it is not offered here.
+    // A one-key menu that fired an empty steer would be worse than no entry at all.
     let fireable: Vec<(String, String)> = actions_set
         .iter()
         .zip(&verdicts)
-        .filter(|(_, v)| v.is_none())
+        .filter(|(a, v)| v.is_none() && a.kind != ActionKind::Text)
         .map(|(a, _)| (a.name.clone(), a.label.clone()))
         .collect();
     if fireable.is_empty() {
