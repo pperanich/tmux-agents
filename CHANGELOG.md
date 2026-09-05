@@ -10,6 +10,21 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **`approve` and `deny` now work on Gemini and Cursor panes, and `interrupt` on four more agents.**
+  Nine of the eighteen agent-by-action cells the control audit found real were empty: Cursor had no
+  row in any action file, and pi had none either. `approve` sends `1` on Gemini and `y` on Cursor,
+  `deny` sends `3` and `n`, and `interrupt` now covers Cursor (`C-c`, the one agent whose interrupt
+  is not Escape), OpenCode, pi and Gemini. Where an option prints its own accelerator that
+  accelerator is what gets sent, because tma cannot see where a selection cursor is resting: this is
+  the same reason Codex approves with `y` rather than `Enter`. The session-wide grants stay
+  deliberately unwired (Claude's `2`, Codex's `p`, Cursor's `Run Everything`), pi keeps no
+  `approve`/`deny` row because it has no permission prompt, and Cursor's `n` opens its own
+  "tell the agent what to do instead" composer, which takes an optional reason and skips on an empty
+  one. [Agent coverage](docs/reference/agent-coverage.md#bundled-action-key-sequences) has the
+  table.
+
 ## [0.5.12] - 2026-09-05
 
 ### Added

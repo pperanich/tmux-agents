@@ -4,12 +4,65 @@
 //! as ACTIONS.md pins.
 
 use tma_core::action::{ActionKind, ContextKeys, GateInput, GateOutcome, RefusalReason};
-use tma_core::{ActionManifest, AgentState};
+use tma_core::evidence::Claim;
+use tma_core::{ActionManifest, AgentState, Manifest};
 
 const APPROVE: &str = include_str!("../actions/approve.toml");
 const DENY: &str = include_str!("../actions/deny.toml");
 const INTERRUPT: &str = include_str!("../actions/interrupt.toml");
 const COMPACT: &str = include_str!("../actions/compact.toml");
+
+/// The bundled agent manifests, so the coverage assertions read what each agent actually declares
+/// instead of restating a hand-written list that drifts the moment an agent is added.
+const AGENTS: &[(&str, &str)] = &[
+    ("claude", include_str!("../manifests/claude.toml")),
+    ("codex", include_str!("../manifests/codex.toml")),
+    ("cursor", include_str!("../manifests/cursor.toml")),
+    ("gemini", include_str!("../manifests/gemini.toml")),
+    ("opencode", include_str!("../manifests/opencode.toml")),
+    ("pi", include_str!("../manifests/pi.toml")),
+];
+
+fn agent_manifests() -> Vec<(&'static str, Manifest)> {
+    AGENTS
+        .iter()
+        .map(|(name, src)| {
+            let m = Manifest::parse(src, &format!("{name}.toml"))
+                .unwrap_or_else(|e| panic!("{name} manifest must parse: {e}"));
+            (*name, m)
+        })
+        .collect()
+}
+
+/// Whether `m` claims `state` from either channel it has: a hook mapping or a screen rule.
+fn claims_state(m: &Manifest, state: AgentState) -> bool {
+    let hooked = m
+        .hooks
+        .iter()
+        .flat_map(|h| &h.map)
+        .any(|hm| matches!(&hm.claim, Claim::State(sc) if sc.state == state));
+    hooked || m.rules.iter().any(|r| r.state == state)
+}
+
+/// Whether `m` declares a permission dialog: a `blocked` claim carrying the `permission` detail,
+/// from a hook mapping or a screen rule.
+fn declares_permission(m: &Manifest) -> bool {
+    let hooked = m.hooks.iter().flat_map(|h| &h.map).any(|hm| {
+        matches!(&hm.claim, Claim::State(sc)
+            if sc.state == AgentState::Blocked
+                && sc.detail.as_ref().map(|d| d.as_str()) == Some("permission"))
+    });
+    hooked
+        || m.rules.iter().any(|r| {
+            r.state == AgentState::Blocked
+                && r.detail.as_ref().map(|d| d.as_str()) == Some("permission")
+        })
+}
+
+fn action(stem: &str, src: &str) -> ActionManifest {
+    ActionManifest::parse(src, stem, &format!("{stem}.toml"))
+        .unwrap_or_else(|e| panic!("{stem} must parse: {e}"))
+}
 
 fn row<'a>(agent: &'a str, state: AgentState) -> GateInput<'a> {
     GateInput {
@@ -56,11 +109,12 @@ fn approve_gates_on_blocked_permission() {
         ..row("claude", AgentState::Blocked)
     };
     assert_eq!(a.evaluate_gate(&blocked), GateOutcome::Fireable);
-    // Applies only to agents with a [keys] entry.
+    // Applies only to agents with a transport entry. pi has no permission prompt at all (R29), so
+    // it is the agent this can never cover.
     assert_eq!(
         a.evaluate_gate(&GateInput {
             detail: Some("permission"),
-            ..row("gemini", AgentState::Blocked)
+            ..row("pi", AgentState::Blocked)
         }),
         GateOutcome::Refused(RefusalReason::WrongAgent)
     );
@@ -145,6 +199,85 @@ fn the_claude_action_table_gains_exactly_two_refusing_rows() {
         ],
         "plan and trust must orphan approve and deny, and nothing else"
     );
+}
+
+/// A-277. The action rows, read against what the agent manifests declare rather than against a
+/// list retyped here: every agent with a permission dialog can answer it in both directions, and
+/// every agent that can be working can be interrupted.
+#[test]
+fn every_declared_dialog_has_an_answer_and_every_working_agent_an_interrupt() {
+    let approve = action("approve", APPROVE);
+    let deny = action("deny", DENY);
+    let interrupt = action("interrupt", INTERRUPT);
+
+    for (name, m) in agent_manifests() {
+        let permission = declares_permission(&m);
+        assert_eq!(
+            approve.applies_to(name),
+            permission,
+            "{name}: approve coverage must match whether it declares a permission dialog"
+        );
+        assert_eq!(
+            deny.applies_to(name),
+            permission,
+            "{name}: deny coverage must match whether it declares a permission dialog"
+        );
+        assert_eq!(
+            interrupt.applies_to(name),
+            claims_state(&m, AgentState::Working),
+            "{name}: interrupt must cover exactly the agents that have a working state"
+        );
+    }
+}
+
+/// A-277, R26. `Run Everything (shift+tab)` sits one modifier from cursor's tool-scoped grant, and
+/// it is a session-wide YOLO grant. No bundled action may reach it, under any name.
+#[test]
+fn no_bundled_action_maps_cursor_to_shift_tab() {
+    for (stem, src) in [
+        ("approve", APPROVE),
+        ("deny", DENY),
+        ("interrupt", INTERRUPT),
+        ("compact", COMPACT),
+    ] {
+        let keys = action(stem, src).keys_for("cursor").unwrap_or(&[]).to_vec();
+        for spelling in ["S-Tab", "BTab", "shift+tab"] {
+            assert!(
+                !keys.iter().any(|k| k == spelling),
+                "{stem} must not send cursor's session-wide grant ({spelling})"
+            );
+        }
+    }
+}
+
+/// The rows U7 filled, pinned as data. Each is a keystroke into somebody else's TUI, so a change
+/// here is a change to what a phone tap does and has to be re-evidenced, not merely re-reviewed.
+#[test]
+fn the_filled_rows_are_the_evidenced_ones() {
+    let approve = action("approve", APPROVE);
+    let deny = action("deny", DENY);
+    let interrupt = action("interrupt", INTERRUPT);
+
+    for (agent, want) in [("gemini", "1"), ("cursor", "y")] {
+        assert_eq!(approve.keys_for(agent), Some([want.to_string()].as_slice()));
+    }
+    for (agent, want) in [("gemini", "3"), ("cursor", "n")] {
+        assert_eq!(deny.keys_for(agent), Some([want.to_string()].as_slice()));
+    }
+    for (agent, want) in [
+        ("cursor", "C-c"),
+        ("gemini", "Escape"),
+        ("opencode", "Escape"),
+        ("pi", "Escape"),
+    ] {
+        assert_eq!(
+            interrupt.keys_for(agent),
+            Some([want.to_string()].as_slice()),
+            "{agent} interrupt"
+        );
+    }
+    // R29: pi has no permission prompt, so no answer to one may resolve for it in any state.
+    assert!(!approve.applies_to("pi") && !deny.applies_to("pi"));
 }
 
 #[test]
