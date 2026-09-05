@@ -1014,6 +1014,7 @@ tier:
 | manifests and actions | Files the loader skipped, and actions naming an unknown agent. |
 | remote panes | A pane whose foreground is a remote shell (ssh, mosh, docker, podman, kubectl). Neither the process walk nor a capture crosses that boundary, so an agent behind it reports only if its hooks can reach this tmux socket ([Run an agent in a container](../how-to/agents-in-containers.md)). Any `@agent_*` options such a pane still carries are held, not refreshed. Reported, not warned about: running an agent elsewhere is a choice, not a misconfiguration. |
 | unreadable stamps | A pane carrying an `@agent_*` option that does not decode. Every read path treats a corrupt stamp as no stamp, so the pane reads as never-stamped with nothing else to say why; doctor names the option and the value. `tma debug explain` prints the same fact for one pane. |
+| stamps tma did not write | An `@agent_state` outside the closed token set, or one set with no `@agent_stamped_at` beside it, which no tma write produces. Both say a second tool is writing the pane's state; doctor names the value and points at [the `@agent_state` contract](agent-state-contract.md). Reported on the same line as an unreadable stamp, and counted the same way. |
 
 Reading the report section by section, and the `--exit-code` CI recipe, are in
 [Diagnose with `tma doctor`](../how-to/diagnose-with-doctor.md).

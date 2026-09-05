@@ -10,11 +10,12 @@
 //! additive-only `"schema": 1` document, matching `tma ls --json`; `--exit-code` turns the warnings
 //! into a CI verdict ([`gate`]).
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::ExitCode;
 
 use tma_core::stamp::opt;
-use tma_core::{AgentState, Provenance, ReadResult, StampedState};
+use tma_core::{AgentState, GrammarError, Provenance, ReadResult, StampedState};
 use tma_runtime::{actions, identity, ipc, notify};
 
 use crate::cli_support;
@@ -283,6 +284,38 @@ struct StampLint {
     problem: String,
 }
 
+/// The reference page a foreign-writer finding points at.
+const CONTRACT_DOC: &str = "docs/reference/agent-state-contract.md";
+
+/// The reported problem for a stamp that did not decode. An `@agent_state` outside the closed set
+/// is the one decode error a second writer produces, so it names that possibility rather than
+/// reading as anonymous corruption; every other grammar error keeps its own message.
+fn stamp_problem(err: &GrammarError) -> String {
+    match err {
+        GrammarError::UnknownState(value) => format!(
+            "another tool may be writing @agent_state: value {value:?} is outside the closed set \
+             (idle, working, blocked, unknown), so the pane reads as never-stamped everywhere \
+             (see {CONTRACT_DOC})"
+        ),
+        other => other.to_string(),
+    }
+}
+
+/// The finding for a pane whose `@agent_state` decoded but carries no `@agent_stamped_at`. Every
+/// write tma makes ends with that marker, so a state without one came from somewhere else; unlike
+/// an out-of-vocabulary token this one decodes fine and would otherwise pass unremarked.
+fn unstamped_state_problem(options: &HashMap<String, String>) -> Option<String> {
+    let state = options.get(opt::STATE).filter(|v| !v.is_empty())?;
+    if options.contains_key(opt::STAMPED_AT) {
+        return None;
+    }
+    Some(format!(
+        "another tool may be writing @agent_state: value {state:?} is set with no \
+         @agent_stamped_at, which every tma write ends with, so nothing can age this state \
+         (see {CONTRACT_DOC})"
+    ))
+}
+
 /// One agent manifest the loader skipped. Every other surface warns about these on stderr and
 /// carries on; doctor is where the file and its parse error are actually readable.
 struct ManifestLint {
@@ -524,11 +557,23 @@ fn gather(
                 stamp_issues.push(StampLint {
                     pane: rec.pane_id.clone(),
                     locator: rec.locator(),
-                    problem: err.to_string(),
+                    problem: stamp_problem(&err),
                 });
                 None
             }
         };
+
+        // A tuple that decoded but carries no freshness marker: the other half of the second-writer
+        // check, and the half nothing else in the codebase notices.
+        if read.is_some() {
+            if let Some(problem) = unstamped_state_problem(&rec.options) {
+                stamp_issues.push(StampLint {
+                    pane: rec.pane_id.clone(),
+                    locator: rec.locator(),
+                    problem,
+                });
+            }
+        }
 
         // The registered half: a stored `@agent_session` + `@agent_name` lets identify honor a
         // hook-registered agent the ps-walk momentarily cannot see (matches cycle.rs).
@@ -1039,7 +1084,7 @@ mod tests {
         r.stamp_issues = vec![StampLint {
             pane: "%11".to_string(),
             locator: "work:3.0".to_string(),
-            problem: "unknown @agent_state token: \"spinning\"".to_string(),
+            problem: stamp_problem(&GrammarError::UnknownState("spinning".to_string())),
         }];
         assert_eq!(gate(&r).0, 1, "the corrupt stamp is one warning");
 
@@ -1056,9 +1101,75 @@ mod tests {
             text.contains("never-stamped"),
             "and what it costs the pane: {text}"
         );
+        assert!(
+            text.contains(CONTRACT_DOC),
+            "the section points at the contract a second writer implements: {text}"
+        );
 
         // A pane whose options all decode says nothing about stamps.
         assert!(!render_text(&clean_report()).contains("stamps:"));
+    }
+
+    /// An `@agent_state` outside the closed set is what a second producer writing its own
+    /// vocabulary produces, so that one error names the possibility instead of reading as
+    /// anonymous corruption. Every other grammar error keeps its own message.
+    #[test]
+    fn an_out_of_vocabulary_state_names_a_second_writer() {
+        let problem = stamp_problem(&GrammarError::UnknownState("busy".to_string()));
+        assert!(problem.contains("another tool may be writing @agent_state"));
+        assert!(
+            problem.contains("\"busy\""),
+            "the value is quoted: {problem}"
+        );
+        assert!(problem.contains(CONTRACT_DOC), "and the spec: {problem}");
+
+        let bad_int = GrammarError::BadInteger {
+            option: opt::SINCE,
+            value: "later".to_string(),
+        };
+        assert_eq!(
+            stamp_problem(&bad_int),
+            bad_int.to_string(),
+            "a bad integer is corruption, not a rival vocabulary"
+        );
+    }
+
+    /// The other second-writer shape: a state token tma understands, written by something that
+    /// stamped no freshness marker. It decodes, so nothing else in the codebase notices it.
+    #[test]
+    fn a_state_with_no_stamped_at_is_reported_and_gates_red() {
+        let opts = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| ((*k).to_string(), (*v).to_string()))
+                .collect()
+        };
+
+        let problem = unstamped_state_problem(&opts(&[(opt::STATE, "working")]))
+            .expect("a state with no marker is a finding");
+        assert!(problem.contains("another tool may be writing @agent_state"));
+        assert!(problem.contains("\"working\"") && problem.contains(opt::STAMPED_AT));
+        assert!(problem.contains(CONTRACT_DOC));
+
+        // tma's own writes always carry the marker, and a pane with no state has nothing to say.
+        assert_eq!(
+            unstamped_state_problem(&opts(&[
+                (opt::STATE, "working"),
+                (opt::STAMPED_AT, "1700000000000"),
+            ])),
+            None
+        );
+        assert_eq!(unstamped_state_problem(&opts(&[])), None);
+
+        // It rides the same lane as a corrupt stamp, so it counts once in the same gate.
+        let mut r = clean_report();
+        r.stamp_issues = vec![StampLint {
+            pane: "%12".to_string(),
+            locator: "work:4.0".to_string(),
+            problem,
+        }];
+        assert_eq!(gate(&r).0, 1);
+        assert!(render_text(&r).contains("%12"));
     }
 
     /// A `ps` that will not run used to sink the whole report. It costs pane identification only,

@@ -58,7 +58,7 @@ options carry rollups and hints.
 | option | scope | semantics |
 |---|---|---|
 | `@agent_name`, `@agent_pid` | pane | identity (pid: process-group leader found by the walk) |
-| `@agent_state`, `@agent_detail` | pane | the verdict (state) and its detail token |
+| `@agent_state`, `@agent_detail` | pane | the verdict (state) and its detail token. A tool other than tma that writes these on the same pane implements [the `@agent_state` contract](agent-state-contract.md), which is what the two producers have to agree on |
 | `@agent_source` | pane | provenance of the current state: `hook` / `capture` / `process`. `activity` is a legacy value still accepted on read; nothing produces it any more (a viewport hash change stopped being state evidence) |
 | `@agent_evidence_at` | pane | epoch **ms** of the evidence behind the current state |
 | `@agent_since` | pane | epoch **ms** of the state transition, written once by the first producer to record it and never rewritten while state is unchanged (the one exception is a value stranded ahead of `@agent_stamped_at` by a backward clock step) |
@@ -362,7 +362,7 @@ guessing which prefix belongs to what. Top level:
 | `nested_multiplexers` | array | `{ pane, locator, command }` per pane running an inner multiplexer client |
 | `remote_panes` | array | `{ pane, locator, command, stamped }` per pane behind a remote shell; `stamped` says whether it still carries a held `@agent_*` stamp |
 | `ignored_panes` | array | `{ pane, locator, value }` per pane carrying `@agent_ignore`, with the value you set |
-| `stamp_issues` | array | `{ pane, locator, problem }` per pane carrying an `@agent_*` option that does not decode |
+| `stamp_issues` | array | `{ pane, locator, problem }` per pane carrying an `@agent_*` option that does not decode, or an `@agent_state` no tma write produced (outside the closed set, or set with no `@agent_stamped_at`) |
 | `agents` | array | one object per agent pane (below) |
 | `actions` | object | `ok` (number loaded) and `issues`, an array of `{ file, problem }` |
 
