@@ -10,6 +10,15 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **Claude Code's first-run workspace-trust dialog read `unknown` on 2.1.261.** That build redrew the
+  dialog without option numbers and with `No, exit` first and preselected, so the `❯ 1. Yes, I trust
+  this folder` anchor the trust rule was authored on stopped matching at every pane width. A second
+  rule reads the new layout off its refusal cursor plus the trust wording, and the numbered rule
+  stays for the builds that still draw it. Both stamp `blocked` / `trust`, so `approve` and `deny`
+  remain gated at a dialog whose affirmative option grants the whole folder.
+
 ## [0.5.11] - 2026-09-04
 
 ### Fixed

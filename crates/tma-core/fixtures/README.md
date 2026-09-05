@@ -21,20 +21,26 @@ fixture — do not derive detection rules from it.
 
 ## Synthesized headers
 
-Four fixtures came from the mobile-planning capture corpus
+Six fixtures came from the mobile-planning capture corpus
 (`docs/internal/mobile/research/captures/claude/`), which recorded **capture
 bodies only** — no pane title, pid or timestamp:
 
 - `claude_blocked_plan_w{60,200}.txt`
 - `claude_blocked_trust_w200.txt`
+- `claude_blocked_trust_unnumbered_w{60,100}.txt`
 - `claude_blocked_permission_bash_w60.txt`
 
 Their bodies are the real captures verbatim (already ANSI-stripped at capture
 time; `claude_blocked_permission_bash_w60.txt` additionally has the account
 holder's name redacted width-preservingly out of the welcome banner). Their
 **headers are synthesized**, so no test may assert on the title, pid or
-`captured_at` of these four. `plan_verdict_survives_an_idle_marker_in_the_title`
+`captured_at` of these six. `plan_verdict_survives_an_idle_marker_in_the_title`
 authors a `✳` title onto the plan body deliberately and says so.
+
+The two `_unnumbered_` fixtures are the workspace-trust dialog as Claude Code
+2.1.261 draws it: no option numbers, `No, exit` first and preselected. The
+numbered `claude_blocked_trust_w{60,100,200}.txt` captures are the older
+layout, and both are live in the field, so both keep a rule.
 
 ## Synthesized bodies
 
