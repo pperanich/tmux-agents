@@ -161,6 +161,15 @@ keys are best-effort: the resolver memoizes one bounded `git` call per unique cw
 and degrades every field to `null` on any failure, so a consumer treats them as
 hints, never guarantees.
 
+The row writer has a second, title-free protocol surface for consumers that are
+not on this machine, and `title` is the only key that differs between the two: a
+pane title is agent-supplied text, kept off a remote surface for the reason
+`pending_summary` is kept out of the notification payload. Both surfaces are
+written by one function, so every other key, its order, and its null handling are
+the same on both, and a key added to either is added to both. Nothing tma ships
+today emits the protocol form; `tma ls --json`, `tma wait --json` and `tma
+subscribe` are the local surface and carry `title` exactly as documented above.
+
 ### `server` and `host`: merging rows from more than one place
 
 A pane id is unique within one tmux server and nothing more. Collect

@@ -10,6 +10,15 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Changed
+
+- **The JSON row writer has a title-free surface for consumers off this machine.** This is internal
+  plumbing with no user-visible effect: `tma ls --json`, `tma wait --json` and `tma subscribe` emit
+  the bytes they always did, and nothing tma ships today uses the new form. The serializer is public
+  now and takes a surface argument, so one key set stays defined in one place and the remote form
+  drops only `title`, agent-supplied pane text that stays local for the reason `pending_summary`
+  does.
+
 ## [0.5.12] - 2026-09-05
 
 ### Added
