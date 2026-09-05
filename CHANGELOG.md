@@ -76,15 +76,6 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   "tell the agent what to do instead" composer, which takes an optional reason and skips on an empty
   one. [Agent coverage](docs/reference/agent-coverage.md#bundled-action-key-sequences) has the
   table.
-
-### Changed
-
-- **The JSON row writer has a title-free surface for consumers off this machine.** This is internal
-  plumbing with no user-visible effect: `tma ls --json`, `tma wait --json` and `tma subscribe` emit
-  the bytes they always did, and nothing tma ships today uses the new form. The serializer is public
-  now and takes a surface argument, so one key set stays defined in one place and the remote form
-  drops only `title`, agent-supplied pane text that stays local for the reason `pending_summary`
-  does.
 - **A dispatch you lost the answer to can be retried without approving twice.** `tma act --slot
   <ID>` runs at most once per id: the first fire writes a receipt into a per-host ledger under
   tma's runtime directory, and a retry with the same id replays that receipt, exits with its code,
@@ -102,6 +93,15 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   Nothing degrades when no one answers: claude draws its dialog immediately either way, the keyboard
   answers it throughout, and a hold that expires hands the prompt back untouched, with the next
   dispatch sending the key sequence tma has always sent.
+
+### Changed
+
+- **The JSON row writer has a title-free surface for consumers off this machine.** This is internal
+  plumbing with no user-visible effect: `tma ls --json`, `tma wait --json` and `tma subscribe` emit
+  the bytes they always did, and nothing tma ships today uses the new form. The serializer is public
+  now and takes a surface argument, so one key set stays defined in one place and the remote form
+  drops only `title`, agent-supplied pane text that stays local for the reason `pending_summary`
+  does.
 
 ## [0.5.12] - 2026-09-05
 
