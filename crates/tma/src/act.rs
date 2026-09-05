@@ -578,8 +578,10 @@ fn human_note(r: &ActResult) -> Option<String> {
     let code = r.exit_code();
     match &r.outcome {
         Outcome::Sent => Some(format!("tma: sent `{}` to {}", r.action, r.pane)),
+        // Two lanes reach `replied` now, API and hook, and the result carries no transport. What
+        // the line has to say is the part they share: the answer went as data, not as a keypress.
         Outcome::Replied => Some(format!(
-            "tma: replied `{}` to {} over the API",
+            "tma: replied `{}` to {} without keystrokes",
             r.action, r.pane
         )),
         Outcome::Exited(_) | Outcome::Spawned => None,
@@ -712,6 +714,9 @@ fn render_dry_run(d: &broker::DryRun) -> String {
             op,
             reply,
         } => format!("api: POST {endpoint}/permission/<id>/reply  op={op} reply={reply}"),
+        Effect::Hook { request, verdict } => {
+            format!("hook: verdict={verdict} for the held request {request}")
+        }
         Effect::Command(cmd) => format!("command: {cmd}"),
         // The caller's own string is deliberately absent: what a dry-run is for is the wrapping.
         Effect::Text { prefix, suffix } => format!(
@@ -779,8 +784,8 @@ fn run_list(
     ExitCode::SUCCESS
 }
 
-/// The applicability list: a `keys` action's covered agents are the union of its
-/// `[keys]` and `[api]` tables (the `--list` document reports the union, with no per-transport
+/// The applicability list: a `keys` action's covered agents are the union of its `[keys]`,
+/// `[api]` and `[hook]` tables (the `--list` document reports the union, with no per-transport
 /// surface in v1); an `exec` action's from `agents` (empty means all agents). Sorted + deduped so
 /// the union is stable regardless of table order.
 fn applicability(action: &ActionManifest) -> Vec<&str> {
@@ -790,6 +795,7 @@ fn applicability(action: &ActionManifest) -> Vec<&str> {
                 .keys
                 .keys()
                 .chain(action.api.keys())
+                .chain(action.hook.keys())
                 .map(String::as_str)
                 .collect();
             agents.sort_unstable();

@@ -68,6 +68,62 @@ tma install-hooks claude --uninstall
 `--check` reports `tma: hooks OK` when the wiring is complete. No trust step:
 Claude loads the hooks on next start.
 
+## Answer Claude's prompts over the hook lane
+
+Claude's `PermissionRequest` hook can hand back a decision, not just a stamp. With
+the lane on, `tma act approve` on a blocked claude pane returns a structured allow
+to the hook that is holding the call open, and the tool runs with no keystroke
+landing anywhere. It is off until you name the sub-table in `config.toml`:
+
+```toml
+[hooks]
+claude_reply_lane = { hold_ms = 25000 }
+```
+
+`hold_ms` is how long the hook waits for an answer: 25 seconds by default, and
+anything from 1000 to 590000 ms, since the ceiling has to stay under claude's own
+hook timeout (see
+[`[hooks]`](../reference/configuration.md#hooks-what-an-installed-hook-does-at-fire-time)).
+Nothing gets reinstalled. The hook reads this on every fire, so the next prompt is
+already on the lane.
+
+What the hook does with it on: the same stamps as before (`blocked` / `permission`
+and the pending-call trio), then it mints the request's id, stamps it on
+`@agent_permission_request`, writes a `0600` record of the pending call under
+`$XDG_RUNTIME_DIR/tma/requests/`, and holds. A verdict written inside the hold goes
+back to claude as its own decision object and the hook exits 0. A hold that expires
+deletes its record, prints nothing, and exits 0, which hands the prompt straight
+back to claude.
+
+**Nothing is hidden and the keyboard never stops working.** Claude draws its dialog
+the moment it asks and does not wait for the hook, so the hold changes nothing about
+what is on the screen. Screen detection still reads `blocked`, `tma act approve
+--pane` still sends `1` when no hook is holding, and typing at the pane answers it
+the way it always did. A pane nobody answers over the lane behaves exactly like a
+pane with the lane switched off. That is the guarantee, not a fallback: the lane can
+only add a way to answer, never take one away.
+
+### Answering one
+
+Find the blocked pane and the request it is parked on, then answer that exact
+request:
+
+```
+tma ls --json | jq -r '.agents[] | select(.state=="blocked") | "\(.pane) \(.permission_request)"'
+tma act approve --pane %7 --expect-permission-request 6f1c2a09d4b7e310
+```
+
+Exit 0 means the hook took the verdict: outcome `replied`, and `kind` reads `hook`
+in the [act audit log](../reference/cli.md#the-act-audit-log). Exit 4 with
+`request-gone` means the prompt turned over between the read and the dispatch, so
+the id the pane carries is no longer the one you quoted and nothing was sent. Adding
+`--dry-run` to that same command says which arm it would take right now, naming the
+held request when a hook is parked on one and the key sequence when none is.
+
+v1 covers claude and no other agent. OpenCode answers its own prompts over HTTP
+instead ([the API lane](../reference/agent-coverage.md#opencode-api-lane)), and
+every other agent still gets keystrokes.
+
 ## OpenCode
 
 Config: a JS plugin in `~/.config/opencode/plugin/tma.js`.

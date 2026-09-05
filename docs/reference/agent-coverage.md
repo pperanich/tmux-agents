@@ -275,6 +275,18 @@ the hook exits 0 with nothing on stdout, so Claude Code draws its normal prompt.
 The hook is deliberately **not** installed with `async: true`, the point is to
 stamp the pane before the dialog draws, and a backgrounded hook would race it.
 
+Writing no decision back is the default, not a limit. Name `[hooks]
+claude_reply_lane` in `config.toml` and the same hook, after the same stamps, mints
+the pending call's id onto `@agent_permission_request` and holds for up to `hold_ms`
+(25 seconds by default) waiting for a verdict. An `approve` or `deny` that lands
+inside the hold returns Claude's own decision object on stdout, so the tool runs or
+refuses with no keystroke; a hold that expires prints nothing and leaves the prompt
+exactly as the paragraph above describes. Claude is the only agent with this lane,
+and the lane is the only reason a Claude pane carries `@agent_permission_request`
+at all: its payload names no request of its own, so tma mints one. The recipe is
+[Answer Claude's prompts over the hook
+lane](../how-to/install-agent-hooks.md#answer-claudes-prompts-over-the-hook-lane).
+
 The `Notification permission_prompt|elicitation_dialog` entry stays as the
 fallback for a build without `PermissionRequest`. On its own it was late: the
 vendor docs gate that notification on the prompt having already waited about six

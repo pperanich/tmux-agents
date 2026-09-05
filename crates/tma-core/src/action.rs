@@ -69,6 +69,11 @@ pub struct ActionManifest {
     /// own command rather than as a message. [`DEFAULT_SIGILS`] when the manifest sets none; only a
     /// `text` action may set it, and an explicit empty list opts out.
     pub sigils: Vec<char>,
+    /// Per-agent hook-lane transports (`keys` kind only): agent name ⇒ the verdict the broker
+    /// writes for a hook that is holding on a permission request. Unlike `[api]` this may coexist
+    /// with `[keys]` for the same agent, and that overlap is the point: with no request record on
+    /// disk the broker falls through to the key sequence, which is the lane's degradation guarantee.
+    pub hook: BTreeMap<String, HookTransport>,
 }
 
 /// One agent's API-channel transport: a closed built-in operation, extended only with
@@ -129,6 +134,32 @@ pub struct TextTransport {
     /// agent because an engine cannot infer it: gemini queues and then hands the text back to the
     /// composer, unsent, when the turn is interrupted.
     pub steer_now: bool,
+}
+
+/// One agent's hook-lane transport: the decision written to the verdict file a holding hook is
+/// polling for. v1 ships exactly claude's `PermissionRequest` decision object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HookTransport {
+    pub verdict: HookVerdict,
+}
+
+/// The closed hook-lane verdict vocabulary, the two behaviours claude's `PermissionRequest`
+/// decision object accepts. Unknown values are a parse error.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HookVerdict {
+    Allow,
+    Deny,
+}
+
+impl HookVerdict {
+    /// The wire token written into the verdict file and into the decision object's `behavior`.
+    pub const fn token(self) -> &'static str {
+        match self {
+            HookVerdict::Allow => "allow",
+            HookVerdict::Deny => "deny",
+        }
+    }
 }
 
 /// The three action kinds under one manifest form.
@@ -234,6 +265,11 @@ pub enum ActionError {
     AgentInBothTransports { file: String, agent: String },
     #[error("{file}: sigil {sigil:?} must be exactly one non-whitespace character")]
     BadSigil { file: String, sigil: String },
+    #[error(
+        "{file}: agent {agent:?} appears in both [api] and [hook]; the hook lane falls through to \
+         [keys], never to [api]"
+    )]
+    AgentInApiAndHook { file: String, agent: String },
 }
 
 #[cfg(test)]
@@ -267,5 +303,13 @@ mod tests {
             };
             assert_eq!(kind.sends_keystrokes(), expected, "{kind:?}");
         }
+    }
+
+    /// The hook-lane tokens ride into the verdict file and into claude's decision object, so they
+    /// are pinned here rather than left to whatever the enum happens to render.
+    #[test]
+    fn hook_vocabulary_tokens_are_pinned() {
+        assert_eq!(HookVerdict::Allow.token(), "allow");
+        assert_eq!(HookVerdict::Deny.token(), "deny");
     }
 }

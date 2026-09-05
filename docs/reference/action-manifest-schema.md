@@ -29,19 +29,21 @@ and `config.toml`.
 | `timeout_ms` | no (exec) | integer | Synchronous exec timeout in milliseconds. Default `30000`. |
 | `detach_timeout_ms` | no (exec) | integer | Detached exec wall-clock deadline in milliseconds, after which the supervisor kills the process group. Default `900000` (15 minutes). |
 | `command` | yes (exec) | string | The exec command, passed to `sh -c` verbatim with no substitution. Required for `exec`, forbidden for `keys`. |
-| `[keys]` | keys | table | Per-agent key sequences. Forbidden for `exec`. A `keys` action needs at least one entry across `[keys]` and `[api]`. |
+| `[keys]` | keys | table | Per-agent key sequences. Forbidden for `exec`. A `keys` action needs at least one entry across `[keys]`, `[api]` and `[hook]`. |
 | `[api]` | keys | table | Per-agent API-channel transports (below). Forbidden for `exec`. An agent may appear in `[keys]` or `[api]`, never both. |
 | `[text]` | text | table | Per-agent text transports (below). The only transport table a `text` action may carry, and forbidden for the other two kinds. |
 | `sigils` | no (text) | array of string | Leading characters a `text` payload may not start with, one character each. Defaults to `["/", "!"]`; an explicit `[]` opts out. `text` only. |
+| `[hook]` | keys | table | Per-agent hook-lane transports (below). Forbidden for `exec`. An agent may appear in `[keys]` and `[hook]` at once; in `[api]` and `[hook]` never. |
 
 Structural rules are enforced at parse: `kind = "keys"` requires at least one
-transport entry across `[keys]` and `[api]` (an api-only action is legal) and
-forbids `command` / `detach`; `kind = "exec"` requires `command` and forbids
-`[keys]` / `[api]`; `kind = "text"` requires at least one `[text]` entry and
-forbids `command` / `detach` / `agents` / `[keys]` / `[api]`; `[text]` and
+transport entry across `[keys]`, `[api]` and `[hook]` (a single-transport action is
+legal) and forbids `command` / `detach`; `kind = "exec"` requires `command` and
+forbids all four transport tables; `kind = "text"` requires at least one `[text]`
+entry and forbids `command` / `detach` / `agents` / `[keys]` / `[api]`; `[text]` and
 `sigils` are rejected on the other two kinds; and an agent named in both `[keys]`
-and `[api]` is a parse error (the broker never picks a transport at act time, so
-there is no silent fallback).
+and `[api]`, or in both `[api]` and `[hook]`, is a parse error (the broker never
+picks between two structured transports at act time, so there is no silent
+fallback; a hook-lane miss falls through to keystrokes, never to HTTP).
 
 ## `[when]`: the gate
 
@@ -163,6 +165,48 @@ are the agent's own command plane, tma's own `compact` action is literally
 send a message must not reach any of it. Widen or narrow the list per action by
 shadowing the manifest.
 
+## `[hook]`: per-agent hook-lane transports
+
+The third transport, beside a keystroke and an HTTP POST: an answer returned to the
+agent's own permission hook. `[hook]` maps an agent name to the verdict the broker
+writes when a hook is parked on the pane's current request. v1 covers claude, whose
+`PermissionRequest` hook holds the tool call open while the [hook reply
+lane](../how-to/install-agent-hooks.md#answer-claudes-prompts-over-the-hook-lane) is
+switched on.
+
+```toml
+[hook]
+claude = { verdict = "allow" }
+```
+
+`verdict` is the only key and its vocabulary is closed: `allow` and `deny`. Any
+other value, or a missing one, is a parse error. There is deliberately no spelling
+for `approve_always` here, since a standing grant is not a decision to take from a
+transport whose caller saw exactly one call.
+
+Applicability is the union of all three tables. An agent may sit in `[keys]` and
+`[hook]` at once, and the bundled `approve` and `deny` both do for claude: that
+overlap IS the degradation path, because a fire falls through to the key sequence
+whenever no hook is holding. An agent in `[api]` and `[hook]` is refused at parse
+for the reason `[keys]` and `[api]` cannot share one either, and the direction
+matters: a hook-lane miss falls through to keystrokes, never to HTTP, and a manifest
+implying otherwise should not load. Only `kind = "keys"` may carry the table; a
+`kind = "exec"` action with a `[hook]` is a structural error.
+
+The broker takes this arm only when both halves line up: the action has a `[hook]`
+entry for the pane's agent, and a request record is parked for the id the pane
+carries in `@agent_permission_request`. Under the pane's held single-flight lock it
+creates the verdict file (a temp file in the same directory, fsynced, then
+`link(2)`, so a second dispatch cannot answer one request twice), clears
+`@agent_permission_request`, and reports outcome `replied` (exit 0). Spending the id
+there is what makes a second dispatch quoting it refuse `request-gone` (exit 4) at
+the [`--expect-permission-request`
+binder](cli.md#binding-a-dispatch-to-the-pane-you-saw), before it reaches the file
+at all. A verdict file that somehow already exists is the request having been
+answered in the gap: `vanished` with reason `request-gone` (exit 3), the same pair
+the API lane reports on a 404, and nothing is overwritten. With no record on disk
+the arm is skipped and the `[keys]` sequence fires as it always has.
+
 ## `requires` and the context env
 
 An `exec` action's `command` receives context only as environment variables (never
@@ -214,8 +258,8 @@ script does, so this one bit is the author's honest declaration.
 
 | name | kind | gate | effect |
 |---|---|---|---|
-| `approve` | keys | `state = ["blocked"], detail = ["permission"]` | Affirmative answer to a permission prompt (`1` for Claude and Gemini, `y` for Codex and Cursor; an API `permission-reply` `once` for OpenCode). |
-| `deny` | keys | `state = ["blocked"], detail = ["permission"]` | Negative answer to a permission prompt (`Escape` for Claude/Codex, `3` for Gemini, `n` for Cursor; an API `permission-reply` `reject` for OpenCode). |
+| `approve` | keys | `state = ["blocked"], detail = ["permission"]` | Affirmative answer to a permission prompt (`1` for Claude and Gemini, `y` for Codex and Cursor; an API `permission-reply` `once` for OpenCode; a hook `verdict = "allow"` for Claude when one is holding). |
+| `deny` | keys | `state = ["blocked"], detail = ["permission"]` | Negative answer to a permission prompt (`Escape` for Claude/Codex, `3` for Gemini, `n` for Cursor; an API `permission-reply` `reject` for OpenCode; a hook `verdict = "deny"` for Claude when one is holding). |
 | `interrupt` | keys | `state = ["working"]` | Interrupt a working agent (`Escape` everywhere but Cursor, which takes `C-c`). |
 | `compact` | keys | `state = ["idle"], context_pct_min = 75` | Compact the context window once it is high (`/compact` Enter for Claude). |
 | `steer` | text | `state = ["idle"]` | Send one line of your own text to an idle agent, submitted with Enter (Claude, Codex, OpenCode). |

@@ -1,12 +1,13 @@
 use tma_core::render;
 use tma_core::stamp::opt;
-use tma_core::{AgentState, ApiReply, FoldConfig, ReadResult, StampedState};
+use tma_core::{AgentState, ApiReply, FoldConfig, HookVerdict, ReadResult, StampedState};
 
 use tma_tmux::lock::{self, Acquire, LockError};
 use tma_tmux::stamp;
 use tma_tmux::tmux::{PaneRecord, Tmux, TmuxError};
 
 use crate::config::ApiSection;
+use crate::hook_lane::{self, VerdictWrite};
 use crate::http::{self, HttpOutcome};
 use crate::identity::{self, PaneIdentity, Registration};
 use crate::manifests::LoadedManifest;
@@ -112,6 +113,14 @@ impl BrokerIo for TmuxBroker<'_> {
             &body,
             std::time::Duration::from_millis(timeout_ms),
         )
+    }
+
+    fn hook_request_pending(&self, request_id: &str) -> bool {
+        hook_lane::request_pending(request_id)
+    }
+
+    fn write_hook_verdict(&self, request_id: &str, verdict: HookVerdict) -> VerdictWrite {
+        hook_lane::write_verdict(request_id, verdict)
     }
 
     fn set_act_repeat(&self, pane_id: &str, value: &str) {

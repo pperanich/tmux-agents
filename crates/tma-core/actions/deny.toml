@@ -23,3 +23,8 @@ gemini = ["3"]
 # OpenCode rejects over HTTP instead of keystrokes: `reject` denies the pending request.
 [api]
 opencode = { op = "permission-reply", reply = "reject" }
+
+# The refusing half of the hook reply lane: claude is told the call was denied, with a reason it
+# reports back to the model. Falls through to the `Escape` sequence above when no hook is holding.
+[hook]
+claude = { verdict = "deny" }

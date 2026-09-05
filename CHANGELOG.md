@@ -94,6 +94,14 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   learns the outcome instead of sending the action again to find out. A `locked` refusal releases
   the slot, since a retry is exactly what fixes it; every other outcome is terminal, and an `error`
   records `fired-unknown` rather than inviting a second keystroke that may already have landed.
+- **A third reply transport: claude's permission hook can be answered with a decision instead of a
+  keystroke.** Name `[hooks] claude_reply_lane` in `config.toml` and a `PermissionRequest` hook
+  parks the pending call under `$XDG_RUNTIME_DIR/tma/requests/` and holds (25 seconds by default,
+  bounded under claude's own hook timeout) while `tma act approve` / `deny` writes the verdict its
+  new `[hook]` transport declares, so the tool runs or refuses with nothing typed into the pane.
+  Nothing degrades when no one answers: claude draws its dialog immediately either way, the keyboard
+  answers it throughout, and a hold that expires hands the prompt back untouched, with the next
+  dispatch sending the key sequence tma has always sent.
 
 ## [0.5.12] - 2026-09-05
 

@@ -279,7 +279,7 @@ pub(crate) fn transcript_stamp(payload: &str, current: Option<&str>) -> Option<S
 /// one payload field tma reads inside: Claude's `PermissionRequest` `tool_input`. Scans for the
 /// matching close brace, tracking string literals so a `}` inside a value does not end it early.
 /// `None` when the field is absent or is not an object.
-pub(super) fn json_object_field<'a>(payload: &'a str, field: &str) -> Option<&'a str> {
+pub(crate) fn json_object_field<'a>(payload: &'a str, field: &str) -> Option<&'a str> {
     let needle = format!("\"{field}\"");
     let start = payload.find(&needle)? + needle.len();
     let rest = payload[start..]
@@ -318,7 +318,7 @@ pub(super) fn json_object_field<'a>(payload: &'a str, field: &str) -> Option<&'a
 /// Extract a top-level JSON string field's value from a hook payload (a hand-rolled read, matching
 /// [`parse_session_id`]'s discipline). Handles the common `\n`/`\t`/`\"` escapes; a value with
 /// nested objects or non-string types is not parsed (returns `None`).
-pub(super) fn json_string_field(payload: &str, field: &str) -> Option<String> {
+pub(crate) fn json_string_field(payload: &str, field: &str) -> Option<String> {
     let needle = format!("\"{field}\"");
     let start = payload.find(&needle)? + needle.len();
     let rest = payload[start..].trim_start();
