@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.5.12] - 2026-09-05
+
 ### Added
 
 - **The agent's own transcript file, stamped on the pane as `@agent_transcript`.** Claude Code,
@@ -985,7 +987,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.11...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.12...HEAD
+[0.5.12]: https://github.com/pperanich/tmux-agents/compare/v0.5.11...v0.5.12
 [0.5.11]: https://github.com/pperanich/tmux-agents/compare/v0.5.10...v0.5.11
 [0.5.10]: https://github.com/pperanich/tmux-agents/compare/v0.5.9...v0.5.10
 [0.5.9]: https://github.com/pperanich/tmux-agents/compare/v0.5.8...v0.5.9
