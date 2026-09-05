@@ -43,6 +43,8 @@ pub mod json;
 pub mod notify;
 pub mod nudge;
 pub mod seen;
+// The per-host dispatch ledger: `broker::fire` decides, this decides whether it runs at all.
+pub mod slots;
 pub mod ui;
 pub mod window_name;
 

@@ -105,6 +105,7 @@ your other sessions exactly as an unscoped one does.
 | `attach` | Hand this terminal to the session holding a pane (`--pane %5`): select its window and pane, then replace this process with `tmux attach-session`. |
 | `wait` | Block until the target reaches one of `--until`'s states, then print the matched row(s). One pane, or a fleet (`--all` / `--count`). |
 | `act` | Fire a guarded action into an agent pane (`--all` for every pane in scope), or enumerate/menu the fireable ones (`--list` / `--menu`). |
+| `receipts` | Read the dispatch ledger `act --slot` writes: what a dispatch ended as, without dispatching to find out. |
 | `mute` | Suppress notifications for the panes in scope, for `--for <DURATION>` or until `--clear`. |
 | `subscribe` | Stream the read path: one complete `ls --json` document per line, pushed when a daemon is present. |
 | `transcript` | Read what the agent in a pane has been writing, as normalized events, newest first, a bounded page at a time. |
@@ -444,6 +445,8 @@ Usage: tma act [OPTIONS] [NAME]
 | `--force` | Skip the `when` gate only, never `requires` and never the lock. |
 | `--expect-episode-ms <MS>` | Refuse (`episode-changed`, exit 4) unless the pane is still in this episode: the `episode_ms` of the `tma ls --json` row you acted on. Checked inside the action lock. A usage error alongside `--all` (exit 2). See [Binding a dispatch to the pane you saw](#binding-a-dispatch-to-the-pane-you-saw). |
 | `--expect-permission-request <ID>` | Refuse (`request-gone`, exit 4) unless the pane still carries this `@agent_permission_request`: the `permission_request` of that same row. Checked inside the same lock. A usage error alongside `--all` (exit 2). |
+| `--slot <ID>` | Dispatch at most once under this id. The first fire writes a receipt into the host ledger; a retry with the same id replays that receipt, exits with its code, and sends nothing. A usage error alongside `--all` (exit 2). See [Retrying a dispatch safely](#retrying-a-dispatch-safely). |
+| `--device <NAME>` | Record which device dispatched, on the slot's receipt. Requires `--slot` and is never part of the slot's identity, so another device's retry still replays the first one's receipt. A usage error alongside `--all` (exit 2). |
 | `--yes` | Satisfy a `confirm` action non-interactively (a non-TTY without `--yes` refuses). Under `--all` it covers the whole batch. |
 | `--json` | Emit schema-1 JSON: the fire result object (the `results` envelope under `--all`), or the `--list` document. |
 | `--list` | Enumerate actions; with `--pane`, include each one's fireability verdict. |
@@ -509,6 +512,50 @@ through a message. Each refusal is exit 4 with its own `reason` token (`empty`,
 `too-long`, `control-bytes`, `sigil`), and delivers nothing. The rules and the
 manifest side of steering are in
 [Action manifest schema](action-manifest-schema.md#text-per-agent-text-transports).
+
+### Retrying a dispatch safely
+
+A caller that dispatches over a network cannot tell "the action never ran" from
+"the response never arrived". A phone that suspends mid-request, or an ssh
+connection that drops, leaves the sender with no answer and exactly one bad
+option: send it again, and maybe approve twice.
+
+`--slot <ID>` closes that. The caller invents an id for the dispatch it means to
+make, and tma dispatches at most once per id:
+
+```
+tma act approve --pane %5 --slot "approve:%5:$episode" --device phone
+# ... the response is lost; the phone reconnects and sends the same line ...
+tma act approve --pane %5 --slot "approve:%5:$episode" --device phone
+```
+
+The second invocation prints the first one's receipt, exits with the first one's
+code, and sends nothing. In `--json` it carries `"cached": true` (a fire that
+actually happened carries `"cached": false`, so a slotted caller always finds the
+key); in text it says `cached receipt for slot ...` on stderr.
+
+The id is opaque to tma and it is the whole identity, so make it name the
+dispatch you mean: the action, the pane and the episode you read off the row, not
+just the action. Reuse an id for a different action and you get the first
+dispatch's receipt back, which is what "at most once per id" means.
+
+Three rules are worth knowing before you build on it.
+
+- **A `locked` refusal (exit 5) releases the slot**, because it is the one
+  refusal that changed nothing and will pass on a retry. Every other outcome
+  writes a terminal receipt, `error` included: a broker failure cannot prove the
+  keystroke did not land, so its receipt records `fired-unknown` and a retry
+  replays it rather than sending a second time.
+- **A receipt answers for 24 hours.** Entries are evicted by size (the newest
+  4096 dispatches), never by age below that floor, because a short-lived receipt
+  turns a late retry back into a genuine second fire.
+- **The ledger is one file per host**, `0600` under tma's runtime directory,
+  shared by every process on the machine. Two devices and two connections land on
+  the same slot, which is what makes the retry idempotent rather than
+  per-connection. A record that cannot be parsed refuses (exit 1) instead of
+  guessing: `tma` names the file so you can remove it.
+
+`--dry-run` fires nothing, so it claims no slot.
 
 ### Fan-out (`--all`)
 
@@ -629,7 +676,7 @@ lives on the pane as `@agent_act_repeat`.
 | `5` | The pane action lock is held by another invocation. |
 | `3` | The act's target disappeared mid-act: tmux reports the pane gone (`can't find pane` / `no such pane`), `reason` `pane-gone`; or an API permission was answered/withdrawn between the gate and the act (a 404), `reason` `request-gone` — the pane itself is still there. |
 | `2` | Usage error (bad flag combination, selector flags alongside `--pane`, or `--all` whose selector matched no pane). |
-| `1` | A runtime failure (no tmux server, a broker error, or an ambiguous selection without `--all`). A tmux command the server refused lands here, with tmux's own stderr in the message — only a pane tmux reports as gone is exit `3`. |
+| `1` | A runtime failure (no tmux server, a broker error, or an ambiguous selection without `--all`). A tmux command the server refused lands here, with tmux's own stderr in the message — only a pane tmux reports as gone is exit `3`. A `--slot` dispatch whose ledger cannot be read is also `1`, and nothing is dispatched. |
 
 Under `--all` the code is the worst target's on the ladder above (see
 [Fan-out](#fan-out---all)).
@@ -638,6 +685,39 @@ The reserved band (`3`, `4`, `5`, `2`) is strictly pre-spawn broker verdicts. An
 exec action that did spawn passes its child's own exit code through verbatim, so
 a child code can land inside that band; scripted consumers that branch beyond
 success/failure read the `--json` `outcome` field, which is authoritative.
+
+## `tma receipts`
+
+Read the dispatch ledger [`tma act --slot`](#retrying-a-dispatch-safely) writes.
+This is how a caller learns what a dispatch ended as when it lost the response,
+without dispatching the action again to find out. It reads one local file: no
+tmux, no pane lock, no keystroke.
+
+```
+Usage: tma receipts [OPTIONS]
+```
+
+| option | meaning |
+|---|---|
+| `--slot <ID>` | Only the receipt for this slot id. |
+| `--since-ms <MS>` | Only dispatches claimed at or after this epoch-ms instant (inclusive). |
+| `--json` | Emit the schema-1 document instead of one line per receipt. |
+
+Text output is one tab-separated line per receipt, oldest first, with `-` for an
+absent field so the column count never varies:
+
+```
+at_ms   slot   pane   action   outcome   reason   exit_code   device
+```
+
+`--json` emits `{"schema":1,"receipts":[...]}`, each element carrying `slot`,
+`pane`, `action`, `device`, `at_ms`, `outcome`, `exit_code` and `reason`.
+
+A dispatch still in flight has no receipt and is not listed. Entries stay until
+the size cap evicts them, so a receipt older than the 24 h TTL can still be
+listed even though a fresh dispatch on that slot would fire again; `at_ms` is
+what says which. Exit `0` (an empty result is not an error), or `1` when the
+ledger is torn.
 
 ## `tma mute`
 

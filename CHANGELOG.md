@@ -85,6 +85,15 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   now and takes a surface argument, so one key set stays defined in one place and the remote form
   drops only `title`, agent-supplied pane text that stays local for the reason `pending_summary`
   does.
+- **A dispatch you lost the answer to can be retried without approving twice.** `tma act --slot
+  <ID>` runs at most once per id: the first fire writes a receipt into a per-host ledger under
+  tma's runtime directory, and a retry with the same id replays that receipt, exits with its code,
+  and sends nothing (`"cached": true` in `--json`). `--device <NAME>` records which device
+  dispatched without joining the id, so two devices inside one prompt still get one keystroke. The
+  new `tma receipts` reads that ledger, which is how a caller whose connection dropped mid-request
+  learns the outcome instead of sending the action again to find out. A `locked` refusal releases
+  the slot, since a retry is exactly what fixes it; every other outcome is terminal, and an `error`
+  records `fired-unknown` rather than inviting a second keystroke that may already have landed.
 
 ## [0.5.12] - 2026-09-05
 

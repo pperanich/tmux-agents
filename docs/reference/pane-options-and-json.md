@@ -280,6 +280,7 @@ The result of firing one action, a schema-1 object with this exact key set. See
 | `outcome` | string | the closed outcome token (below) |
 | `exit_code` | number | the process exit code this outcome maps to; for an `exited` outcome it is the exec child's own code |
 | `reason` | string or null | the refusal reason token when `outcome` is `refused`, which target went away when `outcome` is `vanished`, `null` otherwise |
+| `cached` | boolean | present only with `--slot`: `false` on the dispatch that fired, `true` when this is a replay of that slot's stored receipt and nothing was sent |
 
 `tma act --all --json` wraps those same objects: `{ "schema": 1, "results":
 [ ... ] }`, one element per resolved target in the order they were fired, each
@@ -302,6 +303,14 @@ of `gated`, `requires-unmet`, `wrong-agent`, `no-coverage`, `episode-changed`,
 (both exit `3`) it is instead `pane-gone` (tmux says the pane is gone) or
 `request-gone` (the API server answered `404`: the permission request was
 already answered or withdrawn, on a pane that is still there).
+
+A `--slot` dispatch carries one additive key, `cached`, and the replay's object
+is the fire's object with `cached` flipped: same `outcome`, same `reason`, same
+`exit_code`, which is the point of a receipt. An `error` replayed from the ledger
+reads `reason` `fired-unknown`, a token that appears on no live fire: the broker
+could not prove the keystroke did not land, so the ledger records the doubt
+rather than inviting a second one. The ledger and its own document are in
+[`tma receipts`](cli.md#tma-receipts).
 
 `episode-changed` and `request-gone` are the binder refusals: the fire carried
 `--expect-episode-ms` or `--expect-permission-request` and the pane, read under

@@ -557,7 +557,8 @@ pub fn note_restart(paths: &Paths, now_ms: u64) {
 
 /// Whether `pid` still exists (a signal-0 probe). Anything but ESRCH counts as alive — EPERM means
 /// the process is there and simply is not ours — so only a certain absence reads as dead.
-fn pid_is_live(pid: i32) -> bool {
+/// Shared with [`crate::slots`], which asks the same question of a claim's owner.
+pub(crate) fn pid_is_live(pid: i32) -> bool {
     let Some(p) = Pid::from_raw(pid) else {
         return false;
     };

@@ -225,6 +225,47 @@ action is fire-and-forget: its exit code says nothing about the child's outcome,
 which arrives on the completion payload instead. Use a synchronous action (the
 default) when a script needs to branch on the result.
 
+## Retry an approve safely
+
+A script that fires an action over a network has a problem a local one does not:
+when the response never arrives, it cannot tell whether the action ran. Firing
+again is a guess, and on `approve` it is the expensive kind.
+
+Give the dispatch an id and tma will run it at most once:
+
+```sh
+#!/bin/sh
+# Approve the prompt on %5, and survive losing the answer.
+episode=$(tma ls --json | jq -r '.agents[] | select(.pane == "%5") | .episode_ms')
+slot="approve:%5:$episode"
+
+tma act approve --pane %5 --slot "$slot" --device "$(hostname)" --json
+```
+
+Run that line twice and the pane receives the keystroke once. The second run
+prints the first run's receipt with `"cached": true`, exits with the first run's
+code, and sends nothing. The id is the whole identity, so build it from what
+makes this dispatch this dispatch: the action, the pane, and the episode you read
+off the row. A new episode is a new prompt, so it earns a new slot.
+
+If the connection died before you saw any answer at all, ask instead of firing:
+
+```sh
+tma receipts --slot "$slot" --json
+```
+
+An empty result means the dispatch never reached the host, so it is safe to send
+it. A receipt means it did, and tells you what it ended as.
+
+Two behaviours make this safe to build on. A `locked` refusal (exit `5`) releases
+the slot, because a lock held by another invocation is the one refusal a retry
+fixes. Everything else writes a terminal receipt, including a broker `error`,
+whose receipt records `fired-unknown`: tma cannot prove that keystroke did not
+land, so it will not send a second one on your behalf. Receipts live for 24 hours
+in a per-host ledger, so a retry from a different connection, or a different
+device, still lands on the same slot. The flags and the ledger's rules are in
+[`tma act --slot`](../reference/cli.md#retrying-a-dispatch-safely).
+
 ## Recommend `confirm` for anything that writes
 
 tma cannot inspect what your script does. Set `confirm = true` for any action
