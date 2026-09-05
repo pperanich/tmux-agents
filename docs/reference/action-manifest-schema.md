@@ -20,7 +20,7 @@ and `config.toml`.
 | `min_engine_version` | yes | version string | The minimum engine version this action needs (e.g. `"0.1"`). A manifest that needs a newer engine is rejected with an upgrade error. |
 | `name` | yes | string | The action name; must equal the filename stem. Invoked as `tma act <name>`. |
 | `label` | yes | string | The human label shown in `--list` and the menu. |
-| `kind` | yes | `keys` \| `text` \| `exec` | `keys` sends a guarded key sequence into the pane; `text` delivers one caller-supplied string literally, wrapped in manifest keys; `exec` spawns a guarded process with context env. |
+| `kind` | yes | `keys` \| `text` \| `exec` | `keys` sends a guarded key sequence into the pane; `text` delivers one caller-supplied string literally, wrapped in manifest keys; `exec` spawns a guarded process with context env. `text` was added in tma 0.5.13; a manifest using it must set `min_engine_version = "0.5.13"` or newer. |
 | `when` | no | table | The gate. Absent means the action is always fireable for its applicable agents. |
 | `agents` | no (exec) | array of string | Which agents an `exec` action applies to; empty (the default) means all agents. A `keys` action derives applicability from its `[keys]` table instead, so this is ignored for `keys`. |
 | `requires` | no | array of token | Context keys that must be non-empty for the gate to pass: `session`, `cwd`, `pid`, `title`. An unknown token is a parse error. |
