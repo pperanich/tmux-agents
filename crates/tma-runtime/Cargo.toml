@@ -16,6 +16,10 @@ tma-core = { path = "../tma-core" }
 # The tmux I/O crate: the read path, control-mode pool, and guarded write adapter the
 # cycle/capture/debug pipeline drive. Runtime never spawns tmux itself; it goes through here.
 tma-tmux = { path = "../tma-tmux" }
+# The wire protocol's type crate, for exactly one thing: the `Scope` vocabulary the device store
+# records. A pure, I/O-free leaf, so the tier story is unchanged; duplicating the four scope tokens
+# here is the drift tma-proto exists to prevent.
+tma-proto = { path = "../tma-proto" }
 serde = { workspace = true }
 toml.workspace = true
 thiserror.workspace = true

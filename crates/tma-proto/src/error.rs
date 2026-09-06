@@ -15,6 +15,9 @@ vocabulary! {
         NotFound = "not-found",
         /// The device's granted scopes do not cover this request.
         ScopeDenied = "scope-denied",
+        /// This host is already answering as many connections as it will. Each one runs its own
+        /// detection cycle, so the cap is on host cost, not on the device.
+        TooManyConnections = "too-many-connections",
         /// A well-formed request for something this host cannot do (an unreadable transcript store,
         /// an agent with no such action).
         Unsupported = "unsupported",

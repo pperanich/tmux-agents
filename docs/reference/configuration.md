@@ -62,6 +62,10 @@ osc_progress = false         # show OSC 9;4 taskbar progress while a window has 
 [act]                        # the action broker's audit record
 # log = "~/.local/state/tma/acts.jsonl"  # append one JSON line per fired action
 
+[serve]                      # `tma serve`: what one remote connection costs and how fresh it is
+reconcile_interval_ms = 2000 # stream cadence, and the freshness number the handshake quotes
+max_connections = 4          # concurrent serve connections; the next one is refused, not starved
+
 [focus]                      # attention-clear posture
 events = false               # set true to also install a pane-focus-in hook (needs `focus-events on`)
 
@@ -184,6 +188,22 @@ exists so a test or CI run can flip the fire path without writing a config file.
 | key | default | meaning |
 |---|---|---|
 | `log` | unset | Path to a JSONL file; every `tma act` fire appends one line, refusals included, naming the surface that asked. `~` is expanded and parent directories are created; the file is created `0600`. Errors are silent, never failing an action. Key set and rationale: [The act audit log](cli.md#the-act-audit-log). |
+
+## `[serve]`: remote connections
+
+| key | default | meaning |
+|---|---|---|
+| `reconcile_interval_ms` | `2000` | How often a subscription publishes, and the freshness threshold the handshake quotes to the device. Floored at 250 ms: a device that asked for zero asked for a spin loop against tmux. |
+| `max_connections` | `4` | How many `tma serve` connections this host answers at once. The next one is refused with a typed `too-many-connections` error rather than accepted and starved. |
+
+The cap exists because **every serve connection runs its own detection cycle**: a
+`capture-pane` per agent pane and its guarded stamp writes, per connection, per
+interval. Two devices plus the daemon is three concurrent detection loops, so
+connections cost tmux query throughput and nothing else bounds them. Four is
+chosen for a phone and a tablet with room for a re-dial that has not hung up yet.
+
+Pairing and scopes are not config: they live in `devices.toml` beside this file
+and are written only by [`tma device`](cli.md#tma-device).
 
 ## `[focus]`: attention-clear posture
 

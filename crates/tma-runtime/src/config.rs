@@ -33,6 +33,8 @@ pub struct Config {
     #[serde(default)]
     pub act: ActSection,
     #[serde(default)]
+    pub serve: ServeSection,
+    #[serde(default)]
     pub focus: FocusSection,
     #[serde(default)]
     pub install: InstallSection,
@@ -627,6 +629,50 @@ impl ActSection {
     }
 }
 
+// ---- [serve] -----------------------------------------------------------------------------
+
+/// `[serve]` posture: the two numbers `tma serve --stdio` needs and a device cannot set.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServeSection {
+    /// How stale a row may get before a device should re-read rather than trust it. Answered in the
+    /// hello and used as the stream's poll cadence, so the number a device is told is the number the
+    /// host actually keeps to.
+    #[serde(default = "default_reconcile_interval_ms")]
+    pub reconcile_interval_ms: u64,
+    /// How many serve connections this host answers at once. Each one runs its OWN detection cycle,
+    /// so connections cost tmux query throughput and nothing else bounds them; the fifth is refused
+    /// with a typed error rather than accepted and starved.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+}
+
+fn default_reconcile_interval_ms() -> u64 {
+    2000
+}
+
+/// Four: a phone and a tablet, with room for a re-dial that has not hung up yet.
+fn default_max_connections() -> usize {
+    4
+}
+
+impl Default for ServeSection {
+    fn default() -> Self {
+        ServeSection {
+            reconcile_interval_ms: default_reconcile_interval_ms(),
+            max_connections: default_max_connections(),
+        }
+    }
+}
+
+impl ServeSection {
+    /// The stream's poll cadence, floored at 250 ms: a device that asked for a 0 ms interval asked
+    /// for a spin loop against tmux, which is never what it meant.
+    pub fn reconcile_interval(&self) -> Duration {
+        Duration::from_millis(self.reconcile_interval_ms.max(250))
+    }
+}
+
 // ---- [focus] -----------------------------------------------------------------------------
 
 /// `[focus]` posture. The `after-select-pane` / `session-window-changed` attention-clear hooks are
@@ -1045,6 +1091,10 @@ mod tests {
         // The automatic upgrade restart is opt-OUT: an upgraded tma replaces the older daemon it
         // finds rather than leaving a stale build serving until the tmux server restarts.
         assert!(c.daemon.restart_on_upgrade);
+        // Serve defaults: the interval the hello quotes, and the connection cap ARCH §1.8 fixes.
+        assert_eq!(c.serve.reconcile_interval_ms, 2000);
+        assert_eq!(c.serve.reconcile_interval(), Duration::from_millis(2000));
+        assert_eq!(c.serve.max_connections, 4);
         // Notify + focus defaults: off / none. `on` defaults to blocked-only.
         assert!(!c.notify.from_event);
         assert!(c.notify.command.is_none());
@@ -1543,6 +1593,14 @@ mod tests {
             (
                 "focus.events".to_string(),
                 toml::Value::Boolean(c.focus.events),
+            ),
+            (
+                "serve.reconcile_interval_ms".to_string(),
+                secs(c.serve.reconcile_interval_ms),
+            ),
+            (
+                "serve.max_connections".to_string(),
+                toml::Value::Integer(c.serve.max_connections as i64),
             ),
             (
                 "install.wrapper_ref".to_string(),

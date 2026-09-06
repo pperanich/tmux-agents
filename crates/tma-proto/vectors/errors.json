@@ -47,5 +47,12 @@
     "t": "error",
     "code": "xxxxxxxxxxxx",
     "message": "a code this build has never heard of, kept verbatim"
+  },
+  {
+    "schema": 1,
+    "id": "8",
+    "t": "error",
+    "code": "too-many-connections",
+    "message": "this host already has 4 serve connections open"
   }
 ]

@@ -106,6 +106,8 @@ your other sessions exactly as an unscoped one does.
 | `wait` | Block until the target reaches one of `--until`'s states, then print the matched row(s). One pane, or a fleet (`--all` / `--count`). |
 | `act` | Fire a guarded action into an agent pane (`--all` for every pane in scope), or enumerate/menu the fireable ones (`--list` / `--menu`). |
 | `receipts` | Read the dispatch ledger `act --slot` writes: what a dispatch ended as, without dispatching to find out. |
+| `serve` | Answer one remote connection over stdio: NDJSON requests in, NDJSON responses and events out. Spawned by an ssh forced command, not typed. |
+| `device` | Pair, grant, revoke and list the devices `tma serve` will answer. The whole write side of the remote scope model. |
 | `mute` | Suppress notifications for the panes in scope, for `--for <DURATION>` or until `--clear`. |
 | `subscribe` | Stream the read path: one complete `ls --json` document per line, pushed when a daemon is present. |
 | `transcript` | Read what the agent in a pane has been writing, as normalized events, newest first, a bounded page at a time. |
@@ -726,6 +728,116 @@ the size cap evicts them, so a receipt older than the 24 h TTL can still be
 listed even though a fresh dispatch on that slot would fire again; `at_ms` is
 what says which. Exit `0` (an empty result is not an error), or `1` when the
 ledger is torn.
+
+## `tma serve`
+
+Answer one remote connection. NDJSON requests on stdin, NDJSON responses and
+events on stdout, logs on stderr; nothing but frames reaches stdout.
+
+```
+Usage: tma serve --stdio --device <ID>
+```
+
+| option | meaning |
+|---|---|
+| `--stdio` | Speak the protocol over stdin and stdout. Required today. It is a flag rather than the implicit default so a future transport can be added without changing what a bare `tma serve` means. |
+| `--device <ID>` | Which paired device this connection belongs to, as [`tma device pair`](#tma-device) recorded it. |
+
+This is spawned, not typed. One process per connection, started by an ssh forced
+command:
+
+```
+command="tma serve --stdio --device SHA256:0Mn3XQvC…",restrict ssh-ed25519 AAAAC3Nza… phone
+```
+
+sshd authenticates the caller and passes its id; **serve trusts that argument and
+nothing in the stream**. The handshake frame names a device too, and that field is
+the client's own claim, used for the host's log line and never for authorization.
+[Serve tma over ssh](../how-to/serve-over-ssh.md) is the recipe, and [the remote
+wire protocol](protocol.md) is what the two ends say to each other.
+
+There is no listening socket, no TLS and no bearer token, because the ssh channel
+is the transport. What a connection may do is read from the device store on every
+request and every publish, so `tma device revoke` reaches a connection that is
+already open: its next request is refused `scope-denied`, its event stream stops,
+and the process exits.
+
+Every serve connection runs its **own** detection cycle, so connections cost tmux
+query throughput. `[serve] max_connections` caps them, four by default, and the
+next dial is refused with a typed `too-many-connections` error rather than
+accepted and starved. `[serve] reconcile_interval_ms` is both the stream's poll
+cadence and the freshness number the handshake quotes.
+
+Exit `0` on EOF or SIGTERM, `2` when the connection is refused (an unknown or
+revoked device, or the cap), `1` when the host could not start.
+
+## `tma device`
+
+Pair, grant, revoke and list the remote devices [`tma serve`](protocol.md) will
+answer. This is the whole write side of the scope model: **grants are CLI-only**.
+No device can widen its own grants, no protocol frame asks for one, and there is
+no in-app approval prompt. A device that wants more is told to ask the person at
+the terminal.
+
+```
+Usage: tma device pair <NAME> --id <ID> [--scope <SCOPE>]... [--only]
+       tma device grant <NAME> <SCOPE>
+       tma device revoke <NAME>
+       tma device list [--json]
+```
+
+| option | meaning |
+|---|---|
+| `--id <ID>` | The opaque id the spawner will pass as `tma serve --device`. For SSH that is the key's fingerprint, which `ssh-keygen -lf <key.pub>` prints. |
+| `--scope <SCOPE>` | Grant this scope on top of the defaults, at pairing time. Repeatable. |
+| `--only` | On `pair`, grant `read` plus whatever `--scope` names, instead of the defaults. Bare, this is the watch-only device: it sees the fleet and can answer nothing. |
+| `--json` | On `list`, emit the schema-1 document instead of one line per device. |
+
+### The four scopes
+
+| scope | grants | granted at pairing |
+|---|---|---|
+| `read` | The fleet, transcripts, receipts, and cards rendered but inert. Implicit: every paired device holds it. | yes |
+| `act:answer` | `approve`, `deny`, `question_reply`, `question_reject`. | yes |
+| `act:steer` | `steer`, `steer_now`, `interrupt`, `deny_with_message`. | yes |
+| `act:always` | `approve_always`, whose affirmative answer grants every following action of its class. | **no** |
+
+`act:always` is never granted by default and never by a device asking. It takes
+`tma device grant <name> act:always`, typed on the host. In the other direction,
+`tma device pair <name> --id <id> --only` grants `read` alone: a tablet you want
+to watch with and never answer from.
+
+A dispatch naming an action outside that table is refused, `compact` and any
+action you wrote yourself included. The remote vocabulary is closed on purpose:
+a phone reaching `/compact` is exactly the control-plane access the scopes exist
+to withhold.
+
+### Pairing
+
+```
+$ ssh-keygen -lf ~/phone-key.pub
+256 SHA256:0Mn3XQvC… phone (ED25519)
+
+$ tma device pair phone --id SHA256:0Mn3XQvC…
+paired SHA256:0Mn3XQvC… as phone
+  scopes: read, act:answer, act:steer
+```
+
+The record lands in `~/.config/tma/devices.toml`, mode `0600`, written by atomic
+rename. [Serve tma over ssh](../how-to/serve-over-ssh.md) is the rest of the
+recipe: the `authorized_keys` forced command that turns a dial into a connection.
+
+### Revocation
+
+`tma device revoke <name>` removes the record. Every live serve process re-reads
+the store **per request and per publish**, so a revoked device's next request is
+refused and its event stream stops and the process exits, without waiting for it
+to hang up. Removing the `authorized_keys` line stops the next dial and nothing
+else, which is why the record is the authority and the line is the courtesy;
+`revoke` prints the line to remove.
+
+Exit `0`, `2` on usage, `3` when no device answers to that name, `1` when the
+store could not be read or written.
 
 ## `tma mute`
 

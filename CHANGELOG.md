@@ -12,6 +12,25 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Added
 
+- **`tma serve`, and the devices it will answer.** A remote client, a phone in the design this is
+  built for, opens an ssh connection whose forced command is
+  `tma serve --stdio --device <id>`. tma reads NDJSON requests on stdin and writes NDJSON responses
+  and events on stdout, one process per connection, with no listening socket, no TLS and no bearer
+  token, because sshd already authenticated the caller and passes its id. What that connection may
+  do comes from a new verb, `tma device`, which pairs a device, widens its grants and revokes it:
+  `read`, answering a prompt and steering are granted at pairing, `approve_always` never is, and
+  there is no in-app path to a wider scope because there is no protocol frame that asks for one.
+  Three properties are worth naming, because each is a thing it would be easy to do differently and
+  regret. A fleet row leaving the machine is the `tma ls --json` row minus `title`, built by the
+  shipped writer rather than a second one, so a pane's agent-supplied text cannot reach the wire by
+  anyone forgetting a redaction pass. A dispatch passes the scope, then the slot ledger, then the
+  binder, in that order, and none of the three stands in for another: the scope says this device may
+  approve, the slot says this approval was not already sent, and the binder says the thing you
+  approved is still on screen. And the device store is re-read on every request and every publish,
+  so revoking a device stops a connection that is already open rather than only its next dial.
+  `card`, `window` and `event` parse and answer `unsupported` until the transcript and card surfaces
+  land beside them. See [Serve tma over ssh](docs/how-to/serve-over-ssh.md).
+
 - **A wire protocol crate, `tma-proto`: internal plumbing, with nothing yet speaking it.** The
   frames a remote device and a serving `tma` will exchange, defined once so the serve loop, when it
   lands, has a single definition to build against rather than one on each side of the pipe. It is

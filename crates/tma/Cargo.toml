@@ -33,11 +33,21 @@ tma-daemon = { path = "../tma-daemon" }
 # The display crate: the picker, jump, and ls/status surfaces the bin dispatches. The
 # ratatui/crossterm/nucleo UI stack moved here with it, so the bin no longer names them.
 tma-ui = { path = "../tma-ui" }
+# The wire protocol: the frames `tma serve` speaks and the scope vocabulary `tma device` grants.
+# Types only, so this edge adds a codec and no behaviour.
+tma-proto = { path = "../tma-proto" }
+# The JSON codec the wire needs. `tma serve` renders a fleet row through the shipped protocol row
+# writer and reads it back as a typed frame, which is what keeps `FleetRow` from drifting away from
+# `RowSurface::Protocol`; the hand-rolled writer has no reader. Already in the tree via tma-proto.
+serde_json = "1"
 clap.workspace = true
 # `tma completions <shell>` writes the script for one shell to stdout; the release tarball and the
 # nix package generate theirs by running it.
 clap_complete.workspace = true
 thiserror.workspace = true
+# `tma serve` reaps its own SIGTERM on a handler thread: `BufRead` retries on EINTR, so a flag
+# checked between reads would never be reached. signal-hook owns handler registration.
+signal-hook.workspace = true
 # `tma debug redact` compiles user-supplied `--pattern` regexes to redact a capture.
 # regex is already in the build graph via tma-core; declaring it here makes it a direct
 # dependency of the redaction path.
@@ -62,11 +72,8 @@ similar.workspace = true
 [dev-dependencies]
 # Shared scratch-socket harness + daemon flock gate for the integration tests.
 tma-test-support = { path = "../tma-test-support" }
-# The wire protocol, for the host-to-proto vocabulary drift guard (`tests/proto_drift.rs`). The bin
-# does not speak it yet; the serve subcommand is what will promote this to a dependency.
-tma-proto = { path = "../tma-proto" }
-# Reading the drift guard's own JSON back as keys and tokens.
-serde_json = "1"
+# The scratch harness for the serve suite drives NDJSON frames; the drift guard reads its own JSON
+# back as keys and tokens. Both use the dependency declared above.
 # `tma transcript`'s opencode case needs a store to read, and that store is a database. The suite
 # builds one in its scratch tree from the committed schema; already in the build graph above.
 rusqlite.workspace = true
