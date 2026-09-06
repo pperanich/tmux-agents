@@ -10,6 +10,12 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Changed
+
+- **Comments and the protocol reference explain themselves instead of citing a planning identifier.**
+  Rustdoc, test comments, one reference page and one test name pointed at entries of an internal planning
+  corpus by id; each now states the rule or fact it meant. Nothing behaves differently.
+
 ## [0.5.14] - 2026-09-05
 
 ### Added
