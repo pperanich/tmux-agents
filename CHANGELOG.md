@@ -52,6 +52,21 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   `config ~/.codex/config.toml has no tma notify entry`. Both now read the chain and report
   `notify chained through <program>`; `install-hooks codex` leaves a working chain byte-identical,
   and refuses a stale one with the hand edit named rather than rewriting another program's argv.
+- **A pane whose foreground was briefly not the agent kept a stale hook `working` while the blocked
+  prompt sat on its screen.** 0.5.10 gave a foreground-capped capture its own follow-up look,
+  because the cap answers from `#{pane_current_command}` rather than the screen and so stops being
+  true with no output at all, and the on-demand tier only ever looks at a pane its output woke it
+  for. That look was scheduled off the cap's `unknown` verdict, and the cap has a second one: when
+  the pane already carries a hook claim and the agent's process is still alive, the fold holds that
+  claim instead of publishing `unknown`. So the case that needed the second look most, a stale hook
+  `working` over blocker chrome nobody had read yet, was the one case that got none, and the pane
+  waited out the reconciliation sweep (up to 45 seconds) reading `working`. The look is now
+  scheduled off `foreground_is_agent`, the process fact the cap turns on, so both of its verdicts
+  owe one; the budget is unchanged (three per episode, `recheck_looks` in the daemon's
+  `--status-file`). This is a product defect, not a test-harness timing assumption: it is also what
+  made `contradiction_capture_flips_stale_hook_working` fail on the macOS release run while passing
+  on the pull request minutes earlier, and the acceptance now counts a recovering look the way the
+  hookless one already did.
 
 ## [0.5.13] - 2026-09-05
 
