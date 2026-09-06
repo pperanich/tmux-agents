@@ -656,8 +656,12 @@ fn a_subscription_streams_edges_and_a_resumed_one_replays_nothing() {
     let mut first = ServeHarness::open(&s, "SHA256:phone");
     first.hello("SHA256:phone");
     assert_eq!(first.ask(&subscribe_request("sub"))["t"], "ack");
+    // The stream takes its baseline on its own first cycle, after the ack; a pane created before
+    // that cycle lands inside the baseline and never appears. Three intervals is comfortably one.
+    std::thread::sleep(Duration::from_millis(750));
 
-    // A pane that appears after the baseline is an edge with an open `from` end.
+    // A pane that appears after the baseline is an edge with an open `from` end. The fixture pane
+    // may flip on its own (a hand-stamped `blocked` over a shell prompt), so only `second`'s edge counts.
     let out = s.tmux(&[
         "new-window",
         "-d",
@@ -675,7 +679,7 @@ fn a_subscription_streams_edges_and_a_resumed_one_replays_nothing() {
         let frame = first
             .next_within(DEADLINE)
             .unwrap_or_else(|| panic!("no edge arrived\nserve log:\n{}", first.log()));
-        if frame["t"] == "edge" {
+        if frame["t"] == "edge" && frame["pane"] == second {
             break frame;
         }
     };
@@ -687,7 +691,6 @@ fn a_subscription_streams_edges_and_a_resumed_one_replays_nothing() {
         edge["from"], "",
         "a pane that appeared has an open from end"
     );
-    assert_eq!(edge["pane"], second);
     drop(first);
 
     // The re-dial: converge with a snapshot, then subscribe again. Nothing is re-delivered.
