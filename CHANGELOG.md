@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.5.14] - 2026-09-05
+
 ### Added
 
 - **`tma serve`, and the devices it will answer.** A remote client, a phone in the design this is
@@ -1201,7 +1203,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.13...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.14...HEAD
+[0.5.14]: https://github.com/pperanich/tmux-agents/compare/v0.5.13...v0.5.14
 [0.5.13]: https://github.com/pperanich/tmux-agents/compare/v0.5.12...v0.5.13
 [0.5.12]: https://github.com/pperanich/tmux-agents/compare/v0.5.11...v0.5.12
 [0.5.11]: https://github.com/pperanich/tmux-agents/compare/v0.5.10...v0.5.11
