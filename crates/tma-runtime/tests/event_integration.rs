@@ -986,10 +986,10 @@ fn the_hook_lane_answers_a_permission_request_over_tma_act() {
     );
 }
 
-/// The lane off (zero config) is the shipped behaviour, unchanged: the same payload stamps the
-/// same pane, returns immediately, and prints nothing at all.
+/// `claude_reply_lane = false`, the opt-out: the same payload stamps the same pane, returns
+/// immediately, and prints nothing at all, which is what every release before the lane did.
 #[test]
-fn without_the_lane_a_permission_request_stamps_and_returns_silently() {
+fn with_the_lane_turned_off_a_permission_request_stamps_and_returns_silently() {
     if !tma_test_support::tmux_available() {
         eprintln!("skipping: tmux not installed");
         return;
@@ -998,6 +998,8 @@ fn without_the_lane_a_permission_request_stamps_and_returns_silently() {
 
     let s = Scratch::new("hook_lane_off");
     let pane = s.new_pane();
+    let config = s.workdir.join("lane-off.toml");
+    std::fs::write(&config, "[hooks]\nclaude_reply_lane = false\n").unwrap();
     let payload = format!(
         r#"{{"session_id":"{SESSION}","hook_event_name":"PermissionRequest",
             "tool_name":"Bash","tool_input":{{"command":"true"}}}}"#
@@ -1010,7 +1012,7 @@ fn without_the_lane_a_permission_request_stamps_and_returns_silently() {
             .env("TMUX_PANE", &pane)
             .env("TMA_HOOK_SOCKET", &s.socket)
             .env("TMA_BIN", common::tma_bin())
-            .env("TMA_CONFIG", common::empty_config_path())
+            .env("TMA_CONFIG", &config)
             .env("XDG_RUNTIME_DIR", &s.workdir)
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -1033,7 +1035,7 @@ fn without_the_lane_a_permission_request_stamps_and_returns_silently() {
     assert_eq!(s.pane_option(&pane, "@agent_detail"), "permission");
     assert!(
         s.pane_option(&pane, "@agent_permission_request").is_empty(),
-        "nothing is minted with the lane off"
+        "nothing is minted with the lane turned off"
     );
     assert!(!s.workdir.join("tma/requests").exists(), "no record parked");
 }

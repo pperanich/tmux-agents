@@ -25,6 +25,15 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   change to the wire shows up as a diff in a JSON file that a reviewer reads, instead of as nothing
   at all. See [The remote wire protocol](docs/reference/protocol.md).
 
+### Changed
+
+- **The claude hook reply lane is on by default.** `[hooks] claude_reply_lane` no longer has to be
+  named: a `PermissionRequest` hook now holds for 25 seconds unless you set the key to `false`, so
+  installing claude's hooks is the whole setup for answering a prompt without a keystroke. The hold
+  is free to the person at the keyboard, which is why it can default on: on Claude Code 2.1.261 a
+  `1` pressed half a second into a hold resolved the call in 50 ms with the hook still parked. What
+  it costs is one sleeping `tma event` per hand-answered prompt, for up to `hold_ms`.
+
 ## [0.5.13] - 2026-09-05
 
 ### Added

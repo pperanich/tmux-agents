@@ -1,14 +1,17 @@
 # tmux-agents
 
-`tma` is an agent state monitor for tmux. It detects coding agents running in
-tmux panes, shows which are blocked, working, or idle, and jumps you to the one
-that needs you. State lives in tmux pane options, so any `tmux show-options` or
-`#{@agent_state}` format string reads it directly and `tma ls --json` gives a
-stable structured feed.
+`tma` is a self-hosted companion for the coding agents you run in tmux. It finds
+them in your panes, shows which are blocked, working, or idle, takes you to the
+one that needs you, and answers the prompt it is stopped on. Six agents are
+covered by the same commands. State lives in tmux pane options, so any `tmux
+show-options` or `#{@agent_state}` format string reads it directly and `tma ls
+--json` gives a stable structured feed, and nothing sits between you and your
+agents but your own machine.
 
 If you are sizing `tma` up rather than using it yet, read [Why
 tma](explanation/why-tma.md) first: the problem, the two other shapes this tool
-could have taken, and the one choice everything else follows from.
+could have taken, what being cross-agent and self-hosted buys, and the one choice
+everything else follows from.
 
 This site is a [Diátaxis](https://diataxis.fr/) tree, organized in four parts:
 
