@@ -24,7 +24,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 use tma_proto::{
-    Binder, Dispatch, Hello, ReceiptsRequest, Request, RequestFrame, SnapshotRequest, Subscribe,
+    Binder, Budget, CardRequest, Cursor, Dispatch, EventRequest, Hello, ReceiptsRequest, Request,
+    RequestFrame, SnapshotRequest, Subscribe, WindowRequest,
 };
 use tma_test_support::{wait_capture_contains, Scratch, POLL_CEILING, SHELL_PROMPT};
 
@@ -321,6 +322,94 @@ fn subscribe_request(id: &str) -> RequestFrame {
     )
 }
 
+fn card_request(id: &str, pane: &str) -> RequestFrame {
+    RequestFrame::new(
+        id,
+        Request::Card(CardRequest {
+            pane: pane.to_string(),
+        }),
+    )
+}
+
+fn window_request(id: &str, pane: &str, last: u32, before: Option<Cursor>) -> RequestFrame {
+    RequestFrame::new(
+        id,
+        Request::Window(WindowRequest {
+            pane: pane.to_string(),
+            last: Some(last),
+            before,
+            budget: Budget::default(),
+        }),
+    )
+}
+
+fn event_request(id: &str, pane: &str, cursor: Cursor) -> RequestFrame {
+    RequestFrame::new(
+        id,
+        Request::Event(EventRequest {
+            pane: pane.to_string(),
+            cursor,
+        }),
+    )
+}
+
+/// The redacted E4 `PermissionRequest` payload claude 2.1.261 delivers, as the hook receives it.
+/// What matters here is what it does NOT carry: no rendered label, so a card built from a record
+/// written off it cannot be quoting a screen.
+const HOOK_PAYLOAD: &str = r#"{
+  "session_id": "7c74ac42-d330-4c0f-a7b1-ba9a918ba98e",
+  "prompt_id": "20edf0d8-a22b-43de-94ab-4ecce0c78d11",
+  "hook_event_name": "PermissionRequest",
+  "tool_name": "Bash",
+  "tool_input": {"command": "touch marker-leg1 && echo leg1-done"}
+}"#;
+
+/// Park a hook-lane request record under the SERVE process's runtime dir, where its
+/// `PermissionRequest` hook would have left one. Rendered by the record's own writer, so the card
+/// reads back exactly the bytes the lane produces; placed by hand because `hook_lane::write_request`
+/// resolves the directory from its own process's `$XDG_RUNTIME_DIR`, and this process's is not the
+/// serve process's.
+fn park_hook_record(s: &Scratch, pane: &str, id: &str) -> PathBuf {
+    let dir = runtime_dir(s).join("requests");
+    std::fs::create_dir_all(&dir).expect("create the requests dir");
+    let now = tma_runtime::now_ms();
+    let record =
+        tma_runtime::hook_lane::RequestRecord::from_payload(id, pane, HOOK_PAYLOAD, now, now);
+    let path = dir.join(format!("{id}.json"));
+    std::fs::write(&path, record.render()).expect("park the request record");
+    path
+}
+
+/// Copy the committed claude corpus file into the scratch tree and stamp it onto `pane`, the way
+/// claude's own hook payload does. `lines` truncates it: the first two lines end on a tool call
+/// nothing resolved, which is the shape A-273 is about.
+fn stamp_transcript(s: &Scratch, pane: &str, name: &str, lines: Option<usize>) -> PathBuf {
+    let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../tma-transcript/fixtures/stores/claude/2.1.236/claude-2.1.236-session.jsonl");
+    let text = std::fs::read_to_string(&fixture).expect("read the committed claude fixture");
+    let body = match lines {
+        Some(n) => text.lines().take(n).fold(String::new(), |mut acc, line| {
+            acc.push_str(line);
+            acc.push('\n');
+            acc
+        }),
+        None => text,
+    };
+    let dest = s.workdir.join(name);
+    std::fs::write(&dest, body).expect("write the scratch transcript");
+    s.set_opt(pane, "@agent_transcript", &dest.display().to_string());
+    dest
+}
+
+fn kinds(frame: &Value) -> Vec<String> {
+    frame["events"]
+        .as_array()
+        .expect("an events array")
+        .iter()
+        .map(|e| e["kind"].as_str().unwrap_or_default().to_string())
+        .collect()
+}
+
 // ---- the handshake ------------------------------------------------------------------------
 
 /// The connection is refused before anything is read, so an unpaired caller never gets far enough
@@ -475,6 +564,7 @@ fn no_frame_of_a_whole_session_carries_a_pane_title() {
     s.write_config("[serve]\nreconcile_interval_ms = 250\n");
     let pane = s.new_pane();
     stamp_blocked_claude(&s, &pane);
+    stamp_transcript(&s, &pane, "session.jsonl", None);
     let nonce = "zqxjkvbnonce7713";
     let title = format!("\u{202e}{nonce}");
     assert!(s
@@ -513,6 +603,20 @@ fn no_frame_of_a_whole_session_carries_a_pane_title() {
         "4",
         Request::Receipts(ReceiptsRequest::default()),
     ));
+    // The card and transcript arms too: each answers about a pane whose title is the thing under
+    // test, and a per-frame redaction check would miss whichever frame nobody thought of.
+    let card = h.ask(&card_request("5", &pane));
+    assert_eq!(card["t"], "card", "{card}\nserve log:\n{}", h.log());
+    let window = h.ask(&window_request("6", &pane, 20, None));
+    assert_eq!(window["t"], "window", "{window}");
+    let cursor = window["events"].as_array().expect("an events array")[0]["cursor"]
+        .as_str()
+        .expect("a cursor")
+        .to_string();
+    assert_eq!(
+        h.ask(&event_request("7", &pane, Cursor(cursor)))["t"],
+        "event"
+    );
     h.drain();
 
     let transcript = h.transcript();
@@ -610,6 +714,311 @@ fn a_subscription_streams_edges_and_a_resumed_one_replays_nothing() {
         replayed.is_none(),
         "the resumed stream re-sent a transition the first one delivered: {replayed:?}"
     );
+}
+
+// ---- cards --------------------------------------------------------------------------------
+
+/// A-525 over the wire. The record on disk is the whole difference between the two lanes: with one
+/// parked the card is structured and `exact`, and removing it degrades the SAME pane to the screen
+/// lane and `failed`, which is what tells the app to open the pane on the host instead.
+#[test]
+fn a_parked_hook_record_is_what_makes_the_card_structured() {
+    if !have_tmux() {
+        return;
+    }
+    let s = scratch("serve_card_hook");
+    let pane = s.new_pane();
+    stamp_blocked_claude(&s, &pane);
+    let request_id = "d41d8cd98f00b204";
+    s.set_opt(&pane, "@agent_permission_request", request_id);
+    let record = park_hook_record(&s, &pane, request_id);
+    pair(&s, "phone", "SHA256:phone", &[], false);
+
+    let mut h = ServeHarness::open(&s, "SHA256:phone");
+    h.hello("SHA256:phone");
+    let hook = h.ask(&card_request("1", &pane));
+    assert_eq!(hook["t"], "card", "{hook}\nserve log:\n{}", h.log());
+    assert_eq!(hook["card"], "permission", "{hook}");
+    assert_eq!(hook["lane"], "hook");
+    assert_eq!(hook["extraction"], "exact");
+    assert_eq!(hook["pane"], pane);
+    assert_eq!(hook["agent"], "claude");
+
+    let options = hook["options"].as_array().expect("an options array");
+    assert_eq!(options.len(), 2, "{hook}");
+    assert_eq!(options[0]["kind"], "allow-once");
+    assert_eq!(options[1]["kind"], "reject-once");
+    // The payload's own object, not a label anybody rendered.
+    assert_eq!(hook["pending_call"]["tool"], "Bash");
+    assert_eq!(
+        hook["pending_call"]["input"]["command"], "touch marker-leg1 && echo leg1-done",
+        "{hook}"
+    );
+    assert_eq!(hook["binder"]["expect_permission_request"], request_id);
+    assert!(
+        hook["binder"]["expect_episode_ms"].as_u64().unwrap_or(0) > 0,
+        "the card quotes an episode a dispatch can bind to: {hook}"
+    );
+
+    // The hold expired, or the lane is off: the same pane, the same stamps, no record.
+    std::fs::remove_file(&record).expect("unpark the record");
+    let screen = h.ask(&card_request("2", &pane));
+    assert_eq!(screen["lane"], "screen", "{screen}");
+    assert_eq!(screen["extraction"], "failed");
+    let names: Vec<&str> = screen["options"]
+        .as_array()
+        .expect("an options array")
+        .iter()
+        .map(|o| o["name"].as_str().unwrap_or_default())
+        .collect();
+    assert_eq!(names, vec!["Approve", "Deny"], "the bundled labels");
+    assert!(
+        screen["options"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|o| o["option_id"].is_null()),
+        "no index was read, so none is offered as a keycap: {screen}"
+    );
+}
+
+/// A-207 to A-210. Every blocked detail but `permission` and a fetched `question` is something to
+/// read: the variant carries a headline and has no field an approve control could be put in.
+#[test]
+fn a_plan_dialog_is_informational_and_offers_nothing() {
+    if !have_tmux() {
+        return;
+    }
+    let s = scratch("serve_card_plan");
+    let pane = s.new_pane();
+    stamp_blocked_claude(&s, &pane);
+    s.set_opt(&pane, "@agent_detail", "plan");
+    pair(&s, "phone", "SHA256:phone", &[], false);
+
+    let mut h = ServeHarness::open(&s, "SHA256:phone");
+    h.hello("SHA256:phone");
+    let card = h.ask(&card_request("1", &pane));
+    assert_eq!(card["t"], "card", "{card}\nserve log:\n{}", h.log());
+    assert_eq!(card["card"], "informational", "{card}");
+    assert_eq!(card["detail"], "plan");
+    assert_eq!(card["headline"], "Plan approval");
+    assert!(card["options"].is_null(), "nothing to fire: {card}");
+}
+
+/// A-273 over the wire, in both directions. The transcript ends on a tool call nothing resolved,
+/// which is what a card reads to say what a pane is blocked ON; a pane the cycle calls `working`
+/// still has no card, because blocked-ness comes from detection and from nowhere else.
+#[test]
+fn a_dangling_call_names_a_blocked_panes_prompt_and_never_makes_a_working_one_asked() {
+    if !have_tmux() {
+        return;
+    }
+    let s = scratch("serve_card_dangling");
+    let pane = s.new_pane();
+    stamp_blocked_claude(&s, &pane);
+    stamp_transcript(&s, &pane, "dangling.jsonl", Some(2));
+    pair(&s, "phone", "SHA256:phone", &[], false);
+
+    let mut h = ServeHarness::open(&s, "SHA256:phone");
+    h.hello("SHA256:phone");
+    // Blocked: the tail is read, and the unresolved call is what the prompt is about.
+    let blocked = h.ask(&card_request("1", &pane));
+    assert_eq!(blocked["card"], "permission", "{blocked}");
+    assert_eq!(
+        blocked["pending_call"]["call_id"],
+        "toolu_call01",
+        "the transcript tail supplied the call: {blocked}\nserve log:\n{}",
+        h.log()
+    );
+    assert_eq!(blocked["pending_call"]["tool"], "Bash");
+
+    // The same pane, the same dangling call, working: an in-flight call is a slow tool as often as
+    // a prompt, so it never makes a card.
+    s.set_opt(&pane, "@agent_state", "working");
+    s.set_opt(&pane, "@agent_detail", "");
+    let working = h.ask(&card_request("2", &pane));
+    assert_eq!(working["t"], "card", "{working}");
+    assert_eq!(working["card"], "none", "{working}");
+}
+
+/// A pane this host does not have is a typed refusal on every arm that takes one, not an empty card
+/// and not a dropped connection.
+#[test]
+fn a_card_or_window_for_an_unknown_pane_is_a_typed_error() {
+    if !have_tmux() {
+        return;
+    }
+    let s = scratch("serve_card_unknown");
+    s.new_pane();
+    pair(&s, "phone", "SHA256:phone", &[], false);
+
+    let mut h = ServeHarness::open(&s, "SHA256:phone");
+    h.hello("SHA256:phone");
+    for (n, frame) in [
+        card_request("1", "%9999"),
+        window_request("2", "%9999", 10, None),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let refusal = h.ask(&frame);
+        assert_eq!(refusal["t"], "error", "{n}: {refusal}");
+        assert_eq!(refusal["code"], "not-found", "{n}: {refusal}");
+    }
+}
+
+// ---- transcript ---------------------------------------------------------------------------
+
+/// A window is a page of headers, newest first, and `older` walks back to the head of the file.
+/// The transcript is the committed claude corpus, stamped the way claude's own hook payload stamps
+/// it, so the page a device sees is measured against the same fixture the reader is pinned on.
+#[test]
+fn a_window_pages_newest_first_back_to_the_head() {
+    if !have_tmux() {
+        return;
+    }
+    let s = scratch("serve_window");
+    let pane = s.new_pane();
+    stamp_blocked_claude(&s, &pane);
+    stamp_transcript(&s, &pane, "session.jsonl", None);
+    pair(&s, "phone", "SHA256:phone", &[], false);
+
+    let mut h = ServeHarness::open(&s, "SHA256:phone");
+    h.hello("SHA256:phone");
+    let first = h.ask(&window_request("1", &pane, 4, None));
+    assert_eq!(first["t"], "window", "{first}\nserve log:\n{}", h.log());
+    assert_eq!(first["pane"], pane);
+    assert_eq!(first["agent"], "claude");
+    assert_eq!(first["unknown"], 0, "every record of the corpus maps");
+    assert_eq!(
+        first["session"]["version"], "2.1.236",
+        "the header rides the first page: {first}"
+    );
+    assert_eq!(
+        kinds(&first),
+        vec!["user_message", "compaction", "turn_boundary", "bookkeeping"],
+        "newest first: {first}"
+    );
+    assert!(
+        first["events"].as_array().unwrap()[0]["body"].is_null(),
+        "a window read carries no bodies: {first}"
+    );
+
+    // Page back to the head. The corpus is twelve events over eleven records, so paging crosses a
+    // record that carries more than one and must not skip its earlier halves.
+    let mut seen = kinds(&first);
+    let mut older = first["older"].as_str().map(|c| Cursor(c.to_string()));
+    let mut page = 2;
+    while let Some(cursor) = older.clone() {
+        let next = h.ask(&window_request(&page.to_string(), &pane, 4, Some(cursor)));
+        assert_eq!(next["t"], "window", "{next}");
+        assert!(
+            next["session"].is_null(),
+            "the header rode page one: {next}"
+        );
+        seen.extend(kinds(&next));
+        older = next["older"].as_str().map(|c| Cursor(c.to_string()));
+        page += 1;
+        assert!(page < 10, "paging never reached the head: {seen:?}");
+    }
+    assert_eq!(
+        seen.len(),
+        12,
+        "the whole corpus, one page at a time: {seen:?}"
+    );
+    assert_eq!(
+        seen.last().map(String::as_str),
+        Some("user_message"),
+        "the head of the file is the oldest event: {seen:?}"
+    );
+}
+
+/// An `event` request fetches exactly one cursor's body, which is the whole reason a window carries
+/// none: 200 headers cost kilobytes and the reader asks for the one message it wants to read.
+#[test]
+fn an_event_request_returns_one_body() {
+    if !have_tmux() {
+        return;
+    }
+    let s = scratch("serve_event");
+    let pane = s.new_pane();
+    stamp_blocked_claude(&s, &pane);
+    stamp_transcript(&s, &pane, "session.jsonl", None);
+    pair(&s, "phone", "SHA256:phone", &[], false);
+
+    let mut h = ServeHarness::open(&s, "SHA256:phone");
+    h.hello("SHA256:phone");
+    let window = h.ask(&window_request("1", &pane, 20, None));
+    let call = window["events"]
+        .as_array()
+        .expect("an events array")
+        .iter()
+        .find(|e| e["kind"] == "tool_call")
+        .unwrap_or_else(|| panic!("the corpus has a tool call: {window}"));
+    let cursor = call["cursor"].as_str().expect("a cursor").to_string();
+
+    let event = h.ask(&event_request("2", &pane, Cursor(cursor.clone())));
+    assert_eq!(event["t"], "event", "{event}\nserve log:\n{}", h.log());
+    assert_eq!(event["cursor"], cursor, "the event answers its own cursor");
+    assert_eq!(event["kind"], "tool_call");
+    assert_eq!(event["body"]["kind"], "json");
+    assert!(
+        event["body"]["text"]
+            .as_str()
+            .is_some_and(|t| !t.is_empty()),
+        "an event read populates the body: {event}"
+    );
+
+    // A cursor this host did not mint earns its own code, whose one right answer is to re-anchor.
+    let forged = h.ask(&event_request("3", &pane, Cursor("t1.2.3.4.5".to_string())));
+    assert_eq!(forged["t"], "error", "{forged}");
+    assert_eq!(forged["code"], "cursor-invalid", "{forged}");
+}
+
+/// R20. A store the reader will not serve is a typed refusal carrying the reader's own sentence,
+/// never an empty window: "nothing happened" is a different fact from "this cannot be shown".
+#[test]
+fn an_unreadable_store_is_a_typed_refusal_rather_than_an_empty_window() {
+    if !have_tmux() {
+        return;
+    }
+    let s = scratch("serve_window_store");
+    let pane = s.new_pane();
+    s.set_opt(&pane, "@agent_name", "cursor");
+    s.set_opt(&pane, "@agent_state", "working");
+    s.set_opt(&pane, "@agent_session", "sess01");
+    let out = s.tmux(&[
+        "new-window",
+        "-d",
+        "-t",
+        "s1",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "exec sleep 100000",
+    ]);
+    let bare = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    assert!(bare.starts_with('%'), "got {bare:?}");
+    s.set_opt(&bare, "@agent_name", "claude");
+    s.set_opt(&bare, "@agent_state", "idle");
+    pair(&s, "phone", "SHA256:phone", &[], false);
+
+    let mut h = ServeHarness::open(&s, "SHA256:phone");
+    h.hello("SHA256:phone");
+    let refusal = h.ask(&window_request("1", &pane, 10, None));
+    assert_eq!(refusal["t"], "error", "{refusal}\nserve log:\n{}", h.log());
+    assert_eq!(refusal["code"], "unsupported", "{refusal}");
+    assert!(
+        refusal["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("holes")),
+        "the refusal says why this store is not served: {refusal}"
+    );
+
+    // A claude pane with nothing to read is a different refusal: there is no such transcript.
+    let missing = h.ask(&window_request("2", &bare, 10, None));
+    assert_eq!(missing["t"], "error", "{missing}");
+    assert_eq!(missing["code"], "not-found", "{missing}");
 }
 
 // ---- dispatch -----------------------------------------------------------------------------
@@ -1088,31 +1497,48 @@ fn markers(s: &Scratch) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// The three request types this build parses and does not serve answer with the protocol's own
-/// word for it, so an app greys the control out instead of waiting on a frame that never arrives.
+/// Every arm answers the id it was asked under, on the same connection and in order. Written as
+/// hand-rolled lines rather than encoded frames, because a device's `card`/`window`/`event` frames
+/// carry only the fields it has: the defaults have to hold on the host side too.
 #[test]
-fn the_unwired_requests_answer_with_a_typed_refusal() {
+fn every_request_type_answers_its_own_correlation_id() {
     if !have_tmux() {
         return;
     }
-    let s = scratch("serve_unwired");
+    let s = scratch("serve_ids");
+    let pane = s.new_pane();
+    stamp_blocked_claude(&s, &pane);
+    stamp_transcript(&s, &pane, "session.jsonl", None);
     pair(&s, "phone", "SHA256:phone", &[], false);
     let mut h = ServeHarness::open(&s, "SHA256:phone");
     h.hello("SHA256:phone");
 
-    for (id, line) in [
-        ("1", r#"{"schema":1,"id":"1","t":"card","pane":"%1"}"#),
-        ("2", r#"{"schema":1,"id":"2","t":"window","pane":"%1"}"#),
+    for (id, t, line) in [
+        (
+            "1",
+            "card",
+            format!(r#"{{"schema":1,"id":"1","t":"card","pane":"{pane}"}}"#),
+        ),
+        (
+            "2",
+            "window",
+            format!(r#"{{"schema":1,"id":"2","t":"window","pane":"{pane}"}}"#),
+        ),
         (
             "3",
-            r#"{"schema":1,"id":"3","t":"event","pane":"%1","cursor":"c"}"#,
+            "error",
+            format!(r#"{{"schema":1,"id":"3","t":"event","pane":"{pane}","cursor":"c"}}"#),
         ),
     ] {
-        h.write_line(line);
-        let refusal = h.next();
-        assert_eq!(refusal["t"], "error", "{line} -> {refusal}");
-        assert_eq!(refusal["code"], "unsupported", "{refusal}");
-        assert_eq!(refusal["id"], id);
+        h.write_line(&line);
+        let answer = h.next();
+        assert_eq!(answer["id"], id, "{line} -> {answer}");
+        assert_eq!(
+            answer["t"],
+            t,
+            "{line} -> {answer}\nserve log:\n{}",
+            h.log()
+        );
     }
 }
 

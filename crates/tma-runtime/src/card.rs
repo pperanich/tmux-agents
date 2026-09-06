@@ -15,6 +15,8 @@
 //! not exist in this release for any agent, so the app degrades to open-on-host rather than
 //! drawing a control over a label nobody read.
 
+use std::time::Duration;
+
 use serde_json::Value;
 
 use tma_core::AgentState;
@@ -30,6 +32,14 @@ use crate::hook_lane::RequestRecord;
 /// than read, because on the hook lane there is no dialog text to read (ARCHITECTURE §1.9).
 const HOOK_ALLOW_LABEL: &str = "Yes";
 const HOOK_REJECT_LABEL: &str = "No";
+
+/// How long [`PendingQuestion::fetch`] waits on the agent's own server. Short on purpose: the serve
+/// loop answers one request at a time, so a hung localhost server would stall every other request,
+/// and a card with no question set degrades to informational rather than to a frame that never comes.
+pub const QUESTION_TIMEOUT: Duration = Duration::from_millis(750);
+
+/// The endpoint's pending-question path. A v1 path, like every other op on this lane.
+const QUESTION_PATH: &str = "/question";
 
 /// Everything the serve loop can gather for one pane, and nothing it would have to go to tmux or
 /// to a manifest file for. Assembled once per `card` request; [`build_card`] is pure over it, which
@@ -99,6 +109,19 @@ impl PendingQuestion {
                 _ => Some(question),
             }
         })
+    }
+
+    /// Ask `endpoint` for `session`'s pending question. The one I/O in this module, kept beside the
+    /// parse it feeds rather than in the loop that calls it: [`build_card`] stays pure over what
+    /// comes back, and every failure (unreachable, slow, a body this cannot read) is the same
+    /// `None`, because a question the host could not fetch is a card with nothing to answer.
+    pub fn fetch(
+        endpoint: &str,
+        session: Option<&str>,
+        timeout: Duration,
+    ) -> Option<PendingQuestion> {
+        let body = crate::http::get_text(endpoint, QUESTION_PATH, timeout).ok()?;
+        PendingQuestion::from_json(&body, session)
     }
 
     fn one(entry: &Value) -> Option<PendingQuestion> {
@@ -663,6 +686,44 @@ mod tests {
             build_card(&blocked("opencode", "question")),
             Card::Informational { .. }
         ));
+    }
+
+    /// The fetch is the parse plus one bounded GET, and every way it can fail is the same `None`:
+    /// a card the host could not populate must degrade, never raise.
+    #[test]
+    fn a_fetch_reads_the_endpoints_question_and_swallows_every_failure() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a scratch port");
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let served = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("one connection");
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let _ = stream.write_all(
+                format!(
+                    "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{OC_QUESTION}",
+                    OC_QUESTION.len()
+                )
+                .as_bytes(),
+            );
+            String::from_utf8_lossy(&buf).to_string()
+        });
+        let fetched = PendingQuestion::fetch(&base, Some("ses_1122"), Duration::from_secs(2))
+            .expect("the server holds this session's question");
+        assert_eq!(fetched.id, "que_7f3a");
+        let request = served.join().expect("the server thread");
+        assert!(request.starts_with("GET /question HTTP/1.1"), "{request}");
+
+        // A dead port: no question, and no error to handle at the call site.
+        let closed = TcpListener::bind("127.0.0.1:0").unwrap();
+        let gone = format!("http://{}", closed.local_addr().unwrap());
+        drop(closed);
+        assert_eq!(
+            PendingQuestion::fetch(&gone, None, Duration::from_millis(300)),
+            None
+        );
     }
 
     /// One server serves every session on the machine, so a pane takes only its own question. A

@@ -33,21 +33,27 @@ use std::io::{self, BufReader};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
+use tma_core::stamp::opt;
 use tma_core::{ActionKind, ActionManifest, AgentRow};
 use tma_proto::{
-    Dispatch, ErrorCode, ErrorFrame, HelloOk, Outcome as WireOutcome, Reason, ReceiptsRequest,
-    Request, RequestFrame, Response, ResponseFrame, Scope, Snapshot, SnapshotRequest, Subscribe,
+    CardRequest, Dispatch, ErrorCode, ErrorFrame, EventRequest, HelloOk, Outcome as WireOutcome,
+    Reason, ReceiptsRequest, Request, RequestFrame, Response, ResponseFrame, Scope, Snapshot,
+    SnapshotRequest, Subscribe, WindowRequest,
 };
-use tma_runtime::broker::{self, Outcome, Refusal};
+use tma_runtime::broker::{self, BrokerIo, Outcome, PaneFacts, Refusal};
+use tma_runtime::card::{self, CardInputs, PendingQuestion};
 use tma_runtime::config::Config;
 use tma_runtime::cycle::{self, CycleReport};
 use tma_runtime::device::{Cache, Store};
 use tma_runtime::manifests::LoadedManifest;
 use tma_runtime::origin::Origin;
+use tma_runtime::serve_transcript::{self, PaneTranscript};
 use tma_runtime::slots::{self, Claim, Ledger, ReceiptFilter};
 use tma_runtime::subscribe::{run_stream, StreamParams, Tick};
-use tma_runtime::{actions, ipc, repo, seen};
-use tma_tmux::tmux::{Server, Tmux};
+use tma_runtime::{actions, hook_lane, ipc, repo, seen};
+use tma_tmux::tmux::{Server, Tmux, TmuxError};
+use tma_transcript as tx;
+use tma_transcript::discovery::{self, StoreRoots};
 
 use self::conn::{Connection, Refused};
 use self::wire::{next_line, Incoming, Wire, MAX_LINE_BYTES};
@@ -142,6 +148,7 @@ pub(crate) fn run(opts: ServeOpts) -> ExitCode {
         manifest_dir: opts.manifest_dir,
         config_path: opts.config_path,
         marker: connection.marker(),
+        reader: tx::Reader::new(),
         greeted: false,
         streaming: false,
     };
@@ -171,6 +178,10 @@ pub(crate) fn run(opts: ServeOpts) -> ExitCode {
         }
     }
 }
+
+/// How many transcript events a card reads to infer the call a pane is blocked on. A page, not a
+/// window: the correlation only has to reach back past the newest unresolved call.
+const TAIL_EVENTS: usize = 20;
 
 /// Whether the request loop keeps going.
 enum Flow {
@@ -224,6 +235,10 @@ struct Session {
     config_path: Option<PathBuf>,
     /// This connection's registry marker, for the paths that exit without unwinding.
     marker: PathBuf,
+    /// One transcript reader for the life of the connection, so its stat memo and its held
+    /// OpenCode database handle survive between requests. A reader per request would reconnect to
+    /// the database on every page, which is what makes the writing agent's own commits fail (E2).
+    reader: tx::Reader,
     greeted: bool,
     streaming: bool,
 }
@@ -313,11 +328,9 @@ impl Session {
             Request::Subscribe(req) => self.on_subscribe(&frame.id, req),
             Request::Dispatch(req) => self.on_dispatch(req),
             Request::Receipts(req) => self.on_receipts(req),
-            // The card builder, the transcript window and the event body land here at integration:
-            // each is a library function in `tma-runtime` that this arm will call.
-            Request::Card(_) => unimplemented_yet("card"),
-            Request::Window(_) => unimplemented_yet("window"),
-            Request::Event(_) => unimplemented_yet("event"),
+            Request::Card(req) => self.on_card(req),
+            Request::Window(req) => self.on_window(req),
+            Request::Event(req) => self.on_event(req),
         };
         self.send(&frame.id, response);
         Flow::Continue
@@ -381,6 +394,171 @@ impl Session {
             }),
             Err(err) => error(ErrorCode::Internal, &err.to_string()),
         }
+    }
+
+    // ---- card and transcript ------------------------------------------------------------------
+
+    /// The card for one pane: the pane's own read, then whatever else can say what it is asking.
+    ///
+    /// Everything after the pane read is best-effort by construction. A missing hook record, an
+    /// endpoint that does not answer and an unreadable transcript each subtract detail from the
+    /// card and none of them refuses it, because a device that gets no frame cannot even open the
+    /// pane on the host. Only the pane read itself can fail the request.
+    fn on_card(&mut self, req: &CardRequest) -> Response {
+        let facts = match self.read_pane(&req.pane) {
+            Ok(Some(facts)) => facts,
+            Ok(None) => return error(ErrorCode::NotFound, "no pane by that id on this host"),
+            Err(err) => return error(ErrorCode::Internal, &err.to_string()),
+        };
+        let agent = facts.agent.clone().unwrap_or_default();
+        let record = facts
+            .permission_request
+            .as_deref()
+            .and_then(hook_lane::read_request);
+        let question = self.fetch_question(&facts);
+        // The tail is read last of the three, so the reader's borrow ends before the card is built.
+        let tail = self.transcript_tail(&req.pane, &facts);
+
+        let card = card::build_card(&CardInputs {
+            pane: &req.pane,
+            agent: &agent,
+            state: Some(facts.state),
+            detail: facts.detail.as_deref(),
+            episode_ms: facts.episode_ms,
+            permission_request: facts.permission_request.as_deref(),
+            pending_tool: facts.pending_tool.as_deref(),
+            pending_call: facts.pending_call.as_deref(),
+            approve: label(&self.action_set, "approve", &agent),
+            deny: label(&self.action_set, "deny", &agent),
+            api_transport: answers_over_http(&self.action_set, &agent),
+            hook_record: record.as_ref(),
+            question: question.as_ref(),
+            tail: &tail,
+        });
+        Response::Card(card)
+    }
+
+    /// One page of transcript headers, newest first. `last` and the budget are clamped inside
+    /// [`serve_transcript::window`], which is where the host's own ceilings live.
+    fn on_window(&mut self, req: &WindowRequest) -> Response {
+        let (agent, source) = match self.transcript_source(&req.pane) {
+            Ok(pair) => pair,
+            Err(frame) => return Response::Error(frame),
+        };
+        let facts = PaneTranscript {
+            pane: &req.pane,
+            agent: &agent,
+            source: &source,
+        };
+        match serve_transcript::window(&mut self.reader, &facts, req) {
+            Ok(window) => Response::Window(window),
+            Err(frame) => Response::Error(frame),
+        }
+    }
+
+    /// One event with its body, addressed by a cursor this host minted.
+    fn on_event(&mut self, req: &EventRequest) -> Response {
+        let (agent, source) = match self.transcript_source(&req.pane) {
+            Ok(pair) => pair,
+            Err(frame) => return Response::Error(frame),
+        };
+        let facts = PaneTranscript {
+            pane: &req.pane,
+            agent: &agent,
+            source: &source,
+        };
+        match serve_transcript::event(&mut self.reader, &facts, req) {
+            Ok(event) => Response::Event(event),
+            Err(frame) => Response::Error(frame),
+        }
+    }
+
+    /// The pane's agent and the file its conversation lives in. A reader refusal (an unsupported
+    /// store, a pane with no transcript) travels as its own typed frame rather than as an empty
+    /// window, which would read as "nothing happened".
+    fn transcript_source(&self, pane: &str) -> Result<(String, tx::Source), ErrorFrame> {
+        let record = self
+            .tmux
+            .list_panes()
+            .map_err(|err| ErrorFrame::new(ErrorCode::Internal, err.to_string()))?
+            .into_iter()
+            .find(|rec| rec.pane_id == pane)
+            .ok_or_else(|| {
+                ErrorFrame::new(ErrorCode::NotFound, "no pane by that id on this host")
+            })?;
+        let facts = discovery::PaneFacts {
+            agent: record.options.get(opt::NAME).cloned().unwrap_or_default(),
+            session: record.options.get(opt::SESSION).cloned(),
+            transcript: record.options.get(opt::TRANSCRIPT).cloned(),
+            cwd: record.cwd.as_ref().map(Into::into),
+        };
+        let source = self
+            .discover(&facts)
+            .map_err(|e| serve_transcript::refusal(&e))?;
+        Ok((facts.agent, source))
+    }
+
+    /// The pane's transcript, resolved against this host's real store roots.
+    fn discover(&self, facts: &discovery::PaneFacts) -> Result<tx::Source, tx::Refusal> {
+        let roots = StoreRoots::from_env().ok_or(tx::Refusal::NoTranscript)?;
+        discovery::discover(facts, &roots)
+    }
+
+    /// The newest events for the card's `pending_call` inference: headers, a small page, and no
+    /// refusal path. This is a hint about what a blocked pane is blocked on, not the transcript
+    /// surface, which `window` serves under the device's own budget.
+    fn transcript_tail(&mut self, pane: &str, facts: &PaneFacts) -> Vec<tx::Event> {
+        let discovered = discovery::PaneFacts {
+            agent: facts.agent.clone().unwrap_or_default(),
+            session: facts.session.clone(),
+            // The one stamp the broker's read does not carry, and the cheap half of discovery: with
+            // it, resolving the file is a `stat` on a string tma already has.
+            transcript: self
+                .tmux
+                .get_pane_option(pane, opt::TRANSCRIPT)
+                .ok()
+                .flatten(),
+            cwd: (!facts.cwd.is_empty()).then(|| PathBuf::from(&facts.cwd)),
+        };
+        let Ok(source) = self.discover(&discovered) else {
+            return Vec::new();
+        };
+        self.reader
+            .window(&source, &tx::WindowRequest::new(TAIL_EVENTS))
+            .map(|page| page.events)
+            .unwrap_or_default()
+    }
+
+    /// The pending question the agent's own server is holding, for a pane blocked on one.
+    ///
+    /// Gated on the pane's stamps rather than on an agent name: `@agent_question_request` is
+    /// written by the one plugin that has questions to report, and an endpoint is the agent saying
+    /// it has an HTTP surface at all. No stamps, no fetch, and so no socket on the ordinary card.
+    fn fetch_question(&self, facts: &PaneFacts) -> Option<PendingQuestion> {
+        if facts.detail.as_deref() != Some("question") {
+            return None;
+        }
+        let endpoint = facts.api_endpoint.as_deref().filter(|e| !e.is_empty())?;
+        facts
+            .question_request
+            .as_deref()
+            .filter(|id| !id.is_empty())?;
+        PendingQuestion::fetch(endpoint, facts.session.as_deref(), card::QUESTION_TIMEOUT)
+    }
+
+    /// The pane's stamped facts, through the same read a dispatch gates on, so a card and the
+    /// dispatch it invites are describing one pane rather than two reads of it.
+    fn read_pane(&self, pane: &str) -> Result<Option<PaneFacts>, TmuxError> {
+        let cfg = self.config.fold_config();
+        broker::TmuxBroker {
+            tmux: &self.tmux,
+            manifests: &self.manifests,
+            cfg: &cfg,
+            api_bases: &self.config.api,
+            server: self.server.clone(),
+            notify_command: None,
+        }
+        .read_pane(pane)
     }
 
     // ---- stream -----------------------------------------------------------------------------
@@ -682,14 +860,19 @@ fn payload_error(action: &ActionManifest, req: &Dispatch) -> Option<&'static str
     }
 }
 
-/// The `error` response for a request this build parses and does not yet serve. `unsupported` is
-/// the protocol's own word for "a well-formed request for something this host cannot do"; the
-/// sentence says which, because a device branches on the code and reads the message.
-fn unimplemented_yet(what: &str) -> Response {
-    error(
-        ErrorCode::Unsupported,
-        &format!("`{what}` is unimplemented on this host"),
-    )
+/// The bundled label a card offers for `action` on `agent`, or `None` when the loaded set does not
+/// cover that agent: a card never offers a control this host could not fire.
+fn label<'a>(set: &'a [ActionManifest], action: &str, agent: &str) -> Option<&'a str> {
+    let manifest = actions::find(set, action)?;
+    manifest
+        .applies_to(agent)
+        .then_some(manifest.label.as_str())
+}
+
+/// Whether this agent's `approve` travels over its own HTTP surface instead of as keystrokes. A
+/// fact about the transport, which is all the card's `api` lane claims.
+fn answers_over_http(set: &[ActionManifest], agent: &str) -> bool {
+    actions::find(set, "approve").is_some_and(|a| a.api_for(agent).is_some())
 }
 
 fn error(code: ErrorCode, message: &str) -> Response {

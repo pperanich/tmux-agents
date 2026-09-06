@@ -127,6 +127,47 @@ pub fn request_pending(id: &str) -> bool {
     valid_request_id(id) && requests_dir().join(format!("{id}.json")).exists()
 }
 
+/// The parked record for `id`, `None` when nothing is parked or the file is not one.
+///
+/// The read half of [`write_request`], for a card that has to say what the pane is asking about.
+/// `tool_input` comes back through [`json_object_field`] rather than the parser, because it is the
+/// payload's own object text and a re-serialization would reorder its keys.
+pub fn read_request(id: &str) -> Option<RequestRecord> {
+    if !valid_request_id(id) {
+        return None;
+    }
+    let text = std::fs::read_to_string(requests_dir().join(format!("{id}.json"))).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&text).ok()?;
+    let string = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let number = |key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_u64)
+            .unwrap_or_default()
+    };
+    let record = RequestRecord {
+        id: string("id"),
+        pane: string("pane"),
+        session_id: string("session_id"),
+        prompt_id: string("prompt_id"),
+        tool_name: string("tool_name"),
+        tool_input: json_object_field(&text, "tool_input")
+            .unwrap_or("{}")
+            .to_string(),
+        episode_ms: number("episode_ms"),
+        stamped_at_ms: number("stamped_at_ms"),
+    };
+    // A record whose own id is not the one asked for names another prompt; answering with it would
+    // put a different call's tool input on the card.
+    (record.id == id).then_some(record)
+}
+
 /// Remove the request record for `id`, if any. Best-effort: a hold that expired has nothing left to
 /// protect, and a failure here must not turn a clean fall-through into a hook error.
 pub fn remove_request(id: &str) {
@@ -497,6 +538,29 @@ mod tests {
                 "embedded as JSON: {json}"
             );
         }
+    }
+
+    /// The record round-trips: what the hook parked is what a card reads back, `tool_input` object
+    /// and all. The mismatched-id case is the one that matters, because the id is what the card's
+    /// two options quote and a record from another prompt would answer the wrong call.
+    #[test]
+    fn a_parked_record_reads_back_and_a_foreign_one_does_not() {
+        let _g = env_guard();
+        let _rt = ScratchRuntime::new("read");
+        let written = RequestRecord::from_payload("req6", "%3", E4_BASH, 111, 222);
+        write_request(&written).unwrap();
+        assert_eq!(read_request("req6").as_ref(), Some(&written));
+
+        assert_eq!(read_request("nothing-parked"), None);
+        assert_eq!(read_request("../etc/passwd"), None);
+
+        // A file whose `id` names another prompt is refused rather than served under this one.
+        std::fs::write(
+            requests_dir().join("req7.json"),
+            RequestRecord::from_payload("req6", "%3", E4_WRITE, 0, 0).render(),
+        )
+        .unwrap();
+        assert_eq!(read_request("req7"), None);
     }
 
     /// Files carry the private modes the record's contents earn: 0600 on the record, 0700 on the

@@ -647,9 +647,13 @@ mod tests {
         }
     }
 
-    /// The two stores the reader refuses become one typed refusal each, both `unsupported`, both
-    /// carrying the reader's own sentence. An empty window would read as "nothing happened", which
-    /// is the failure R20 names.
+    /// A store the reader will not serve becomes a typed refusal carrying the reader's own
+    /// sentence. An empty window would read as "nothing happened", which is the failure R20 names.
+    ///
+    /// OpenCode's answer is a build fact, and the test asks the reader rather than assuming one:
+    /// without the SQLite reader compiled in the store itself is refused `unsupported`, and with it
+    /// (the binary's own build, so also a whole-workspace test run) an absent database is a missing
+    /// transcript. Typed either way, which is the property, and never an empty page.
     #[test]
     fn a_refused_store_is_a_typed_error_not_an_empty_window() {
         let scratch = Scratch::new("stores");
@@ -664,6 +668,10 @@ mod tests {
             };
             let err = window(&mut tx::Reader::new(), &facts(&source), &request(None))
                 .expect_err("this store is refused");
+            if store.is_readable() {
+                assert_eq!(err.code, ErrorCode::NotFound, "{store}");
+                continue;
+            }
             assert_eq!(err.code, ErrorCode::Unsupported, "{store}");
             assert!(err.message.contains(needle), "{}", err.message);
         }
