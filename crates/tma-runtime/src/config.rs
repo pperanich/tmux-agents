@@ -1506,6 +1506,14 @@ mod tests {
                 toml::Value::Boolean(c.focus.events),
             ),
             (
+                "serve.reconcile_interval_ms".to_string(),
+                secs(c.serve.reconcile_interval_ms),
+            ),
+            (
+                "serve.max_connections".to_string(),
+                toml::Value::Integer(c.serve.max_connections as i64),
+            ),
+            (
                 "install.wrapper_ref".to_string(),
                 toml::Value::String(
                     match c.install.wrapper_ref {
