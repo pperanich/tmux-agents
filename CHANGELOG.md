@@ -10,6 +10,21 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **A wire protocol crate, `tma-proto`: internal plumbing, with nothing yet speaking it.** The
+  frames a remote device and a serving `tma` will exchange, defined once so the serve loop, when it
+  lands, has a single definition to build against rather than one on each side of the pipe. It is
+  types, a versioning discipline, and a corpus of golden JSON vectors; it does no I/O, spawns no
+  tmux, and no command exposes it today. Three things in it are worth naming now because they are
+  contracts a later change has to hold. A fleet row on the wire is the `tma ls --json` key set minus
+  `title`, and a test compares the two writers rather than trusting a comment, so a key added to one
+  and not the other fails. The `state`, `detail`, `outcome` and `reason` tokens are the host's own
+  published vocabularies, checked from the host side, which is the only place a token the *host*
+  grew can be noticed. And every type and enum variant must appear in a committed vector, so a
+  change to the wire shows up as a diff in a JSON file that a reviewer reads, instead of as nothing
+  at all. See [The remote wire protocol](docs/reference/protocol.md).
+
 ## [0.5.13] - 2026-09-05
 
 ### Added
