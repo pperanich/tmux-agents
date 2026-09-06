@@ -12,6 +12,7 @@ fn read_all(store: Store, path: &Path) -> (Vec<crate::Event>, u64) {
     let source = Source {
         store,
         path: path.to_path_buf(),
+        session: None,
     };
     let mut reader = Reader::new();
     let page = reader
@@ -190,6 +191,7 @@ fn a_claude_subagent_is_its_own_session() {
     let parent = Source {
         store: Store::Claude,
         path: fixture("stores/claude/2.1.236/claude-2.1.236-session.jsonl"),
+        session: None,
     };
     let (events, _) = read_all(Store::Claude, &parent.path);
     let refs: Vec<_> = events

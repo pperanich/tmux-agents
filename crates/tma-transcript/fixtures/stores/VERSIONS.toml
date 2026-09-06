@@ -26,6 +26,15 @@ versions = ["0.46.0"]
 stamp_key = "cliVersion"
 stamp_scope = "header"
 
+[opencode]
+versions = ["1.18.18"]
+# opencode's store is one SQLite database holding every session, so its fixture cannot be a
+# committed file: `src/tests/opencode.rs` builds it, schema and rows, and what is committed beside
+# it is the expectation. The builder writes this version into the session row and the test asserts
+# the two agree, which is the same check the file stores get from their in-file stamp.
+stamp_key = "version"
+stamp_scope = "generated"
+
 [pi]
 versions = ["0.84.2"]
 # pi's `session.version` is its session-schema number (3 in this fixture), not the CLI version, so

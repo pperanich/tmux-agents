@@ -106,11 +106,16 @@ struct FileMemo {
     mtime_nsec: i64,
 }
 
-/// The reader's process-local state: the poll memo, and one forward-tail offset per file identity.
+/// The reader's process-local state: the poll memo, one forward-tail offset per file identity, and
+/// one held SQLite connection per OpenCode database.
 #[derive(Default)]
 pub struct Reader {
     memo: HashMap<PathBuf, FileMemo>,
     offsets: HashMap<FileId, u64>,
+    /// Held for the reader's lifetime on purpose (E2): a reader that reconnects per poll makes the
+    /// writing agent's own commits fail, which is a far worse bug than a missing transcript.
+    #[cfg(feature = "opencode")]
+    dbs: HashMap<PathBuf, crate::opencode::Db>,
     unknown: u64,
     stat_calls: u64,
     read_calls: u64,
@@ -139,6 +144,9 @@ impl Reader {
 
     /// One page of `source`, newest first.
     pub fn window(&mut self, source: &Source, req: &WindowRequest) -> Result<Window, Refusal> {
+        if !source.store.is_file_store() {
+            return self.db_window(source, req);
+        }
         let stat = self.stat(source)?;
         let scan_hi = match &req.before {
             Some(c) => {
@@ -221,6 +229,9 @@ impl Reader {
     /// New records since the last tail poll, oldest first. `Unchanged` when the file's memo tuple
     /// is untouched, which is the whole point: a fleet of idle panes costs one `stat` each.
     pub fn tail(&mut self, source: &Source, budget: &Budget) -> Result<Tail, Refusal> {
+        if !source.store.is_file_store() {
+            return self.db_tail(source, budget);
+        }
         let stat = self.stat(source)?;
         if self.memo.get(&source.path) == Some(&stat) {
             return Ok(Tail::Unchanged);
@@ -269,6 +280,9 @@ impl Reader {
     /// One event, with its body. The cursor is validated against the file first, so a stale one is
     /// a typed refusal rather than a parse of whatever now sits at that offset.
     pub fn body(&mut self, source: &Source, cursor: &Cursor) -> Result<Event, Refusal> {
+        if !source.store.is_file_store() {
+            return self.db_body(source, cursor);
+        }
         let stat = self.stat(source)?;
         validate(cursor, &stat)?;
         let mut file = open(&source.path)?;
@@ -309,6 +323,66 @@ impl Reader {
         Ok(None)
     }
 
+    /// The held connection for this database, opened on first use.
+    #[cfg(feature = "opencode")]
+    fn db(&mut self, source: &Source) -> Result<&mut crate::opencode::Db, Refusal> {
+        if !self.dbs.contains_key(&source.path) {
+            self.stat_calls += 1;
+            let db = crate::opencode::Db::open(&source.path)?;
+            self.dbs.insert(source.path.clone(), db);
+        }
+        Ok(self
+            .dbs
+            .get_mut(&source.path)
+            .expect("the connection was just inserted"))
+    }
+
+    #[cfg(feature = "opencode")]
+    fn db_window(&mut self, source: &Source, req: &WindowRequest) -> Result<Window, Refusal> {
+        let session = source.session.clone().ok_or(Refusal::NoTranscript)?;
+        self.read_calls += 1;
+        let mut unknown = 0;
+        let window = self.db(source)?.window(&session, req, &mut unknown)?;
+        self.unknown += unknown;
+        Ok(window)
+    }
+
+    #[cfg(feature = "opencode")]
+    fn db_tail(&mut self, source: &Source, budget: &Budget) -> Result<Tail, Refusal> {
+        let session = source.session.clone().ok_or(Refusal::NoTranscript)?;
+        self.read_calls += 1;
+        let mut unknown = 0;
+        let tail = self.db(source)?.tail(&session, budget, &mut unknown)?;
+        self.unknown += unknown;
+        Ok(tail)
+    }
+
+    #[cfg(feature = "opencode")]
+    fn db_body(&mut self, source: &Source, cursor: &Cursor) -> Result<Event, Refusal> {
+        let session = source.session.clone().ok_or(Refusal::NoTranscript)?;
+        self.read_calls += 1;
+        let mut unknown = 0;
+        let event = self.db(source)?.body(&session, cursor, &mut unknown)?;
+        self.unknown += unknown;
+        Ok(event)
+    }
+
+    // Compiled out, the database stores answer the way every unreadable store does: by name.
+    #[cfg(not(feature = "opencode"))]
+    fn db_window(&mut self, source: &Source, _req: &WindowRequest) -> Result<Window, Refusal> {
+        Err(Refusal::for_store(source.store))
+    }
+
+    #[cfg(not(feature = "opencode"))]
+    fn db_tail(&mut self, source: &Source, _budget: &Budget) -> Result<Tail, Refusal> {
+        Err(Refusal::for_store(source.store))
+    }
+
+    #[cfg(not(feature = "opencode"))]
+    fn db_body(&mut self, source: &Source, _cursor: &Cursor) -> Result<Event, Refusal> {
+        Err(Refusal::for_store(source.store))
+    }
+
     fn stat(&mut self, source: &Source) -> Result<FileMemo, Refusal> {
         if !source.store.is_readable() {
             return Err(Refusal::for_store(source.store));
@@ -340,17 +414,18 @@ fn validate(cursor: &Cursor, stat: &FileMemo) -> Result<(), Refusal> {
     }
 }
 
-/// Collects events newest-first under the request's budgets.
-struct Accumulator<'a> {
+/// Collects events newest-first under the request's budgets. Shared with the OpenCode reader, which
+/// produces its events from SQL rows rather than from lines but owes the caller the same budgets.
+pub(crate) struct Accumulator<'a> {
     store: Store,
     id: FileId,
     size: u64,
     req: &'a WindowRequest,
     events: Vec<Event>,
     frame: usize,
-    read_bytes: u64,
-    unknown: u64,
-    truncated: bool,
+    pub(crate) read_bytes: u64,
+    pub(crate) unknown: u64,
+    pub(crate) truncated: bool,
     /// An event was reached and not kept, so there is a page behind this one. Tracked here rather
     /// than inferred from "did the scan reach the head", because filling the requested count is the
     /// common way a page ends and the scan may have reached the head in the same chunk.
@@ -358,7 +433,12 @@ struct Accumulator<'a> {
 }
 
 impl<'a> Accumulator<'a> {
-    fn new(store: Store, id: FileId, size: u64, req: &'a WindowRequest) -> Accumulator<'a> {
+    pub(crate) fn new(
+        store: Store,
+        id: FileId,
+        size: u64,
+        req: &'a WindowRequest,
+    ) -> Accumulator<'a> {
         Accumulator {
             store,
             id,
@@ -373,7 +453,7 @@ impl<'a> Accumulator<'a> {
         }
     }
 
-    fn is_full(&self) -> bool {
+    pub(crate) fn is_full(&self) -> bool {
         self.events.len() >= self.req.last || self.truncated
     }
 
@@ -444,7 +524,7 @@ impl<'a> Accumulator<'a> {
 
     /// Append events that are older than everything collected so far, newest of them first, under
     /// the `before` filter and the frame budget.
-    fn push_newest_first(&mut self, events: impl DoubleEndedIterator<Item = Event>) {
+    pub(crate) fn push_newest_first(&mut self, events: impl DoubleEndedIterator<Item = Event>) {
         for event in events.rev() {
             // The `before` filter runs before the count, so a record's own earlier halves are
             // skipped without being mistaken for a page that is already full.
@@ -476,7 +556,7 @@ impl<'a> Accumulator<'a> {
         }
     }
 
-    fn finish(
+    pub(crate) fn finish(
         self,
         reached_head: bool,
         session: Option<SessionMeta>,
@@ -496,7 +576,7 @@ impl<'a> Accumulator<'a> {
 }
 
 /// A body's first line, which is what a list row shows.
-fn preview_of(body: &Body) -> String {
+pub(crate) fn preview_of(body: &Body) -> String {
     body.as_str()
         .split('\n')
         .next()

@@ -29,6 +29,12 @@ regex = "1"
 # 1.1 matches crossterm 0.29's transitive rustix, so one build of the crate serves both.
 rustix = { version = "1.1", features = ["event", "fs", "net", "pipe", "process", "system"] }
 signal-hook = "0.4"
+# OpenCode's transcript store is SQLite, so the reader for it is a SQLite client (tma-transcript's
+# default-off `opencode` feature, which the `tma` binary turns on). `bundled` compiles SQLite's own
+# amalgamation with `cc` rather than linking whatever the host happens to ship, which is what makes
+# the WAL behaviour the same everywhere; the default features (`cache`, the wasm FFI shim) are not.
+# 0.40.2 declares no `rust-version`, so it was checked against the 1.88 floor by hand.
+rusqlite = { version = "0.40.2", default-features = false, features = ["bundled"] }
 # Binary-only deps.
 # `string` lets a `Command` be built from owned names, which `tma completions` needs: it rebuilds
 # the derive tree without the `hide`-marked nodes, and every name it copies out of the original is
