@@ -66,8 +66,8 @@ pub struct EventArgs {
     pub notify_context_high: Option<u8>,
     /// `[[agent]]` config: enable/disable + custom process-name maps.
     pub agents: Vec<crate::config::AgentConfig>,
-    /// `[hooks] claude_reply_lane`: the hold bound for the claude hook reply lane, `None` when the
-    /// sub-table is unnamed (the lane is off and this event behaves exactly as it did before it).
+    /// `[hooks] claude_reply_lane`: the hold bound for the claude hook reply lane, `None` when
+    /// config set it to `false` (the lane is off and this event behaves exactly as it did before it).
     pub claude_reply_hold_ms: Option<u64>,
 }
 
@@ -163,7 +163,7 @@ pub fn run(args: EventArgs) -> ExitCode {
 }
 
 /// The hold bound when this event is one the lane covers, `None` otherwise. Three conditions, all
-/// of them cheap: the sub-table is named, the agent is claude, the event is `PermissionRequest`.
+/// of them cheap: the lane is not turned off, the agent is claude, the event is `PermissionRequest`.
 fn hook_lane_hold(args: &EventArgs) -> Option<u64> {
     (args.agent == HOOK_LANE_AGENT && args.kind == HOOK_LANE_EVENT)
         .then_some(args.claude_reply_hold_ms)

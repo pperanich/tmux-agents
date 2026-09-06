@@ -679,14 +679,25 @@ pub struct InstallSection {
 /// `[hooks]` posture: what an installed agent hook does beyond stamping the pane. Its own section
 /// rather than a key under `[install]`, which is about how agent configs NAME the wrapper and is
 /// read at install time; this is read by the hook itself, on every fire.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HooksSection {
-    /// `[hooks.claude_reply_lane]`: naming the sub-table opts a pane's claude hooks into holding a
-    /// `PermissionRequest` open for a structured answer. Absent means today's behaviour exactly:
-    /// the hook stamps and exits with no output, and claude's own prompt is untouched.
-    #[serde(default)]
+    /// `claude_reply_lane`: whether a pane's claude hooks hold a `PermissionRequest` open for a
+    /// structured answer. On by default at [`DEFAULT_HOLD_MS`]; `false` turns it off, and a table
+    /// sets the hold.
+    #[serde(
+        default = "default_claude_reply_lane",
+        deserialize_with = "claude_reply_lane"
+    )]
     pub claude_reply_lane: Option<ClaudeReplyLane>,
+}
+
+impl Default for HooksSection {
+    fn default() -> Self {
+        Self {
+            claude_reply_lane: default_claude_reply_lane(),
+        }
+    }
 }
 
 /// The hold bound, in milliseconds. Default 25 000.
@@ -707,6 +718,43 @@ pub struct ClaudeReplyLane {
 
 fn default_hold_ms() -> u64 {
     DEFAULT_HOLD_MS
+}
+
+/// The lane with no key present: on, at the default hold. A held hook costs the pane nothing, since
+/// claude draws its dialog without waiting for the hook and the keyboard answers it throughout.
+fn default_claude_reply_lane() -> Option<ClaudeReplyLane> {
+    Some(ClaudeReplyLane {
+        hold_ms: DEFAULT_HOLD_MS,
+    })
+}
+
+/// `claude_reply_lane = false` turns the lane off; a table turns it on and may set `hold_ms`. Hand
+/// written rather than `untagged`, which would swallow the `hold_ms` range error into "no variant".
+fn claude_reply_lane<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<ClaudeReplyLane>, D::Error> {
+    struct Lane;
+
+    impl<'de> serde::de::Visitor<'de> for Lane {
+        type Value = Option<ClaudeReplyLane>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("`false`, or a table such as `{ hold_ms = 25000 }`")
+        }
+
+        fn visit_bool<E: serde::de::Error>(self, on: bool) -> Result<Self::Value, E> {
+            Ok(on.then_some(ClaudeReplyLane {
+                hold_ms: DEFAULT_HOLD_MS,
+            }))
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            ClaudeReplyLane::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                .map(Some)
+        }
+    }
+
+    d.deserialize_any(Lane)
 }
 
 /// Bound the hold at load: a value claude would kill mid-flight, or one too short to answer, is a
@@ -999,9 +1047,9 @@ mod tests {
         assert!(c.api.api_base("opencode").is_none());
         // State-derived window names are opt-in: absent by default, so tma renames nothing.
         assert!(c.daemon.window_names.is_none());
-        // The claude hook reply lane is opt-in: absent by default, so a `PermissionRequest` hook
-        // stamps and exits without output exactly as it did before the lane existed.
-        assert!(c.hooks.claude_reply_lane.is_none());
+        // The claude hook reply lane is on by default: a `PermissionRequest` hook holds for the
+        // default 25 s, which the dialog on screen and the keyboard both survive.
+        assert_eq!(c.hooks.claude_reply_lane.unwrap().hold_ms, 25_000);
         // Telemetry windows: zero-config recognizes the shipped names and nothing else.
         assert!(c.telemetry.windows.knows("gemini-1.5-pro"));
         assert!(!c.telemetry.windows.knows("some-unknown-model"));
@@ -1046,16 +1094,26 @@ mod tests {
         );
     }
 
-    /// `[hooks.claude_reply_lane]`: naming the sub-table is the opt-in, `hold_ms` inside it
-    /// optional, and a hold outside the bound fails the load rather than parking a hook for longer
+    /// `claude_reply_lane`: on at the default hold when unnamed or named as a table, off at
+    /// `false`, and a hold outside the bound fails the load rather than parking a hook for longer
     /// than claude will wait for it.
     #[test]
-    fn claude_reply_lane_opts_in_by_name_and_bounds_the_hold() {
+    fn claude_reply_lane_defaults_on_and_bounds_the_hold() {
+        // Named `[hooks]`, no key: the same lane the whole-file default gives.
+        let c: Config = toml::from_str("[hooks]\n").unwrap();
+        assert_eq!(c.hooks.claude_reply_lane.unwrap().hold_ms, 25_000);
+
         let c: Config = toml::from_str("[hooks]\nclaude_reply_lane = {}\n").unwrap();
         assert_eq!(c.hooks.claude_reply_lane.unwrap().hold_ms, 25_000);
 
         let c: Config = toml::from_str("[hooks.claude_reply_lane]\nhold_ms = 8000\n").unwrap();
         assert_eq!(c.hooks.claude_reply_lane.unwrap().hold_ms, 8_000);
+
+        // `false` is the opt-out; `true` is the default lane spelled out.
+        let c: Config = toml::from_str("[hooks]\nclaude_reply_lane = false\n").unwrap();
+        assert!(c.hooks.claude_reply_lane.is_none());
+        let c: Config = toml::from_str("[hooks]\nclaude_reply_lane = true\n").unwrap();
+        assert_eq!(c.hooks.claude_reply_lane.unwrap().hold_ms, 25_000);
 
         for bad in ["0", "999", "600000"] {
             let err =
@@ -1066,6 +1124,14 @@ mod tests {
                 "the error names the range: {err}"
             );
         }
+
+        // Neither accepted shape: the error names both rather than reading as a missing field.
+        let err = toml::from_str::<Config>("[hooks]\nclaude_reply_lane = 25000\n")
+            .expect_err("a bare number is a config error");
+        assert!(
+            err.to_string().contains("hold_ms = 25000"),
+            "the error shows the table form: {err}"
+        );
     }
 
     /// A partial section fills only the named field; the rest stay at their per-field defaults.
@@ -1463,6 +1529,16 @@ mod tests {
                         WrapperRef::Bare => "bare",
                     }
                     .to_string(),
+                ),
+            ),
+            (
+                "hooks.claude_reply_lane.hold_ms".to_string(),
+                toml::Value::Integer(
+                    c.hooks
+                        .claude_reply_lane
+                        .as_ref()
+                        .expect("the lane is on by default")
+                        .hold_ms as i64,
                 ),
             ),
             (

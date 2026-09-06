@@ -69,7 +69,7 @@ events = false               # set true to also install a pane-focus-in hook (ne
 wrapper_ref = "bare"         # writes just `tma-hook`, resolved off $PATH; "absolute" writes the path
 
 [hooks]                      # what an installed hook does at fire time, beyond stamping the pane
-# claude_reply_lane = { hold_ms = 25000 }  # let `tma act` answer claude's permission prompt
+claude_reply_lane = { hold_ms = 25000 }  # let `tma act` answer claude's permission prompt; false is off
 
 [tmux]                       # which tmux-compatible binary tma spawns
 # bin = "tmate"              # default: plain `tmux` off PATH; env TMA_TMUX_BIN overrides this
@@ -254,18 +254,22 @@ other agent are unaffected.
 
 | key | default | meaning |
 |---|---|---|
-| `claude_reply_lane` | unset | A sub-table `{ hold_ms = <milliseconds> }`. When present, claude's `PermissionRequest` hook parks the pending call and waits up to `hold_ms` for a decision from `tma act` instead of returning immediately. Naming the sub-table is the opt-in; `hold_ms` is optional and defaults to `25000`. |
+| `claude_reply_lane` | `{ hold_ms = 25000 }` | Claude's `PermissionRequest` hook parks the pending call and waits up to `hold_ms` for a decision from `tma act` instead of returning immediately. Absent means the default hold; `false` turns the lane off; a sub-table `{ hold_ms = <milliseconds> }` sets the hold. |
 
 ```toml
 [hooks]
-claude_reply_lane = { hold_ms = 25000 }
+claude_reply_lane = false    # off: the hook stamps and returns, with nothing on stdout
 ```
 
-Unset is not a reduced mode, it is the behaviour every release before this one had:
-the hook writes its stamps (`blocked` / `permission`, the pending-call trio), exits
-0 with nothing on stdout, and claude draws the prompt it always drew. Naming the
-sub-table adds a hold on top of those same stamps. The dialog is on screen for the
-whole of it either way, and the keyboard still answers it.
+The hold is on by default because it costs the pane nothing. Claude draws its dialog
+the moment it asks and does not wait for the hook, and a keyboard answer during the
+hold is honoured in about 50 ms with the hook still parked (measured on Claude Code
+2.1.261). What the hold adds is a second way to answer; it takes none away. The
+residual is one sleeping `tma event` per hand-answered prompt, for up to `hold_ms`.
+
+Turning it off with `false` is the behaviour every release before the lane had: the
+hook writes its stamps (`blocked` / `permission`, the pending-call trio), exits 0
+with nothing on stdout, and claude draws the prompt it always drew.
 
 `hold_ms` is bounded at load into `1000..=590000`; a value outside that fails the
 config with an error naming the range, rather than loading a lane that quietly never

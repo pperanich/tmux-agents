@@ -269,22 +269,22 @@ carries a prompt too, but that lane is not what this action uses.
 | `SessionEnd` | agent-end | pane deregistered, options removed |
 
 `PermissionRequest` is the claim that matters for `blocked`. It fires the moment
-a tool call needs a decision, carries the pending call in its payload
-(`tool_name`, `tool_input`, `tool_use_id`), and tma writes no decision back:
-the hook exits 0 with nothing on stdout, so Claude Code draws its normal prompt.
-The hook is deliberately **not** installed with `async: true`, the point is to
-stamp the pane before the dialog draws, and a backgrounded hook would race it.
+a tool call needs a decision and carries the pending call in its payload
+(`tool_name`, `tool_input`, `tool_use_id`). The hook is deliberately **not**
+installed with `async: true`, the point is to stamp the pane before the dialog
+draws, and a backgrounded hook would race it.
 
-Writing no decision back is the default, not a limit. Name `[hooks]
-claude_reply_lane` in `config.toml` and the same hook, after the same stamps, mints
-the pending call's id onto `@agent_permission_request` and holds for up to `hold_ms`
-(25 seconds by default) waiting for a verdict. An `approve` or `deny` that lands
-inside the hold returns Claude's own decision object on stdout, so the tool runs or
-refuses with no keystroke; a hold that expires prints nothing and leaves the prompt
-exactly as the paragraph above describes. Claude is the only agent with this lane,
-and the lane is the only reason a Claude pane carries `@agent_permission_request`
-at all: its payload names no request of its own, so tma mints one. The recipe is
-[Answer Claude's prompts over the hook
+After those stamps the hook mints the pending call's id onto
+`@agent_permission_request` and holds for up to `hold_ms` (25 seconds by default)
+waiting for a verdict. An `approve` or `deny` that lands inside the hold returns
+Claude's own decision object on stdout, so the tool runs or refuses with no
+keystroke; a hold that expires prints nothing and leaves the prompt untouched, which
+is also what `[hooks] claude_reply_lane = false` in `config.toml` gives you on every
+prompt. Claude draws its dialog without waiting for the hook either way, so the pane
+looks the same and the keyboard still answers it. Claude is the only agent with this
+lane, and the lane is the only reason a Claude pane carries
+`@agent_permission_request` at all: its payload names no request of its own, so tma
+mints one. The recipe is [Answer Claude's prompts over the hook
 lane](../how-to/install-agent-hooks.md#answer-claudes-prompts-over-the-hook-lane).
 
 The `Notification permission_prompt|elicitation_dialog` entry stays as the
