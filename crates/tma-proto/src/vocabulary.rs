@@ -5,7 +5,7 @@
 //! attribute and a hand-written `token()` can.
 
 /// Declare a wire vocabulary. `pub open enum` grows an `Other(String)` arm that round-trips a token
-/// this build has never heard of (ARCHITECTURE §2.3.2, A-104); `pub enum` refuses one.
+/// this build has never heard of (ARCHITECTURE §2.3.2); `pub enum` refuses one.
 macro_rules! vocabulary {
     (
         $(#[$meta:meta])*

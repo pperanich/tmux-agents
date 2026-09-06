@@ -1,4 +1,4 @@
-//! A-113's property leg: the round trip holds for values nobody wrote a vector for.
+//! The round-trip property leg: the round trip holds for values nobody wrote a vector for.
 //!
 //! The corpus pins the wire; this pins the codec. It matters most for the two places the crate does
 //! not simply derive: the `Other` arms of the open vocabularies, and the `""` encoding an edge uses

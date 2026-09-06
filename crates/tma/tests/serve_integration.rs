@@ -413,7 +413,7 @@ fn event_request(id: &str, pane: &str, cursor: Cursor) -> RequestFrame {
     )
 }
 
-/// The redacted E4 `PermissionRequest` payload claude 2.1.261 delivers, as the hook receives it.
+/// The redacted live-experiment `PermissionRequest` payload claude 2.1.261 delivers, as the hook receives it.
 /// What matters here is what it does NOT carry: no rendered label, so a card built from a record
 /// written off it cannot be quoting a screen.
 const HOOK_PAYLOAD: &str = r#"{
@@ -442,7 +442,7 @@ fn park_hook_record(s: &Scratch, pane: &str, id: &str) -> PathBuf {
 
 /// Copy the committed claude corpus file into the scratch tree and stamp it onto `pane`, the way
 /// claude's own hook payload does. `lines` truncates it: the first two lines end on a tool call
-/// nothing resolved, which is the shape A-273 is about.
+/// nothing resolved, which is the shape the never-infer rule is about.
 fn stamp_transcript(s: &Scratch, pane: &str, name: &str, lines: Option<usize>) -> PathBuf {
     let fixture = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../tma-transcript/fixtures/stores/claude/2.1.236/claude-2.1.236-session.jsonl");
@@ -488,7 +488,7 @@ fn an_unknown_device_is_refused_with_a_typed_frame_and_exit_two() {
     assert_eq!(h.wait(), 2, "the process refuses to serve");
 }
 
-/// A-200. The hello answers the STORE's scopes, the host's reconcile interval and this build's
+/// The hello answers the STORE's scopes, the host's reconcile interval and this build's
 /// version. The client's own `device` claim is a log line and nothing more.
 #[test]
 fn the_handshake_answers_the_stores_scopes_not_the_requests() {
@@ -517,7 +517,7 @@ fn the_handshake_answers_the_stores_scopes_not_the_requests() {
     );
 }
 
-/// A-106. A schema this build does not implement is a typed refusal, not a parse failure, and the
+/// A schema this build does not implement is a typed refusal, not a parse failure, and the
 /// connection survives it so the device can downgrade instead of guessing why the pipe went quiet.
 #[test]
 fn a_schema_this_build_does_not_speak_is_refused_and_the_connection_survives() {
@@ -568,7 +568,7 @@ fn the_first_frame_must_be_the_handshake_and_there_is_only_one() {
 
 // ---- reading ------------------------------------------------------------------------------
 
-/// A-201. The wire row is the `tma ls --json` row minus `title`, asserted as set equality against
+/// The wire row is the `tma ls --json` row minus `title`, asserted as set equality against
 /// the local document rather than against a literal, so an additive key on either side has to be a
 /// deliberate change on both.
 #[test]
@@ -612,7 +612,7 @@ fn a_snapshot_row_is_the_ls_json_row_minus_title() {
     );
 }
 
-/// A-203, grep-class. A pane title carrying a right-to-left override and a nonce appears **zero**
+/// Grep-class. A pane title carrying a right-to-left override and a nonce appears **zero**
 /// times in the complete captured stdout of a driven session: handshake, snapshot, a subscription
 /// with an edge, dispatch and receipts. A per-frame check would miss the frame nobody thought of.
 #[test]
@@ -703,7 +703,7 @@ fn no_frame_of_a_whole_session_carries_a_pane_title() {
     );
 }
 
-/// A-202. A subscription acks, then streams one edge per transition. The first cycle is the
+/// A subscription acks, then streams one edge per transition. The first cycle is the
 /// stream's baseline and emits nothing, which is what makes a resumed stream replay nothing: a
 /// device converges with `snapshot` and subscribes, and the second connection's baseline swallows
 /// everything the first one already delivered.
@@ -801,7 +801,7 @@ fn a_subscription_streams_edges_and_a_resumed_one_replays_nothing() {
 
 // ---- cards --------------------------------------------------------------------------------
 
-/// A-525 over the wire. The record on disk is the whole difference between the two lanes: with one
+/// The structured card over the wire. The record on disk is the whole difference between the two lanes: with one
 /// parked the card is structured and `exact`, and removing it degrades the SAME pane to the screen
 /// lane and `failed`, which is what tells the app to open the pane on the host instead.
 #[test]
@@ -865,7 +865,7 @@ fn a_parked_hook_record_is_what_makes_the_card_structured() {
     );
 }
 
-/// A-207 to A-210. Every blocked detail but `permission` and a fetched `question` is something to
+/// Every blocked detail but `permission` and a fetched `question` is something to
 /// read: the variant carries a headline and has no field an approve control could be put in.
 #[test]
 fn a_plan_dialog_is_informational_and_offers_nothing() {
@@ -888,7 +888,7 @@ fn a_plan_dialog_is_informational_and_offers_nothing() {
     assert!(card["options"].is_null(), "nothing to fire: {card}");
 }
 
-/// A-273 over the wire, in both directions. The transcript ends on a tool call nothing resolved,
+/// The never-infer rule over the wire, in both directions. The transcript ends on a tool call nothing resolved,
 /// which is what a card reads to say what a pane is blocked ON; a pane the cycle calls `working`
 /// still has no card, because blocked-ness comes from detection and from nowhere else.
 #[test]
@@ -1058,7 +1058,7 @@ fn an_event_request_returns_one_body() {
     assert_eq!(forged["code"], "cursor-invalid", "{forged}");
 }
 
-/// R20. A store the reader will not serve is a typed refusal carrying the reader's own sentence,
+/// A store the reader will not serve is a typed refusal carrying the reader's own sentence,
 /// never an empty window: "nothing happened" is a different fact from "this cannot be shown".
 #[test]
 fn an_unreadable_store_is_a_typed_refusal_rather_than_an_empty_window() {
@@ -1106,7 +1106,7 @@ fn an_unreadable_store_is_a_typed_refusal_rather_than_an_empty_window() {
 
 // ---- dispatch -----------------------------------------------------------------------------
 
-/// A-216 over the wire. The slot is claimed BEFORE the fire, so a repeat replays the receipt and
+/// Idempotent dispatch over the wire. The slot is claimed BEFORE the fire, so a repeat replays the receipt and
 /// the pane receives the keystroke exactly once.
 #[test]
 fn a_repeat_dispatch_replays_its_receipt_and_sends_nothing() {
@@ -1144,7 +1144,7 @@ fn a_repeat_dispatch_replays_its_receipt_and_sends_nothing() {
     assert_one_keystroke(&s, &pane);
 }
 
-/// A-220. Two serve processes on one host share the ledger, because it is a file rather than
+/// Two serve processes on one host share the ledger, because it is a file rather than
 /// process state. A per-connection ledger passes every other test here and fails this one.
 #[test]
 fn two_connections_share_one_ledger() {
@@ -1181,7 +1181,7 @@ fn two_connections_share_one_ledger() {
     assert_one_keystroke(&s, &pane);
 }
 
-/// A-283, the pocket disconnect. The response never reaches the client, and the client learns the
+/// The pocket disconnect: The response never reaches the client, and the client learns the
 /// outcome on the next connection without dispatching anything to find out.
 #[test]
 fn a_dispatch_whose_response_was_lost_is_answered_by_receipts() {
@@ -1269,7 +1269,7 @@ fn the_binder_travels_on_the_dispatch_frame() {
 
 // ---- scopes -------------------------------------------------------------------------------
 
-/// A-221. A hand-written client holding only `read` sends a well-formed dispatch. The refusal
+/// A hand-written client holding only `read` sends a well-formed dispatch. The refusal
 /// happens before `broker::fire` and before the slot claim, so no keystroke reaches the pane and
 /// no ledger entry is written.
 #[test]
@@ -1301,7 +1301,7 @@ fn a_read_only_device_is_refused_before_anything_reaches_the_pane() {
     );
 }
 
-/// A-253's shape. Steering needs `act:steer`, and only the CLI can grant it: the device asks for
+/// Steering needs `act:steer`, and only the CLI can grant it: the device asks for
 /// nothing, and the store's next read is what widens the live connection.
 #[test]
 fn steering_needs_its_scope_and_only_the_cli_can_grant_it() {
@@ -1335,7 +1335,7 @@ fn steering_needs_its_scope_and_only_the_cli_can_grant_it() {
     assert_no_keystroke(&s, &pane);
 }
 
-/// A-225. An exec action is unreachable from any device, and a payload with nowhere to go is a
+/// An exec action is unreachable from any device, and a payload with nowhere to go is a
 /// protocol error rather than a value the host quietly drops.
 #[test]
 fn an_exec_action_and_a_mismatched_payload_are_typed_errors() {
@@ -1381,9 +1381,9 @@ fn an_exec_action_and_a_mismatched_payload_are_typed_errors() {
     assert_no_keystroke(&s, &pane);
 }
 
-/// A-205 and A-223. Revocation reaches a live connection: the store is read per request, and the
+/// Revocation reaches a live connection: the store is read per request, and the
 /// absence of the RECORD ends the connection rather than degrading it to a read-only device.
-/// A-222 rides along: no request type widens a scope, so the store's bytes are unchanged.
+/// No request type widens a scope, so the store's bytes are unchanged.
 #[test]
 fn a_revoked_device_is_refused_on_its_next_request_and_the_process_exits() {
     if !have_tmux() {
@@ -1421,7 +1421,7 @@ fn a_revoked_device_is_refused_on_its_next_request_and_the_process_exits() {
 
 // ---- limits and hygiene -------------------------------------------------------------------
 
-/// A-285. Each connection runs its own detection cycle, so connections cost tmux query throughput
+/// Each connection runs its own detection cycle, so connections cost tmux query throughput
 /// and the cap is what bounds them. The next one is refused with a typed error, not starved.
 #[test]
 fn the_connection_beyond_the_cap_is_refused_with_a_typed_error() {
@@ -1487,7 +1487,7 @@ fn an_unreadable_line_is_refused_and_the_connection_keeps_serving() {
     assert_eq!(h.ask(&snapshot_request("ok"))["t"], "snapshot");
 }
 
-/// A-206. Nothing on this path stores an unsent frame. After a session that refused a dispatch and
+/// Nothing on this path stores an unsent frame. After a session that refused a dispatch and
 /// abandoned a subscription mid-stream, the runtime dir holds the ledger, its lock and an EMPTY
 /// connection registry, and nothing else.
 #[test]

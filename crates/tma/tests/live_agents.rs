@@ -239,7 +239,7 @@ const CODEX_COMPOSER: &str = "Ask Codex to do anything";
 const CODEX_TRUST: &str = "Do you trust";
 const GEMINI_COMPOSER: &str = "Type your message";
 
-/// A-508. **The regression test for the v0.5.0 `Enter` to `y` change.** codex's approve option
+/// **The regression test for the v0.5.0 `Enter` to `y` change.** codex's approve option
 /// prints its own accelerator (`1. Yes, proceed (y)`), while `Enter` confirms whatever the `›`
 /// marker happens to be resting on, which nothing in tma's read path can know. So the marker is
 /// moved OFF the approve option before the fire: `y` must still approve.
@@ -294,7 +294,7 @@ fn codex_approve_sends_y_from_a_moved_selection_cursor() {
     );
 }
 
-/// A-304. gemini's dialog is a numbered list whose reject option prints `(esc)`, so both answers
+/// Gemini's dialog is a numbered list whose reject option prints `(esc)`, so both answers
 /// are digits: `1` allows once, `3` rejects. One pane, two turns, so reaching the second dialog is
 /// itself proof that the first one resolved.
 #[test]

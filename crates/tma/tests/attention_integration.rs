@@ -812,7 +812,7 @@ fn a_hand_wired_focus_out_hook_clears_a_pane_you_only_detached_from() {
 
 /// The second measured reason, and the decisive one: tmux fires `pane-focus-out` only when NO
 /// attached client still has that window current. A control-mode client counts as an attached,
-/// focused viewer (E2), and tma's daemon parks exactly one on every monitored session — so the
+/// focused viewer, and tma's daemon parks exactly one on every monitored session — so the
 /// session-departure clear would be silently inert for daemon users while the pane and window
 /// clears kept working. A departure rule whose existence depends on whether the daemon is running
 /// is not a rule that can be written down.
@@ -878,7 +878,7 @@ fn a_control_mode_client_suppresses_the_session_departure_focus_out() {
             .pane_option(&watched, "@agent_attention")
             .is_empty()),
         "tmux fired `pane-focus-out` for {watched} while a control client was still viewing s1. \
-         That is the opposite of what E2 and `window_pane_update_focus` say, and it would make \
+         That is the opposite of what the focus probe and `window_pane_update_focus` say, and it would make \
          `pane-focus-out` a live candidate for the session gap again — reopen the decision"
     );
 

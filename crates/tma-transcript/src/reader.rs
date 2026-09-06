@@ -112,7 +112,7 @@ struct FileMemo {
 pub struct Reader {
     memo: HashMap<PathBuf, FileMemo>,
     offsets: HashMap<FileId, u64>,
-    /// Held for the reader's lifetime on purpose (E2): a reader that reconnects per poll makes the
+    /// Held for the reader's lifetime on purpose: a reader that reconnects per poll makes the
     /// writing agent's own commits fail, which is a far worse bug than a missing transcript.
     #[cfg(feature = "opencode")]
     dbs: HashMap<PathBuf, crate::opencode::Db>,

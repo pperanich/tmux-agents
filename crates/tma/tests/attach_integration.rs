@@ -1,4 +1,4 @@
-//! `tma attach --pane` acceptance on a scratch server (A-270).
+//! `tma attach --pane` acceptance on a scratch server.
 //!
 //! The handover itself replaces the process with an interactive tmux client, which a headless test
 //! cannot observe. `--print` is the seam: it performs the same window/pane selects and then prints
@@ -69,7 +69,7 @@ fn two_window_session(s: &Scratch) -> String {
     target
 }
 
-/// A-270. The pane's window and pane are selected on its session, and the argv that would take over
+/// The pane's window and pane are selected on its session, and the argv that would take over
 /// this terminal is printed: the resolved tmux binary, this invocation's socket selector, and the
 /// pane's own session as the attach target.
 #[test]

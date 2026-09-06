@@ -19,8 +19,8 @@ use tma_proto::{
 };
 use tma_transcript as tx;
 
-/// Events per page when the request names no count. The measured window size behind R9's byte
-/// bound: 200 headers came to 18.4 to 21.3 KiB across a 25x range of file sizes (E1).
+/// Events per page when the request names no count. The measured window size behind the byte
+/// bound: 200 headers came to 18.4 to 21.3 KiB across a 25x range of file sizes.
 pub const DEFAULT_LAST: u32 = 200;
 
 /// The most a device may ask for in one page. The frame budget is the real bound on what crosses
@@ -489,7 +489,7 @@ mod tests {
         ));
     }
 
-    /// A-229 and A-230's conversion half: a frame budget that runs out ends the page with the flag
+    /// The conversion half of the paging budgets: a frame budget that runs out ends the page with the flag
     /// up and an `older` cursor that pages on, rather than a short page that reads as the end.
     #[test]
     fn the_frame_budget_truncates_and_leaves_a_usable_cursor() {
@@ -598,7 +598,7 @@ mod tests {
         assert_eq!(got.cursor, call.cursor);
     }
 
-    /// A-233's conversion half. Three ways a cursor stops addressing its bytes, and a fourth a
+    /// The cursor-invalidation conversion. Three ways a cursor stops addressing its bytes, and a fourth a
     /// device could type by hand, all one code the app can act on: drop it and re-anchor.
     #[test]
     fn a_stale_or_forged_cursor_is_one_typed_code() {
@@ -648,7 +648,7 @@ mod tests {
     }
 
     /// A store the reader will not serve becomes a typed refusal carrying the reader's own
-    /// sentence. An empty window would read as "nothing happened", which is the failure R20 names.
+    /// sentence. An empty window would read as "nothing happened", which is the failure the design names.
     ///
     /// OpenCode's answer is a build fact, and the test asks the reader rather than assuming one:
     /// without the SQLite reader compiled in the store itself is refused `unsupported`, and with it

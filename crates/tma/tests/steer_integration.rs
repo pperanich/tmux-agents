@@ -96,7 +96,7 @@ fn wait_for_count(s: &Scratch, pane: &str, needle: &str, want: usize) -> usize {
     seen
 }
 
-/// A-250. Steering the text `Enter` delivers five characters and presses no Return of its own: the
+/// Steering the text `Enter` delivers five characters and presses no Return of its own: the
 /// word appears on screen, and it appears twice because the manifest's `Enter` suffix submitted the
 /// line to `cat`. `[MUT]`: drop the `-l` from `Tmux::send_text` and this fails, because tmux reads `Enter`
 /// as the named key, the pane sees two bare newlines, and the capture holds the word nowhere.
@@ -128,7 +128,7 @@ fn steering_the_word_enter_types_it_and_presses_no_key() {
     );
 }
 
-/// A-250, the other half: `C-c` is three characters, not an interrupt. A named-key send would
+/// The other half: `C-c` is three characters, not an interrupt. A named-key send would
 /// deliver SIGINT and `cat` would be gone.
 #[test]
 fn steering_c_dash_c_types_it_and_does_not_interrupt() {
@@ -150,7 +150,7 @@ fn steering_c_dash_c_types_it_and_does_not_interrupt() {
     assert!(pane_alive(&s, &pane), "the running process was interrupted");
 }
 
-/// A-282(b). The `--` terminator makes a payload beginning with `-` data rather than a flag tmux's
+/// The `--` terminator makes a payload beginning with `-` data rather than a flag tmux's
 /// own getopt would read (and reject).
 #[test]
 fn a_payload_beginning_with_a_dash_reaches_the_pane_intact() {
@@ -172,7 +172,7 @@ fn a_payload_beginning_with_a_dash_reaches_the_pane_intact() {
     assert!(seen >= 2, "capture:\n{}", capture(&s, &pane));
 }
 
-/// A-281. The sigil refusal is the host's, it carries its own reason token, and it delivers
+/// The sigil refusal is the host's, it carries its own reason token, and it delivers
 /// nothing: the agent's command plane is not reachable through a message.
 #[test]
 fn a_sigil_payload_is_refused_and_nothing_reaches_the_pane() {
@@ -209,7 +209,7 @@ fn a_sigil_payload_is_refused_and_nothing_reaches_the_pane() {
     );
 }
 
-/// A-252. A text action at a blocked pane is refused by the ordinary gate, `awaiting-text`
+/// A text action at a blocked pane is refused by the ordinary gate, `awaiting-text`
 /// included, which is the detail v1 deliberately offers no affordance at.
 #[test]
 fn a_blocked_pane_refuses_a_steer_whatever_its_detail() {

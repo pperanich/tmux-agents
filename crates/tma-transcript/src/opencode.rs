@@ -1,7 +1,7 @@
 //! The OpenCode reader: one held read-only connection per database, and the same window, cursor
 //! and budget contract the file readers serve.
 //!
-//! **The connection is held, and that is the whole design.** Experiment E2 drove 400 committed
+//! **The connection is held, and that is the whole design.** The held-connection experiment drove 400 committed
 //! appends past two readers: a fresh read-only connection per poll made 42 of the writer's own
 //! commits fail with `database is locked`, and one long-lived connection made none fail, at 220
 //! times the read throughput. A reader that breaks the agent it is watching is a much worse bug

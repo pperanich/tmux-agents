@@ -1,6 +1,6 @@
 //! `tma device`: pair, grant, revoke and list the remote devices `tma serve` will answer.
 //!
-//! The whole write side of U10's authorization model. Grants are CLI-only by design: there is no
+//! The whole write side of the authorization decision's authorization model. Grants are CLI-only by design: there is no
 //! in-app path to widen a scope, no approval prompt a device can raise, and no protocol frame that
 //! asks for one. A device that wants `act:always` gets told to ask the person at the terminal.
 //!

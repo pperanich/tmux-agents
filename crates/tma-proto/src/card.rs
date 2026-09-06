@@ -63,7 +63,7 @@ vocabulary! {
     /// What an option would do, which is the only thing the host gates on.
     ///
     /// Never gate on the label. An `AllowAlways` option is drawn only behind the second deliberate
-    /// interaction R25 requires, and an option whose kind is `Other` is rendered without being
+    /// interaction the always-grant rule requires, and an option whose kind is `Other` is rendered without being
     /// offered, which is how cursor's Run Everything stays visible without becoming a button.
     pub open enum OptionKind {
         AllowOnce = "allow-once",

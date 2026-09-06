@@ -10,7 +10,7 @@
 //! lock file to leave behind. A marker whose pid is gone is swept and re-claimed.
 //!
 //! This is a registry, not a queue: it holds a pid and a device id, never a payload. Nothing on
-//! this path stores an unsent frame, which is the property A-206 greps the runtime dir for.
+//! this path stores an unsent frame, which is the property the runtime-dir scan greps for.
 
 use std::io::Write as _;
 use std::path::{Path, PathBuf};

@@ -2,7 +2,7 @@
 //!
 //! Both mappings go **through the shipped writers**, `RowSurface::Protocol` and
 //! `render_edge_json`, and are read back into the typed frame rather than being rebuilt field by
-//! field. That is what makes R2 a property of the code path instead of a convention: the one place
+//! field. That is what makes the title rule a property of the code path instead of a convention: the one place
 //! `title` could be written is `write_row_fields`, and it writes it only for `RowSurface::Local`,
 //! so no amount of editing here can put a pane title on the wire. The cost is one JSON parse per
 //! row per snapshot, against a fleet of a dozen panes.

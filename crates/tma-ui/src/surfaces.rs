@@ -971,7 +971,7 @@ mod tests {
             .collect()
     }
 
-    /// A-201: the protocol row's key set is the local row's minus `title`, and minus nothing else.
+    /// The protocol row's key set is the local row's minus `title`, and minus nothing else.
     /// Both sides come from one `AgentRow` through the one writer, so this is structural: a key
     /// added under a `Local`-only branch widens the difference and fails here, and a key added to
     /// the shared body reaches both surfaces and cannot.

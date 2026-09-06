@@ -176,7 +176,7 @@ fn assert_blocked_detail(name: &str, detail: &str) {
     );
 }
 
-/// A-502. The permission dialog is the case the split exists to preserve: it must keep folding to
+/// The permission dialog is the case the split exists to preserve: it must keep folding to
 /// `permission` at every captured width, including the second, independently-captured Bash-tool
 /// dialog from the gap-fill round (claude 2.1.236).
 #[test]
@@ -195,7 +195,7 @@ fn blocked_permission_detected_at_wide_and_narrow() {
     }
 }
 
-/// A-501. **This test changed with the plan/trust split, and the old assertion was the bug.**
+/// **This test changed with the plan/trust split, and the old assertion was the bug.**
 /// It previously asserted `detail == "permission"` on the first-run trust gate, which is what made
 /// `tma act approve` fire `1` — "Yes, I trust this folder", a whole-folder grant — at it.
 /// Detection still rides the `❯ 1. Yes, I trust this folder` selection chrome, not the question
@@ -263,7 +263,7 @@ fn a_bare_refusal_cursor_is_not_a_trust_gate() {
     ));
 }
 
-/// A-500. The plan-approval dialog, whose option 1 is `Yes, and use auto mode` — it does not
+/// The plan-approval dialog, whose option 1 is `Yes, and use auto mode` — it does not
 /// approve the action in front of the user, it switches the session into auto-approving everything
 /// that follows. Captured at the narrowest and widest widths in the corpus; the option-1 line is
 /// identical at both, so the match is structural rather than a wrap artefact.
@@ -281,7 +281,7 @@ fn blocked_plan_dialog_detected_at_wide_and_narrow() {
     }
 }
 
-/// A-503. The variant rules win by PRIORITY, not by declaration order: both they and the generic
+/// The variant rules win by PRIORITY, not by declaration order: both they and the generic
 /// permission rule match the same line, and 110 > 100 is the only thing that decides the detail.
 /// Equalise the priorities and the engine falls back to lowest-index-wins, which is the generic
 /// rule — the pre-fix behaviour.
@@ -349,7 +349,7 @@ fn plan_verdict_survives_an_idle_marker_in_the_title() {
     assert_eq!(v.detail.as_ref().map(|d| d.as_str()), Some("plan"));
 }
 
-/// A-504 / A-505 end to end, at the only level that proves the fix: a **real capture** is folded to
+/// End to end, at the only level that proves the fix: a **real capture** is folded to
 /// a verdict and that verdict is fed to the shipped `approve` gate. This is the whole chain the bug
 /// travelled down — screen → rule → fold → gate → `send-keys "1"` — with only the final tmux write
 /// stubbed out.

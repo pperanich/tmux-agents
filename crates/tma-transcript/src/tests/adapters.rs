@@ -28,7 +28,7 @@ fn fixture(rel: &str) -> PathBuf {
     fixtures().join(rel)
 }
 
-/// A-234: the emitted sequence equals the committed expectation, for every file store.
+/// The emitted sequence equals the committed expectation, for every file store.
 #[test]
 fn each_store_maps_its_fixture_to_the_committed_sequence() {
     for (store, rel) in [
@@ -54,7 +54,7 @@ fn each_store_maps_its_fixture_to_the_committed_sequence() {
     }
 }
 
-/// A-234's pi arm, which is not claude's. pi's tool call is `{"type":"toolCall", …, "arguments"}`
+/// The pi arm, which is not claude's. pi's tool call is `{"type":"toolCall", …, "arguments"}`
 /// and its result is hoisted to a fourth message **role** with the correlation id at message level.
 /// An adapter that dispatched on block type first would map that result's plain `text` block to
 /// assistant prose: the tool's output rendered as the model's own words, with no unknown to alert
@@ -117,7 +117,7 @@ fn pi_routes_tool_calls_and_results_by_role_not_by_block_type() {
     assert_eq!(costs, vec![0.00111, 0.0012, 0.00135]);
 }
 
-/// A-235: one turn written to both codex channels renders once. Prose comes from `event_msg`, the
+/// One turn written to both codex channels renders once. Prose comes from `event_msg`, the
 /// tool call from `response_item`, and each channel's mirror of the other is bookkeeping.
 #[test]
 fn codex_collapses_its_two_channels_to_one_turn() {
@@ -153,7 +153,7 @@ fn codex_collapses_its_two_channels_to_one_turn() {
     assert_eq!(count(|k| matches!(k, EventKind::ToolResult { .. })), 1);
 }
 
-/// A-236: gemini restates its whole history in `$set` records. Nineteen real messages against
+/// Gemini restates its whole history in `$set` records. Nineteen real messages against
 /// twenty-five restatements must render as nineteen, not forty-four.
 #[test]
 fn gemini_renders_messages_once_despite_its_restatements() {
@@ -184,7 +184,7 @@ fn gemini_renders_messages_once_despite_its_restatements() {
     assert_eq!(dropped, 25);
 }
 
-/// A-238: a claude `Task` call points at a child file, and that child is served as its own session
+/// A claude `Task` call points at a child file, and that child is served as its own session
 /// rather than interleaved into the parent's window.
 #[test]
 fn a_claude_subagent_is_its_own_session() {
@@ -267,7 +267,7 @@ fn claude_maps_blocks_sidecars_and_boundaries() {
     );
 }
 
-/// A-240: an unseen version parses without error and raises the unknown counter; A-241's other half
+/// An unseen version parses without error and raises the unknown counter; the drift corpus's other half
 /// is in `corpus.rs`.
 #[test]
 fn an_unseen_record_type_counts_instead_of_failing() {

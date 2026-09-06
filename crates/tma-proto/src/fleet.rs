@@ -8,7 +8,7 @@ use crate::state::{Detail, State, StateFilter};
 ///
 /// The key set is `tma_ui::surfaces::RowSurface::Protocol` exactly, and
 /// `crates/tma/tests/proto_drift.rs` asserts that against the host writer rather than trusting this
-/// comment. There is **no `title` field**: a pane title is agent-supplied text, and R2 is a property
+/// comment. There is **no `title` field**: a pane title is agent-supplied text, and the title rule is a property
 /// of the struct rather than of a redaction pass someone can forget to run.
 ///
 /// Absent values are an explicit `null`, matching the host writer key for key. `#[serde(default)]`

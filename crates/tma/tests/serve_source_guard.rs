@@ -1,4 +1,4 @@
-//! A-224. A source-text guard over the serve module: `force` is unreachable from a device, and no
+//! A source-text guard over the serve module: `force` is unreachable from a device, and no
 //! exec action is named there.
 //!
 //! Two properties the compiler cannot state. `FireArgs::force` is a plain `bool`, so a `true`
@@ -52,7 +52,7 @@ fn scanned() -> Vec<(PathBuf, String)> {
     read
 }
 
-/// N8. `force` skips the `when` gate, and a device is never in the room to have decided that.
+/// the force rule. `force` skips the `when` gate, and a device is never in the room to have decided that.
 #[test]
 fn serve_never_constructs_a_forced_fire() {
     for (path, text) in scanned() {
@@ -68,7 +68,7 @@ fn serve_never_constructs_a_forced_fire() {
     }
 }
 
-/// N10. An exec action sends no keystrokes, so it is the one class with no freshness re-verify.
+/// An exec action sends no keystrokes, so it is the one class with no freshness re-verify.
 /// Serve refuses it through `ActionKind::sends_keystrokes`, which makes a new kind answer the
 /// question rather than inherit a silent "no"; naming the variant here would be the equality test
 /// that method exists to replace.

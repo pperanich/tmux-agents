@@ -186,7 +186,7 @@ fn hold_for_reply(tmux: &Tmux, pane: &str, payload: &str, hold_ms: u64) -> ExitC
         return ExitCode::SUCCESS;
     }
     let now = crate::now_ms();
-    // `@agent_permission_request` is the field the U6 binder quotes, so the lane mints into it
+    // `@agent_permission_request` is the field the binder quotes, so the lane mints into it
     // rather than inventing a second one. Claude's payload carries no `request_id` of its own, so
     // this is the only writer for a claude pane and nothing is being overwritten.
     let _ = tmux.apply(&[render::set_pane_option(pane, opt::PERMISSION_REQUEST, &id)]);
@@ -888,7 +888,7 @@ mod tests {
         ));
     }
 
-    /// The E1 regression. A second real completion with no observed `Working` in between: the
+    /// The double-completion regression. A second real completion with no observed `Working` in between: the
     /// pane is idle, the first marker was cleared (the user saw it), and the turn-end hook fires
     /// again. Nothing but `turn_end` can raise here — `prev == Working` is false, and the fold
     /// sees an idle→idle edge it cannot tell from a quiet idle pane.

@@ -42,7 +42,7 @@ pub const LEDGER_FILE: &str = "ledger.jsonl";
 /// The sibling lock file every read-modify-write flocks.
 pub const LOCK_FILE: &str = "ledger.lock";
 
-/// How long a receipt answers for its slot: 24 h, the floor the U13 design fixes. Raising this is
+/// How long a receipt answers for its slot: 24 h, the floor the slot-ledger design fixes. Raising this is
 /// safe (a replay dispatches nothing); lowering it re-fires keystrokes after a long disconnect.
 pub const TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -940,7 +940,7 @@ mod tests {
         );
     }
 
-    /// A-286 (c): a reader looping over the file while writes land never sees a partial record. The
+    /// A reader looping over the file while writes land never sees a partial record. The
     /// reader takes no lock, so this is the rename's atomicity and nothing else.
     #[test]
     fn a_reader_never_observes_a_partial_record() {

@@ -6,9 +6,9 @@
 
 use tma_proto::*;
 
-/// A-104: an unknown enum variant round-trips preserved, not dropped and not normalized.
+/// An unknown enum variant round-trips preserved, not dropped and not normalized.
 ///
-/// The counterpart of A-105 and the opposite answer: dropping a field loses detail, dropping a
+/// The counterpart of unknown-field dropping, and the opposite answer: dropping a field loses detail, dropping a
 /// variant changes meaning. An older device meeting a newer host must degrade to "I cannot type
 /// this dialog", never to "this must be a permission prompt".
 #[test]
@@ -39,7 +39,7 @@ fn unknown_outcome_and_reason_tokens_survive_too() {
     assert_eq!(reason.token(), "some-future-refusal");
 }
 
-/// A-105: an unknown field parses, is ignored, and is omitted on re-emission.
+/// An unknown field parses, is ignored, and is omitted on re-emission.
 #[test]
 fn an_unknown_field_is_ignored_and_not_re_emitted() {
     let line = r#"{"schema":1,"id":"1","t":"card","card":"none","headline_v2":"xxxx"}"#;
@@ -53,7 +53,7 @@ fn an_unknown_field_is_ignored_and_not_re_emitted() {
     assert_eq!(out, r#"{"schema":1,"id":"1","t":"card","card":"none"}"#);
 }
 
-/// A-106: a hello naming a schema this build does not implement earns a typed error response, not a
+/// A hello naming a schema this build does not implement earns a typed error response, not a
 /// parse failure and not a silent downgrade.
 #[test]
 fn a_future_schema_earns_a_typed_error_not_a_parse_failure() {
@@ -98,7 +98,7 @@ fn a_session_that_does_not_open_with_hello_is_refused() {
     );
 }
 
-/// A-107: a frame from an older writer, with an additive field absent, parses on the newer reader
+/// A frame from an older writer, with an additive field absent, parses on the newer reader
 /// with that field defaulted.
 #[test]
 fn an_older_writers_frame_parses_with_the_new_field_defaulted() {

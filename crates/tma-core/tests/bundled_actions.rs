@@ -158,7 +158,7 @@ fn steer_and_steer_now_split_idle_from_working() {
 fn approve_gates_on_blocked_permission() {
     let a = ActionManifest::parse(APPROVE, "approve", "approve.toml").unwrap();
     assert_eq!(a.keys_for("claude"), Some(["1".to_string()].as_slice()));
-    // A-509. codex's approve option prints its own accelerator (`Yes, proceed (y)`), so `y` is
+    // Codex's approve option prints its own accelerator (`Yes, proceed (y)`), so `y` is
     // position-independent. `Enter` is not: it confirms whatever the `›` marker is resting on, which
     // tma never reads. Measured on codex 0.146.0 — cursor on "No", `y` approved, `Enter` denied.
     assert_eq!(a.keys_for("codex"), Some(["y".to_string()].as_slice()));
@@ -172,7 +172,7 @@ fn approve_gates_on_blocked_permission() {
         ..row("claude", AgentState::Blocked)
     };
     assert_eq!(a.evaluate_gate(&blocked), GateOutcome::Fireable);
-    // Applies only to agents with a transport entry. pi has no permission prompt at all (R29), so
+    // Applies only to agents with a transport entry. pi has no permission prompt at all, so
     // it is the agent this can never cover.
     assert_eq!(
         a.evaluate_gate(&GateInput {
@@ -188,7 +188,7 @@ fn approve_gates_on_blocked_permission() {
     );
 }
 
-/// A-504 / A-505, at the gate. **The user-visible fix.** `approve` fires `1` on claude, and on the
+/// At the gate. **The user-visible fix.** `approve` fires `1` on claude, and on the
 /// plan dialog `1` is "Yes, and use auto mode" (auto-approve everything that follows) while on the
 /// trust gate it is "Yes, I trust this folder" (a whole-folder grant). Before the manifest split
 /// both dialogs were stamped `blocked/permission` and this gate returned `Fireable`.
@@ -249,7 +249,7 @@ fn approve_and_deny_refuse_at_the_opencode_question_dialog() {
     }
 }
 
-/// A-506. The resolved action table for a claude pane, asserted as data across the whole blocked
+/// The resolved action table for a claude pane, asserted as data across the whole blocked
 /// detail vocabulary. The split's entire intended effect is the two `plan`/`trust` rows: approve and
 /// deny stop resolving there, and nothing else moves.
 #[test]
@@ -295,7 +295,7 @@ fn the_claude_action_table_gains_exactly_two_refusing_rows() {
     );
 }
 
-/// A-277. The action rows, read against what the agent manifests declare rather than against a
+/// The action rows, read against what the agent manifests declare rather than against a
 /// list retyped here: every agent with a permission dialog can answer it in both directions, and
 /// every agent that can be working can be interrupted.
 #[test]
@@ -363,7 +363,7 @@ fn question_reject_answers_only_an_opencode_question() {
     }
 }
 
-/// A-277, R26. `Run Everything (shift+tab)` sits one modifier from cursor's tool-scoped grant, and
+/// `Run Everything (shift+tab)` sits one modifier from cursor's tool-scoped grant, and
 /// it is a session-wide YOLO grant. No bundled action may reach it, under any name.
 #[test]
 fn no_bundled_action_maps_cursor_to_shift_tab() {
@@ -383,7 +383,7 @@ fn no_bundled_action_maps_cursor_to_shift_tab() {
     }
 }
 
-/// The rows U7 filled, pinned as data. Each is a keystroke into somebody else's TUI, so a change
+/// The rows the action rows filled, pinned as data. Each is a keystroke into somebody else's TUI, so a change
 /// here is a change to what a phone tap does and has to be re-evidenced, not merely re-reviewed.
 #[test]
 fn the_filled_rows_are_the_evidenced_ones() {
@@ -409,7 +409,7 @@ fn the_filled_rows_are_the_evidenced_ones() {
             "{agent} interrupt"
         );
     }
-    // R29: pi has no permission prompt, so no answer to one may resolve for it in any state.
+    // pi has no permission prompt, so no answer to one may resolve for it in any state.
     assert!(!approve.applies_to("pi") && !deny.applies_to("pi"));
 }
 

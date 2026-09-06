@@ -573,7 +573,7 @@ fn codex_notify_argv_payload_stamps_idle() {
     );
 }
 
-/// The E1 acceptance, end to end through the real wrapper: a codex pane whose ONLY wired channel
+/// The completion-notify acceptance, end to end through the real wrapper: a codex pane whose ONLY wired channel
 /// is `notify` (the config.toml one, which needs no in-TUI trust — unlike the `hooks.json` events
 /// that claim `working`) finishes a turn, the user sees the marker and it comes down, and a second
 /// turn finishes. tma never observed `working` in between, so the fold sees idle→idle and the
@@ -639,7 +639,7 @@ fn a_second_turn_end_re_raises_the_marker_the_user_cleared() {
     assert_eq!(
         s.get(&pane, "#{@agent_attention}"),
         "1",
-        "a SECOND completion must re-raise the done marker (E1)"
+        "a SECOND completion must re-raise the done marker"
     );
     let second_turn: u64 = s.get(&pane, "#{@agent_turn_at}").parse().unwrap();
     assert!(

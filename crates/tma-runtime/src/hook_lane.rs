@@ -23,7 +23,7 @@ use crate::ipc::runtime_dir;
 use crate::json::JsonWriter;
 
 /// The hold loop's poll interval. Claude draws its own dialog immediately and waits six seconds
-/// before its `Notification` fallback (research/27 §1, E4.2), so a tenth of a second is far finer
+/// before its `Notification` fallback (research/27 §1), so a tenth of a second is far finer
 /// than anything a person can perceive and still costs ~250 `stat` calls across a full 25 s hold.
 pub const POLL_INTERVAL: Duration = Duration::from_millis(100);
 
@@ -461,7 +461,7 @@ mod tests {
         assert!(!request_pending("../escape"));
     }
 
-    /// The E4 `PermissionRequest` payloads, redacted, as Claude Code 2.1.261 delivers them
+    /// The live hook experiment's `PermissionRequest` payloads, redacted, as Claude Code 2.1.261 delivers them
     /// (research/27 §1, leg 1). Note what is NOT here: no `tool_use_id`, which is why the id is
     /// minted, and no rendered label, which is why the record copies `tool_input` instead.
     const E4_BASH: &str = r#"{
@@ -473,7 +473,7 @@ mod tests {
   "hook_event_name": "PermissionRequest",
   "tool_name": "Bash",
   "tool_input": {
-    "command": "touch <E4>/marker-leg1 && echo leg1-done",
+    "command": "touch <SCRATCH>/marker-leg1 && echo leg1-done",
     "description": "Create marker file and print confirmation"
   },
   "permission_suggestions": [
@@ -495,7 +495,7 @@ mod tests {
   }
 }"#;
 
-    /// A-525, the host half: the record carries the tool name and the tool input the payload
+    /// The host half: the record carries the tool name and the tool input the payload
     /// delivered, verbatim, and never a label anyone rendered off a screen.
     #[test]
     fn the_record_carries_the_payloads_own_tool_and_input() {
@@ -503,7 +503,7 @@ mod tests {
         assert_eq!(bash.tool_name, "Bash");
         assert!(
             bash.tool_input
-                .contains("\"command\": \"touch <E4>/marker-leg1 && echo leg1-done\"")
+                .contains("\"command\": \"touch <SCRATCH>/marker-leg1 && echo leg1-done\"")
                 && bash.tool_input.contains("\"description\""),
             "the whole tool_input object survives: {}",
             bash.tool_input

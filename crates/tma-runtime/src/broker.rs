@@ -1705,7 +1705,7 @@ mod tests {
         );
     }
 
-    /// A-255. What each op puts on the wire, asserted against the driven shapes without a socket.
+    /// What each op puts on the wire, asserted against the driven shapes without a socket.
     /// Every path is a v1 path: an `/api/**` twin answers empty while a v1 request is pending, so a
     /// test written against one would assert an empty list against an empty list.
     #[test]
@@ -1764,7 +1764,7 @@ mod tests {
         assert_eq!(answers_body(&[]), "{\"answers\":[]}");
     }
 
-    /// A-256, A-257. A 2xx on a request the server was holding is `replied`; a 2xx on a command is
+    /// A 2xx on a request the server was holding is `replied`; a 2xx on a command is
     /// `sent`, the same word a keystroke earns, because nothing was answered and nothing re-read.
     #[test]
     fn answering_a_request_replies_and_commanding_a_session_only_sends() {
@@ -1902,7 +1902,7 @@ print(srv.server_port, flush=True)
 srv.serve_forever()
 "#;
 
-    /// A-255. Every op against a real server: the v1 paths and the documented bodies, recorded by
+    /// Every op against a real server: the v1 paths and the documented bodies, recorded by
     /// something that is not this crate's own client.
     ///
     /// The negative leg is structural rather than a second drive. `/api/**` is a different producer
@@ -2116,7 +2116,7 @@ srv.serve_forever()
         }
     }
 
-    /// A-212. The pane is still blocked on a permission prompt, so the ordinary gate passes: only
+    /// The pane is still blocked on a permission prompt, so the ordinary gate passes: only
     /// the binder can tell it is a DIFFERENT prompt. Delete the check and this fires, which is the
     /// stale approve the binder exists to stop.
     #[test]
@@ -2154,7 +2154,7 @@ srv.serve_forever()
         assert_eq!(io.sent.borrow().clone(), Some(vec!["1".to_string()]));
     }
 
-    /// A-213. The check reads the facts from UNDER the lock, not the pre-lock read: the mock's two
+    /// The check reads the facts from UNDER the lock, not the pre-lock read: the mock's two
     /// reads disagree, and both directions follow the second one. Move the check to the pre-lock
     /// read and each half fails with the other's verdict.
     #[test]
@@ -2201,7 +2201,7 @@ srv.serve_forever()
         );
     }
 
-    /// A-215. The documented residual, pinned rather than fixed: under a backward wall-clock step
+    /// The documented residual, pinned rather than fixed: under a backward wall-clock step
     /// the pane's episode can be EARLIER than the one the caller saw, and that still counts as
     /// changed. The binder compares for equality, never for order, so the refusal is
     /// `episode-changed` either way and field instrumentation can classify it from the receipt.
@@ -2219,7 +2219,7 @@ srv.serve_forever()
         assert!(io.sent.borrow().is_none());
     }
 
-    /// A-214, the refusing half: the opencode pane's pending id has been replaced by the one for a
+    /// The refusing half: the opencode pane's pending id has been replaced by the one for a
     /// newer prompt. The API `requires` is satisfied (an id IS stamped), so the binder is the only
     /// thing that can refuse, and no HTTP call leaves the process.
     #[test]
@@ -2244,7 +2244,7 @@ srv.serve_forever()
         assert!(io.api_call.borrow().is_none(), "nothing is answered");
     }
 
-    /// A-214, the passing half: the id the caller quoted is the one the pane still carries, so the
+    /// The passing half: the id the caller quoted is the one the pane still carries, so the
     /// ordinary gate and the API lane run exactly as they would without the binder.
     #[test]
     fn a_matching_permission_request_proceeds() {
@@ -2359,7 +2359,7 @@ srv.serve_forever()
         }
     }
 
-    /// A-251: the manifest's keys wrap the caller's string, in that order, inside one lock hold.
+    /// The manifest's keys wrap the caller's string, in that order, inside one lock hold.
     /// The caller supplies the middle element and nothing else: the wrapping is the manifest's.
     #[test]
     fn prefix_and_suffix_wrap_the_literal_in_one_lock_hold() {
@@ -2389,7 +2389,7 @@ srv.serve_forever()
         assert!(*io.cleared.borrow(), "the one hold is released after it");
     }
 
-    /// A-281: the sigil refusal is host-side, and it lands before the broker has asked tmux
+    /// The sigil refusal is host-side, and it lands before the broker has asked tmux
     /// anything at all: no pane read, no re-verify, no lock, and so nothing to release.
     #[test]
     fn a_sigil_payload_refuses_before_any_tmux_call() {
@@ -2417,7 +2417,7 @@ srv.serve_forever()
         }
     }
 
-    /// A-282(a): a control byte anywhere in the payload refuses, the newline included. A steer is
+    /// A control byte anywhere in the payload refuses, the newline included. A steer is
     /// one line, and a `\r` in the middle of one would submit it early.
     #[test]
     fn control_bytes_and_an_empty_payload_refuse_before_any_tmux_call() {
@@ -2449,7 +2449,7 @@ srv.serve_forever()
         }
     }
 
-    /// A-252: a text action at a blocked pane is refused by the ordinary gate, `awaiting-text`
+    /// A text action at a blocked pane is refused by the ordinary gate, `awaiting-text`
     /// included, and nothing reaches the pane.
     #[test]
     fn text_at_a_blocked_pane_is_refused_including_awaiting_text() {
