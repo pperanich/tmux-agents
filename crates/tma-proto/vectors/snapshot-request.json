@@ -1,0 +1,18 @@
+{
+  "schema": 1,
+  "id": "2",
+  "t": "snapshot",
+  "selector": {
+    "session": "xxxxxxxx",
+    "repo": "xxxxxxxx",
+    "branch": "xxxxxxxxxxxx",
+    "agent": "claude",
+    "state": [
+      "idle",
+      "working",
+      "blocked",
+      "unknown",
+      "done"
+    ]
+  }
+}

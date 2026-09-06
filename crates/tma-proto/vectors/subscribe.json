@@ -1,0 +1,9 @@
+{
+  "schema": 1,
+  "id": "3",
+  "t": "subscribe",
+  "events": true,
+  "selector": {
+    "agent": "claude"
+  }
+}

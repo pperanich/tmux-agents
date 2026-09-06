@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 154f46f36d37e2cee945d5d82221cc46c8202962ee3e5675f67530684a2489b3 # shrinks to row = FleetRow { pane: "", agent: "", state: Idle, detail: None, since: 0, since_ms: 0, episode_ms: 0, locator: "", attention: false, done: false, session: None, transcript: None, permission_request: None, stamped_at_ms: None, context: None, context_at_ms: None, muted: false, tokens: None, quota: None, cost_usd: Some(506.41674635349835), repo: None, branch: None, worktree: None, pending_tool: None, pending_call: None, pending_summary: None, server: "", host: "" }

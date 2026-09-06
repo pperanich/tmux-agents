@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "7",
+  "t": "window",
+  "pane": "%1",
+  "last": 200,
+  "before": "t1.1234.beef.1000.200.0",
+  "budget": {
+    "header_bytes": 256,
+    "read_bytes": 1048576,
+    "frame_bytes": 32768
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "5",
+  "t": "dispatch",
+  "slot": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "host": "xxxxxxxx",
+  "pane": "%1",
+  "action": "approve",
+  "binder": {
+    "expect_episode_ms": 1757030400000,
+    "expect_permission_request": "xxxxxxxxxxxx"
+  },
+  "device": "xxxxxxxxxxxxxxxx"
+}

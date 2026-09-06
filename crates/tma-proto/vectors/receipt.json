@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "5",
+  "t": "receipt",
+  "slot": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "pane": "%1",
+  "action": "approve",
+  "outcome": "sent",
+  "reason": null,
+  "exit_code": 0,
+  "cached": false,
+  "device": "xxxxxxxxxxxxxxxx",
+  "at_ms": 1757030462000
+}

@@ -1,0 +1,35 @@
+[
+  {
+    "schema": 1,
+    "id": "8",
+    "t": "event",
+    "cursor": "t1.1234.beef.1000.120.0",
+    "kind": "assistant_text",
+    "bytes": 512,
+    "ts": "2026-09-05T00:00:00.000Z",
+    "preview": "xxxxxxxxxxxxxxxx",
+    "body": {
+      "kind": "text",
+      "text": "xxxxxxxxxxxxxxxx"
+    }
+  },
+  {
+    "schema": 1,
+    "id": "8",
+    "t": "event",
+    "cursor": "t1.1234.beef.1000.140.0",
+    "kind": "tool_call",
+    "name": "xxxx",
+    "call_id": "xxxxxxxxxxxx",
+    "arg_keys": [
+      "xxxxxxxx"
+    ],
+    "bytes": 96,
+    "ts": "2026-09-05T00:00:00.000Z",
+    "preview": "xxxxxxxxxxxxxxxx",
+    "body": {
+      "kind": "json",
+      "text": "{\"xxxxxxx\":\"xxxxxxxxxxxxxxxx\"}"
+    }
+  }
+]

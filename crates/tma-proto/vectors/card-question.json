@@ -1,0 +1,31 @@
+{
+  "schema": 1,
+  "id": "4",
+  "t": "card",
+  "card": "question",
+  "pane": "%1",
+  "agent": "opencode",
+  "request_id": "xxxxxxxxxxxx",
+  "questions": [
+    {
+      "question": "xxxxxxxxxxxxxxxx",
+      "header": "xxxxxxxx",
+      "options": [
+        {
+          "label": "xxxxxxxxxxxx",
+          "description": "xxxxxxxxxxxxxxxx"
+        },
+        {
+          "label": "xxxxxxxx",
+          "description": ""
+        }
+      ],
+      "multiple": false,
+      "custom": true
+    }
+  ],
+  "binder": {
+    "expect_episode_ms": 1757030400000,
+    "expect_permission_request": "xxxxxxxxxxxx"
+  }
+}
