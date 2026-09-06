@@ -47,6 +47,9 @@ pub mod json;
 pub mod notify;
 pub mod nudge;
 pub mod seen;
+// The other half of what a serving tma answers: the transcript reader's events and refusals as the
+// wire's own, under the budgets a remote caller makes necessary.
+pub mod serve_transcript;
 // The per-host dispatch ledger: `broker::fire` decides, this decides whether it runs at all.
 pub mod slots;
 pub mod ui;

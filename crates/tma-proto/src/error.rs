@@ -11,8 +11,14 @@ vocabulary! {
         UnsupportedSchema = "unsupported-schema",
         /// The frame parsed but does not say something this protocol can act on.
         BadRequest = "bad-request",
-        /// The pane, slot or cursor named does not exist here.
+        /// The pane or slot named does not exist here.
         NotFound = "not-found",
+        /// The transcript cursor no longer addresses its bytes (the file was rewritten, truncated
+        /// or replaced), or it is not a token this host minted. Its own code rather than a
+        /// `bad-request` because the device's answer is specific and automatic: drop the cursor and
+        /// ask for a fresh end-anchored window. [`crate::Cursor`] names this refusal in its own
+        /// contract, so the token was part of the wire before a producer existed for it.
+        CursorInvalid = "cursor-invalid",
         /// The device's granted scopes do not cover this request.
         ScopeDenied = "scope-denied",
         /// A well-formed request for something this host cannot do (an unreadable transcript store,

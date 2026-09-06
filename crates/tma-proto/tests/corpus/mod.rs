@@ -259,23 +259,30 @@ pub(crate) fn corpus() -> Vec<Vector> {
                 ResponseFrame::new(
                     "4",
                     Response::Error(ErrorFrame::new(
+                        ErrorCode::CursorInvalid,
+                        "this cursor no longer addresses the file (it was rewritten, truncated or replaced)",
+                    )),
+                ),
+                ResponseFrame::new(
+                    "5",
+                    Response::Error(ErrorFrame::new(
                         ErrorCode::ScopeDenied,
                         "this device is not granted act:steer",
                     )),
                 ),
                 ResponseFrame::new(
-                    "5",
+                    "6",
                     Response::Error(ErrorFrame::new(
                         ErrorCode::Unsupported,
                         "opencode keeps its transcript in SQLite; that reader is a separate workstream",
                     )),
                 ),
                 ResponseFrame::new(
-                    "6",
+                    "7",
                     Response::Error(ErrorFrame::new(ErrorCode::Internal, "the host failed")),
                 ),
                 ResponseFrame::new(
-                    "7",
+                    "8",
                     Response::Error(ErrorFrame::new(
                         ErrorCode::Other(X12.to_string()),
                         "a code this build has never heard of, kept verbatim",
@@ -288,6 +295,7 @@ pub(crate) fn corpus() -> Vec<Vector> {
                 "ErrorCode::UnsupportedSchema",
                 "ErrorCode::BadRequest",
                 "ErrorCode::NotFound",
+                "ErrorCode::CursorInvalid",
                 "ErrorCode::ScopeDenied",
                 "ErrorCode::Unsupported",
                 "ErrorCode::Internal",
