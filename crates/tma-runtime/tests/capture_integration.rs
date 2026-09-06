@@ -337,6 +337,7 @@ fn contradiction_capture_flips_stale_hook_working() {
     s.expect_status("clients", "1");
     wait_quiescent(&s);
     let baseline = s.status_u64("on_demand_captures");
+    let looks_baseline = s.status_u64("recheck_looks");
 
     // The pane hits a permission prompt (output, then quiet). The quiet edge is a contradiction (hook
     // working, chrome blocked): one corrective capture flips it (blocker chrome postdates the hook).
@@ -356,14 +357,86 @@ fn contradiction_capture_flips_stale_hook_working() {
     wait_captures_ge(&s, baseline + 1);
     wait_quiescent(&s);
     let captured = s.status_u64("on_demand_captures") - baseline;
+    // As in the hookless test: a follow-up look is the second legitimate trigger, since a loaded box
+    // can catch this pane with the foreground briefly off the agent. `recheck_looks` is normally
+    // zero here, so this still says "exactly one corrective capture"; it just does not call the
+    // look that recovers the pane an extra capture.
+    let looks = s.status_u64("recheck_looks") - looks_baseline;
     assert_eq!(
-        captured, 1,
-        "exactly ONE corrective capture, got {captured}"
+        captured,
+        1 + looks,
+        "exactly ONE corrective capture: {captured} captures, {looks} looks"
     );
     assert!(
         s.status_u64("contradiction_captures") >= 1,
         "the capture was counted as a contradiction trigger"
     );
+}
+
+// --- 2b. The foreground cap's OTHER verdict: a held hook claim owes the same follow-up look. ---
+
+#[test]
+fn foreground_capped_hook_claim_owes_a_follow_up_look() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("t20");
+    let (pane, pid) = new_shell_session(&s, "s1");
+    let names = process_names_toml(&s, "s1", pid);
+    let comm = comm_of(pid);
+    write_manifest(
+        &s,
+        &format!(
+            "min_engine_version = \"0.1\"\n\
+         [identity]\nprocess_names = [{names}]\n\
+         [capture]\nvisible = [\"working\", \"idle\", \"blocked\"]\n\
+         [[rules]]\nstate = \"blocked\"\ndetail = \"permission\"\npriority = 100\n\
+         region = \"tail_lines(50)\"\nmatch = {{ contains = \"tma-block-marker\" }}\n",
+        ),
+    );
+
+    // The contradiction fixture: a stale hook `working` claim on a hook-capable pane.
+    let old = now_secs() - 1000;
+    s.set_opt(&pane, "@agent_name", &comm);
+    s.set_opt(&pane, "@agent_state", "working");
+    s.set_opt(&pane, "@agent_source", "hook");
+    s.set_opt(&pane, "@agent_session", "sess-1");
+    s.set_opt(&pane, "@agent_evidence_at", &old.to_string());
+    s.set_opt(&pane, "@agent_since", &old.to_string());
+    s.set_opt(&pane, "@agent_stamped_at", &old.to_string());
+
+    let _daemon = spawn_daemon(&s, PINNED_SWEEP);
+    s.expect_status("clients", "1");
+    wait_quiescent(&s);
+    let looks_baseline = s.status_u64("recheck_looks");
+
+    // Blocker chrome, and then a foreground that is NOT the agent and emits nothing further:
+    // `sleep` holds the tty, so the quiet edge's capture is capped. Under a live hook claim the
+    // fold HOLDS that claim rather than publishing `unknown`, which is the same process fact
+    // answering, and the pane will never emit another edge of its own to be re-read on.
+    let shell_cmd = basename(&s.get("s1", "#{pane_current_command}"));
+    burst(&s, &pane, "echo tma-block-marker; sleep 300");
+    // Wait on the fact itself, not on the sleeper's name: `sleep` reports as the multi-call binary
+    // (`coreutils`) under uutils, so what is portable is that the foreground is no longer the shell.
+    assert!(
+        common::wait_until(common::POLL_CEILING, || basename(
+            &s.get("s1", "#{pane_current_command}")
+        ) != shell_cmd),
+        "the fixture pane never handed its foreground away from {shell_cmd}"
+    );
+
+    let looks = wait_status_ge(&s, "recheck_looks", looks_baseline + 1);
+    assert!(
+        looks > looks_baseline,
+        "a capped capture that held the hook claim must still schedule its follow-up look{}",
+        s.forensics(&[&pane])
+    );
+    // The premise, so the assertion above cannot pass for the wrong reason: the cap really did
+    // hold the stale claim (a flipped stamp would mean the pane was never capped at all).
+    assert_eq!(s.get(&pane, "#{@agent_state}"), "working");
+    assert_eq!(s.get(&pane, "#{@agent_source}"), "hook");
 }
 
 // ---------------------------------------------------------------------------------------------
