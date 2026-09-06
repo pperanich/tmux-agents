@@ -49,8 +49,8 @@ pub use snapshot::{PaneSnapshot, ProcInfo};
 pub use stamp::{ReadResult, StampedState};
 pub use state::{AgentState, Detail, GrammarError};
 pub use telemetry::{
-    claude_statusline_model, codex_rollout_model, format_cost_usd, hook_payload_model,
-    parse_context, parse_usage, ContextReport, QuotaReport, QuotaWindow, QuotaWindowReading,
-    UsageReport,
+    claude_statusline_model, codex_rollout_model, context_format_carries_window, format_cost_usd,
+    hook_payload_model, parse_context, parse_usage, ContextReport, QuotaReport, QuotaWindow,
+    QuotaWindowReading, UsageReport,
 };
 pub use verdict::{Verdict, WinningEvidence, WriteAction, WritePlan};

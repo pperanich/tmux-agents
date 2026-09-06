@@ -958,6 +958,29 @@ pub fn reload_notice(
     }
 }
 
+/// Resolve the config DIRECTORY: an explicit override, then `TMA_CONFIG_DIR`, then
+/// `$XDG_CONFIG_HOME/tma`, else `~/.config/tma` (`.` with no `HOME`). Where the install records
+/// live, so the installer and the daemon's hook re-arm read one path. Distinct from
+/// [`resolve_path`], which resolves the config FILE and honors `TMA_CONFIG`.
+pub fn config_dir(explicit: Option<&Path>) -> PathBuf {
+    if let Some(p) = explicit {
+        return p.to_path_buf();
+    }
+    if let Some(p) = std::env::var_os("TMA_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        return PathBuf::from(p);
+    }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("tma");
+        }
+    }
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/tma")
+}
+
 /// Resolve the config path: `--config`, then `TMA_CONFIG`, then `$XDG_CONFIG_HOME/tma/`, then
 /// `~/.config/tma/`. `None` only when none is set and there is no `HOME`. Mirrors the base-dir logic
 /// in `install.rs` and `manifests.rs`.

@@ -46,6 +46,9 @@ pub mod nudge;
 pub mod seen;
 // The per-host dispatch ledger: `broker::fire` decides, this decides whether it runs at all.
 pub mod slots;
+// The attention-clear tmux hooks: shared because the installer writes them and the daemon re-arms
+// what a server restart wiped, and the two must produce the same command.
+pub mod tmux_hooks;
 pub mod ui;
 pub mod window_name;
 

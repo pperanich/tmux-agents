@@ -17,7 +17,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use common::{DaemonGuard, Scratch};
-use tma_runtime::ipc::{encode_frame, parse_lock, ACK, VERSION};
+use tma_runtime::ipc::{encode_frame, parse_lock, socket_key, ACK, VERSION};
 use tma_test_support as common;
 
 /// The `@agent_*` pane options a stamp writes, for map comparison.
@@ -1866,5 +1866,127 @@ fn a_wedged_daemon_is_told_the_sigterm_stands() {
     assert!(
         wedged.wait_exit(common::POLL_CEILING),
         "the delivered SIGTERM really does take effect once the daemon runs again"
+    );
+}
+
+// ---- the tmux-hook re-arm ---------------------------------------------------------------------
+
+/// The attention-clear hook the re-arm tests drive. Its partner (`session-window-changed`) rides
+/// the same code path off the same record, so one hook proves the mechanism and two prove nothing more.
+const REARM_HOOK: &str = "after-select-pane";
+
+/// The config dir the re-arm daemons read their install record from, under the scratch workdir so
+/// the developer's real `~/.config/tma` is never touched (SAFETY).
+fn hooks_config_dir(s: &Scratch) -> PathBuf {
+    s.workdir.join("cfg")
+}
+
+/// One global hook array as tmux prints it back.
+fn hook_commands(s: &Scratch, hook: &str) -> String {
+    String::from_utf8_lossy(&s.tmux(&["show-hooks", "-g", hook]).stdout).into_owned()
+}
+
+/// Write the per-server tmux-hook install record `tma install-hooks` writes: `hooks-state-<key>.toml`,
+/// keyed by the hash of this server's `#{socket_path}` (tmux `-g` hook indexes are per-server).
+fn write_hook_record(s: &Scratch, hook: &str, index: usize) {
+    let dir = hooks_config_dir(s);
+    std::fs::create_dir_all(&dir).unwrap();
+    let key = socket_key(&s.get("", "#{socket_path}"));
+    std::fs::write(
+        dir.join(format!("hooks-state-{key}.toml")),
+        format!("[[tmux_hooks]]\nhook = \"{hook}\"\nindex = {index}\n"),
+    )
+    .unwrap();
+}
+
+/// Spawn the foreground daemon with its config dir pinned to the scratch workdir, returning the
+/// guard and the log its stderr goes to (the re-arm reports itself there).
+fn spawn_daemon_with_config_dir(s: &Scratch) -> (DaemonGuard, PathBuf) {
+    let child = s
+        .command()
+        .args(["daemon", "--socket-name", &s.socket])
+        .env("TMA_CONFIG_DIR", hooks_config_dir(s))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(s.daemon_log_stdio())
+        .spawn()
+        .expect("spawn daemon");
+    (DaemonGuard::new(child), s.daemon_log_path())
+}
+
+/// tmux hooks are runtime server state: a `kill-server` or a reboot drops the array while the
+/// install record on disk still says they are installed, so the pane you select stops clearing its
+/// attention flag. The daemon, which starts on the new server anyway, puts them back.
+#[test]
+fn the_daemon_rearms_a_tmux_hook_a_server_restart_wiped() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("rearm");
+    let _pane = new_pane(&s, "s1");
+
+    // The installed posture: our clear-attention entry on the server, recorded per server.
+    let installed = "run-shell \"tma clear-attention '#{pane_id}' 2>/dev/null || true\"";
+    assert!(s
+        .tmux(&["set-hook", "-ga", REARM_HOOK, installed])
+        .status
+        .success());
+    write_hook_record(&s, REARM_HOOK, 0);
+    assert!(hook_commands(&s, REARM_HOOK).contains("clear-attention"));
+
+    // What a restart does to it: the array goes, nothing on disk changes.
+    assert!(s.tmux(&["set-hook", "-gu", REARM_HOOK]).status.success());
+    assert!(
+        !hook_commands(&s, REARM_HOOK).contains("clear-attention"),
+        "the wipe must actually land, or the assertion below proves nothing"
+    );
+
+    let (_daemon, log) = spawn_daemon_with_config_dir(&s);
+    assert!(
+        wait_for_log(&log, "re-armed", common::POLL_CEILING),
+        "the daemon reports the re-arm once: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    let after = hook_commands(&s, REARM_HOOK);
+    assert!(
+        after.contains("clear-attention") && after.contains("pane_id"),
+        "the hook is back, binding the pane at hook time: {after}"
+    );
+}
+
+/// The guard on the other side: with no install record for this server there is nothing to restore,
+/// so a daemon on a server that never had the hooks installs none of its own.
+#[test]
+fn a_daemon_sets_no_tmux_hook_without_an_install_record() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    let s = Scratch::new_daemon("norearm");
+    let _pane = new_pane(&s, "s1");
+    std::fs::create_dir_all(hooks_config_dir(&s)).unwrap();
+
+    let (_daemon, log) = spawn_daemon_with_config_dir(&s);
+    // The probe banner is printed inside the serve loop, which the re-arm runs before: past it,
+    // "nothing was set" is a verdict rather than a race.
+    assert!(
+        wait_for_log(&log, "reconciliation sweep", common::POLL_CEILING),
+        "the daemon must reach its serve loop: {}",
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
+    for hook in [REARM_HOOK, "session-window-changed"] {
+        assert!(
+            !hook_commands(&s, hook).contains("clear-attention"),
+            "{hook}: a daemon must never install hooks nobody recorded"
+        );
+    }
+    assert!(
+        !std::fs::read_to_string(&log)
+            .unwrap_or_default()
+            .contains("re-armed"),
+        "and it says nothing about a re-arm it did not do"
     );
 }

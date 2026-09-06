@@ -34,6 +34,25 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   `1` pressed half a second into a hold resolved the call in 50 ms with the hook still parked. What
   it costs is one sleeping `tma event` per hand-answered prompt, for up to `hold_ms`.
 
+### Fixed
+
+- **The daemon re-arms the tmux attention hooks a server restart wiped.** `after-select-pane` and
+  `session-window-changed` live in the tmux server, not on disk, so a `kill-server` or a reboot
+  drops them while the per-server install record still says they are installed: the pane you
+  selected stopped clearing its attention flag, and `tma doctor` could only tell you to re-run
+  `tma install-hooks`. A daemon starting on that server now re-installs exactly the hooks its
+  record names, writing the same command the installer does, and logs the repair once. Guarded on
+  both sides: no record means nothing is set, and a hook that still carries an entry of tma's is
+  left alone (repairing a *drifted* entry is still the installer's job). Doctor's `wiped` line says
+  so, since seeing it now means no daemon has started since the restart.
+- **A codex `notify` entry chained through another program reads as wired.** Codex allows one
+  `notify` program, so a tool that wants the signal takes the key and passes the previous command
+  on to itself (Codex Computer Use writes it as a JSON array in its own `--previous-notify`
+  argument). tma's wrapper still fires, but `tma doctor` and `install-hooks --check` reported
+  `config ~/.codex/config.toml has no tma notify entry`. Both now read the chain and report
+  `notify chained through <program>`; `install-hooks codex` leaves a working chain byte-identical,
+  and refuses a stale one with the hand edit named rather than rewriting another program's argv.
+
 ## [0.5.13] - 2026-09-05
 
 ### Added

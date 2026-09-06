@@ -5,8 +5,8 @@ use super::claude_json::{
     flat_commands, is_wrapper_command, nested_commands, wrapper_command, CURSOR_SHAPE,
 };
 use super::codex_toml::{
-    codex_hooks_events, codex_notify_is_ours, codex_notify_ok, edit_codex_install,
-    edit_codex_uninstall, read_codex_config, CODEX_TRUST_NOTICE,
+    codex_hooks_events, edit_codex_install, edit_codex_uninstall, notify_status, read_codex_config,
+    CODEX_TRUST_NOTICE,
 };
 use super::js_bridge::{
     install_js_bridge, install_opencode_plugin, js_bridge_ok, opencode_plugin_ok,
@@ -814,10 +814,7 @@ impl AgentAdapter for CodexAdapter {
                 return HookWiring::Incomplete(vec![format!("agent {}: {err}", lm.name)]);
             }
         };
-        let doc = text.parse::<toml_edit::DocumentMut>().ok();
-        let notify = doc.as_ref().and_then(|d| d.get("notify"));
-        let notify_ours = notify.is_some_and(codex_notify_is_ours);
-        let notify_current = notify_ours && codex_notify_ok(&text, wrapper);
+        let notify = notify_status(&text, wrapper);
 
         let events = codex_hooks_events(&lm.manifest);
         let hooks_root = match classify_root(&lm.name, &paths.codex_hooks) {
@@ -827,26 +824,40 @@ impl AgentAdapter for CodexAdapter {
         let wired = events_wired(&hooks_root, &lm.name, &events, wrapper, nested_commands);
 
         // The notify channel first, so a merged drift report reads config.toml then hooks.json.
+        let config = paths.codex_config.display();
         let notify_channel = Channel {
-            present: notify_ours,
-            current: notify_current,
-            reasons: if !notify_ours {
-                vec![format!(
-                    "agent {}: config {} has no tma `notify` entry",
-                    lm.name,
-                    paths.codex_config.display()
-                )]
-            } else if !notify_current {
-                vec![format!(
-                    "agent {}: config {} `notify` references a different wrapper; reinstall",
-                    lm.name,
-                    paths.codex_config.display()
-                )]
-            } else {
-                Vec::new()
+            present: notify.present,
+            current: notify.current,
+            reasons: match (&notify.chained_through, notify.present, notify.current) {
+                (_, false, _) => vec![format!(
+                    "agent {}: config {config} has no tma `notify` entry",
+                    lm.name
+                )],
+                (None, _, false) => vec![format!(
+                    "agent {}: config {config} `notify` references a different wrapper; reinstall",
+                    lm.name
+                )],
+                // A chain tma must not rewrite: name the hand edit rather than a reinstall that
+                // would refuse.
+                (Some(prog), _, false) => vec![format!(
+                    "agent {}: config {config} `notify` is chained through {prog} but the chained \
+                     command names a different tma-hook; edit it by hand (tma will not rewrite \
+                     another program's argv)",
+                    lm.name
+                )],
+                (_, true, true) => Vec::new(),
             },
         };
-        classify_channels(&[notify_channel, hook_channel(&lm.name, &events, &wired)])
+        let wiring = classify_channels(&[notify_channel, hook_channel(&lm.name, &events, &wired)]);
+        // A working chain is wiring, not drift, but the config does not look like what install
+        // writes: say whose argv it lives in so the shape is not read as a broken install.
+        match (&wiring, &notify.chained_through) {
+            (HookWiring::Wired, Some(prog)) => HookWiring::WiredVia(vec![format!(
+                "agent {}: notify chained through {prog}",
+                lm.name
+            )]),
+            _ => wiring,
+        }
     }
 }
 

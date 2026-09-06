@@ -24,6 +24,7 @@ fn fmt_age(ms: u64) -> String {
 fn hook_summary(w: &HookWiring) -> String {
     match w {
         HookWiring::Wired => "wired".to_string(),
+        HookWiring::WiredVia(notes) => format!("wired ({})", notes.join("; ")),
         HookWiring::Incomplete(reasons) => format!("incomplete ({})", reasons.join("; ")),
         HookWiring::NotInstalled => "not installed".to_string(),
         HookWiring::Hookless => "hookless (screen-detection only)".to_string(),
@@ -34,7 +35,9 @@ fn hook_summary(w: &HookWiring) -> String {
 /// Stable token for the wiring category, for the `--json` `hook_status` field.
 fn hook_status_token(w: &HookWiring) -> &'static str {
     match w {
-        HookWiring::Wired => "wired",
+        // A chained entry is wired; whose config it lives in is a text-report note, not a category
+        // a `--json` consumer has to learn.
+        HookWiring::Wired | HookWiring::WiredVia(_) => "wired",
         HookWiring::Incomplete(_) => "incomplete",
         HookWiring::NotInstalled => "not_installed",
         HookWiring::Hookless => "hookless",
@@ -68,14 +71,14 @@ pub(super) fn render_text(r: &Report) -> String {
         if daemon_version_matches(r.daemon_version.as_deref()) == Some(false) {
             let running = r.daemon_version.as_deref().unwrap_or("unknown");
             out.push_str(&format!(
-                "         version {running} differs from this CLI ({}) — `tma reload` only re-reads \
+                "         version {running} differs from this CLI ({}); `tma reload` only re-reads \
                  config and manifests; run `tma daemon --restart` to put this build in its place\n",
                 ipc::VERSION
             ));
         }
     } else {
         out.push_str(&format!(
-            "daemon:  not running ({}) — tier 3 needs a running daemon (`tma daemon --ensure`)\n",
+            "daemon:  not running ({}): tier 3 needs a running daemon (`tma daemon --ensure`)\n",
             r.daemon_socket.display()
         ));
     }
@@ -83,11 +86,11 @@ pub(super) fn render_text(r: &Report) -> String {
     // Ambient driver.
     match r.ambient_poll_age_ms {
         Some(age) => out.push_str(&format!(
-            "ambient: polling — `tma status` last ran {} ago\n",
+            "ambient: polling: `tma status` last ran {} ago\n",
             fmt_age(age)
         )),
         None => out.push_str(
-            "ambient: NOT polling — nothing invokes `tma status`; add `#(tma status)` to \
+            "ambient: NOT polling: nothing invokes `tma status`; add `#(tma status)` to \
              status-right (required ambient driver)\n",
         ),
     }
@@ -97,12 +100,12 @@ pub(super) fn render_text(r: &Report) -> String {
     if r.attached_clients == 0 {
         if r.daemon_alive {
             out.push_str(
-                "clients: none attached — `#()` status jobs do not run detached; the daemon is \
+                "clients: none attached: `#()` status jobs do not run detached; the daemon is \
                  keeping state fresh meanwhile\n",
             );
         } else {
             out.push_str(
-                "clients: none attached — `#()` status jobs only run while a client draws the \
+                "clients: none attached: `#()` status jobs only run while a client draws the \
                  status line, so nothing polls this server (run the daemon or attach a client)\n",
             );
         }
@@ -111,7 +114,7 @@ pub(super) fn render_text(r: &Report) -> String {
     }
     if !r.status_enabled {
         out.push_str(
-            "status:  the global `status` option is off — the `#(tma status)` driver never runs \
+            "status:  the global `status` option is off: the `#(tma status)` driver never runs \
              and `display-message` notifications are invisible (`tmux set -g status on`)\n",
         );
     }
@@ -205,7 +208,7 @@ pub(super) fn render_text(r: &Report) -> String {
         out.push_str(&format!(
             "  - {}: process_names entry {:?} is longer than {COMM_MAX} chars, the width both \
              macOS libproc and the Linux kernel truncate `comm` to, and no truncated spelling sits \
-             beside it — add {:?}\n",
+             beside it; add {:?}\n",
             lint.agent,
             lint.name,
             lint.name.chars().take(COMM_MAX).collect::<String>()
@@ -230,7 +233,7 @@ pub(super) fn render_text(r: &Report) -> String {
     // Printed only when there are any — an ordinary server has none and needs no line about it.
     if !r.nested.is_empty() {
         out.push_str(&format!(
-            "nested:  {} pane(s) running a multiplexer client — agent state lives on the inner \
+            "nested:  {} pane(s) running a multiplexer client: agent state lives on the inner \
              server; run tma there\n",
             r.nested.len()
         ));
@@ -244,7 +247,7 @@ pub(super) fn render_text(r: &Report) -> String {
     // still carries is held, not live, which is exactly what makes it worth naming.
     if !r.remote.is_empty() {
         out.push_str(&format!(
-            "remote:  {} pane(s) behind a remote shell — an agent there reports only if it can \
+            "remote:  {} pane(s) behind a remote shell: an agent there reports only if it can \
              reach this tmux socket (see docs/how-to/agents-in-containers.md)\n",
             r.remote.len()
         ));
@@ -265,7 +268,7 @@ pub(super) fn render_text(r: &Report) -> String {
     // otherwise: nothing else distinguishes an ignored pane from one no manifest matched.
     if !r.ignored.is_empty() {
         out.push_str(&format!(
-            "ignored: {} pane(s) excluded from detection — unset the option to bring one back \
+            "ignored: {} pane(s) excluded from detection: unset the option to bring one back \
              (`tmux set-option -pu -t <pane> @agent_ignore`)\n",
             r.ignored.len()
         ));
@@ -295,7 +298,7 @@ pub(super) fn render_text(r: &Report) -> String {
     // so the reason comes first rather than leaving the panes section to look like an empty server.
     if let Some(err) = &r.process_walk_error {
         out.push_str(&format!(
-            "procs:   the process walk failed ({err}) — detection cannot see what runs in a pane; \
+            "procs:   the process walk failed ({err}): detection cannot see what runs in a pane; \
              only panes a hook registered are listed below (check that `ps` is on PATH)\n"
         ));
     }
@@ -332,7 +335,7 @@ pub(super) fn render_text(r: &Report) -> String {
         if let Some(model) = &a.model {
             match a.window_covered {
                 Some(false) => out.push_str(&format!(
-                    "       model: {model} — unrecognized; no [telemetry.windows] entry names it\n"
+                    "       model: {model}; unrecognized: no [telemetry.windows] entry names it\n"
                 )),
                 _ => out.push_str(&format!("       model: {model}\n")),
             }
@@ -572,7 +575,10 @@ pub(super) fn render_json(r: &Report) -> String {
             None => j.null("evidence_age_ms"),
         }
         j.string("hook_status", hook_status_token(&a.wiring));
-        j.bool("hooks_wired", matches!(a.wiring, HookWiring::Wired));
+        j.bool(
+            "hooks_wired",
+            matches!(a.wiring, HookWiring::Wired | HookWiring::WiredVia(_)),
+        );
         match &a.model {
             Some(model) => j.string("model", model),
             None => j.null("model"),
@@ -666,6 +672,28 @@ mod tests {
         assert!(text.contains("none attached") && !text.contains("nothing polls this server"));
         report.attached_clients = 2;
         assert!(render_text(&report).contains("clients: 2 attached"));
+    }
+
+    /// The model line: named bare wherever the window table is not consulted (`window_covered:
+    /// null`, which every shipped channel produces), and linted only where a gauge would read it.
+    #[test]
+    fn the_model_line_lints_only_where_the_window_table_is_read() {
+        let mut report = sample_report();
+        let linted = render_text(&report);
+        assert!(
+            linted.contains("model: gpt-5-codex; unrecognized: no [telemetry.windows] entry"),
+            "the load-bearing case still names the model and the table: {linted}"
+        );
+
+        report.agents[0].window_covered = None;
+        let quiet = render_text(&report);
+        assert!(
+            quiet.contains("model: gpt-5-codex\n") && !quiet.contains("unrecognized"),
+            "a channel that carries its own window reports the model and says nothing else: {quiet}"
+        );
+
+        report.agents[0].window_covered = Some(true);
+        assert!(!render_text(&report).contains("unrecognized"));
     }
 
     #[test]

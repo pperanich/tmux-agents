@@ -90,19 +90,10 @@ fn resolve_gemini_settings(override_path: Option<&Path>) -> PathBuf {
     })
 }
 
+/// The tma config dir (`--config-dir`, `TMA_CONFIG_DIR`, `$XDG_CONFIG_HOME/tma`, else
+/// `~/.config/tma`). Resolved in runtime, since the daemon reads the hook record from the same dir.
 pub(crate) fn resolve_config_dir(override_path: Option<&Path>) -> PathBuf {
-    if let Some(p) = override_path {
-        return p.to_path_buf();
-    }
-    if let Some(p) = std::env::var_os("TMA_CONFIG_DIR").filter(|v| !v.is_empty()) {
-        return PathBuf::from(p);
-    }
-    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
-        if !xdg.is_empty() {
-            return PathBuf::from(xdg).join("tma");
-        }
-    }
-    home_join(".config/tma")
+    tma_runtime::config::config_dir(override_path)
 }
 
 /// Resolve the OpenCode plugin path (override, env `TMA_OPENCODE_PLUGIN`, else the global plugin dir
@@ -377,12 +368,9 @@ fn is_executable_file(path: &Path) -> bool {
 }
 
 /// The tma binary path referenced by the tmux hook command (`$TMA_BIN`, else the running
-/// exe). Tests point `$TMA_BIN` at the built binary.
+/// exe). One resolution, in runtime, because the daemon's hook re-arm writes the same command.
 pub(super) fn tma_bin() -> PathBuf {
-    if let Some(p) = std::env::var_os("TMA_BIN").filter(|v| !v.is_empty()) {
-        return PathBuf::from(p);
-    }
-    std::env::current_exe().unwrap_or_else(|_| PathBuf::from("tma"))
+    tma_runtime::tmux_hooks::tma_bin()
 }
 
 pub(crate) fn home_join(rel: &str) -> PathBuf {
