@@ -19,6 +19,9 @@ tma-core = { path = "../tma-core" }
 # The tmux I/O crate: the read path, control-mode pool, and guarded write adapter the
 # bin's poll/daemon/picker/jump/install commands drive. The only crate that spawns tmux.
 tma-tmux = { path = "../tma-tmux" }
+# The transcript reader: agent transcript stores mapped to one normalized event vocabulary,
+# served a bounded page at a time. Consumed by `tma transcript` only.
+tma-transcript = { path = "../tma-transcript" }
 # The tier-2 runtime crate: config, manifests + hook-event vocabulary, identity, the
 # poll cycle, on-demand capture, the `tma event` bridge, and the debug/explain surfaces the
 # bin's commands drive.

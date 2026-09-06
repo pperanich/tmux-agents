@@ -76,7 +76,7 @@ fn render_rows_document(rows: &[AgentRow], origin: &Origin) -> String {
     j.begin_array();
     for r in rows {
         j.begin_object();
-        write_row_fields(&mut j, r, origin);
+        write_row_fields(&mut j, r, origin, RowSurface::Local);
         j.end_object();
     }
     j.end_array();
@@ -84,15 +84,30 @@ fn render_rows_document(rows: &[AgentRow], origin: &Origin) -> String {
     j.finish()
 }
 
-/// Write one agent row's fields (no enclosing object) into `j`, the key set defined once here so
-/// `ls --json` and `wait --json` cannot disagree on keys/order/null handling (drift tests pin both).
+/// Who a row is being serialized for. The two surfaces share one key set with exactly one
+/// exception, `title`, so a consumer of either parses the same shape.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RowSurface {
+    /// The local documents (`tma ls --json`, `tma wait --json`, `tma subscribe`): every key.
+    Local,
+    /// The frames a serving process sends off the machine: the same keys minus `title`. A pane
+    /// title is agent-supplied text, kept off every remote surface for the reason it is kept out of
+    /// the notification payload and the `TMA_*` env vars.
+    Protocol,
+}
+
+/// Write one agent row's fields (no enclosing object) into `j`, the key set defined once here so no
+/// two surfaces can disagree on keys/order/null handling (drift tests pin each one).
+///
+/// `surface` chooses the local key set or the title-free protocol one; nothing else differs between
+/// them, and because both run through this one function a key added for either is added for both.
 ///
 /// PRECONDITION: the caller has run `tma_runtime::repo::annotate_rows` on the row. The `repo` label is
 /// `None` both when unresolved AND when never annotated — the type cannot tell those apart, so a
 /// serializer that skips annotation emits well-formed nulls the drift tests will not catch. Every
 /// current caller (ls, wait's matched-row emit, the subscribe render closure) annotates first; a new
 /// serializing surface must too.
-fn write_row_fields(j: &mut JsonWriter, r: &AgentRow, origin: &Origin) {
+pub fn write_row_fields(j: &mut JsonWriter, r: &AgentRow, origin: &Origin, surface: RowSurface) {
     j.string("pane", &r.pane_id);
     j.string("agent", &r.agent);
     j.string("state", r.state.token());
@@ -110,7 +125,11 @@ fn write_row_fields(j: &mut JsonWriter, r: &AgentRow, origin: &Origin) {
     // re-satisfies on every lap. This is the key to feed back.
     j.number("episode_ms", r.episode_at() as i64);
     j.string("locator", &r.locator());
-    j.string("title", &r.title);
+    // The one key the two surfaces differ on: the pane title is agent-supplied text, so it rides
+    // the local documents and never a frame leaving the machine.
+    if surface == RowSurface::Local {
+        j.string("title", &r.title);
+    }
     j.bool("attention", r.attention);
     // Additive (schema stays 1): the "done" surface (idle + attention) precomputed from the one core
     // definition, so consumers stop re-deriving it — and cannot re-derive it differently.
@@ -226,13 +245,14 @@ fn write_row_fields(j: &mut JsonWriter, r: &AgentRow, origin: &Origin) {
     j.string("host", &origin.host);
 }
 
-/// `tma wait --json`: the single matched row as a schema-1 object. Its keys are `write_row_fields`'s
-/// plus a top-level `schema` (no `agents` wrapper), a distinct serialization site with its own drift test.
+/// `tma wait --json`: the single matched row as a schema-1 object. Its keys are
+/// [`write_row_fields`]'s local set plus a top-level `schema` (no `agents` wrapper), a distinct
+/// serialization site with its own drift test.
 pub fn render_wait_json(r: &AgentRow, origin: &Origin) -> String {
     let mut j = JsonWriter::new();
     j.begin_object();
     j.number("schema", JSON_SCHEMA);
-    write_row_fields(&mut j, r, origin);
+    write_row_fields(&mut j, r, origin, RowSurface::Local);
     j.end_object();
     j.finish()
 }
@@ -447,7 +467,8 @@ fn prom_label(v: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tma_core::{QuotaLabel, RepoLabel};
+    use std::collections::BTreeSet;
+    use tma_core::{PendingCall, QuotaLabel, RepoLabel};
 
     fn row(pane: &str, agent: &str, state: AgentState, detail: Option<&str>) -> AgentRow {
         AgentRow {
@@ -905,6 +926,169 @@ mod tests {
             "state token stays idle"
         );
         assert!(json.contains("\"attention\":true"), "done via the flag");
+    }
+
+    /// Every optional field populated, so a key-set comparison reaches the keys an all-`null` row
+    /// never emits (the three nested inside `quota`) as well as the ones it does.
+    fn full_row(pane: &str) -> AgentRow {
+        AgentRow {
+            agent_session: Some("ses_01ABC".to_string()),
+            transcript: Some("/w/.claude/projects/p/abc.jsonl".to_string()),
+            permission_request: Some("per_01ABC".to_string()),
+            stamped_at: Some(1_790_787_200_000),
+            context_pct: Some(42),
+            context_at: Some(1_790_787_100_000),
+            tokens: Some(84_000),
+            muted: true,
+            model: Some("claude-opus-4".to_string()),
+            cwd: Some("/w".to_string()),
+            repo: Some(RepoLabel {
+                name: "myrepo".to_string(),
+                branch: "fix/timeout".to_string(),
+                worktree: true,
+            }),
+            pending: Some(PendingCall {
+                tool: "Bash".to_string(),
+                call: "call_1".to_string(),
+                summary: "cargo test".to_string(),
+            }),
+            ..quota_row(pane)
+        }
+    }
+
+    /// One row as a bare JSON object on the given surface, with no document wrapper around it.
+    fn render_row_object(r: &AgentRow, surface: RowSurface) -> String {
+        let mut j = JsonWriter::new();
+        j.begin_object();
+        write_row_fields(&mut j, r, &origin(), surface);
+        j.end_object();
+        j.finish()
+    }
+
+    fn row_keys(r: &AgentRow, surface: RowSurface) -> BTreeSet<String> {
+        json_keys(&render_row_object(r, surface))
+            .into_iter()
+            .collect()
+    }
+
+    /// A-201: the protocol row's key set is the local row's minus `title`, and minus nothing else.
+    /// Both sides come from one `AgentRow` through the one writer, so this is structural: a key
+    /// added under a `Local`-only branch widens the difference and fails here, and a key added to
+    /// the shared body reaches both surfaces and cannot.
+    #[test]
+    fn protocol_row_is_the_local_row_minus_title() {
+        let r = full_row("%1");
+        let local = row_keys(&r, RowSurface::Local);
+        let protocol = row_keys(&r, RowSurface::Protocol);
+
+        assert_eq!(
+            &local - &protocol,
+            BTreeSet::from(["title".to_string()]),
+            "title is the only key the protocol surface drops"
+        );
+        assert!(
+            (&protocol - &local).is_empty(),
+            "and it invents none of its own: {protocol:?}"
+        );
+        // The additive keys the row grew after `title`, so the comparison above is not two thin rows
+        // agreeing by accident.
+        for key in [
+            "done",
+            "episode_ms",
+            "session",
+            "transcript",
+            "permission_request",
+            "stamped_at_ms",
+            "context",
+            "context_at_ms",
+            "muted",
+            "tokens",
+            "quota",
+            "pct",
+            "window",
+            "resets_at_ms",
+            "cost_usd",
+            "repo",
+            "branch",
+            "worktree",
+            "pending_tool",
+            "pending_call",
+            "pending_summary",
+            "server",
+            "host",
+        ] {
+            assert!(
+                protocol.contains(key),
+                "{key} is missing from the protocol row"
+            );
+        }
+    }
+
+    /// The protocol key set as a literal, the same pin every other serialization site carries: the
+    /// `wait --json` inventory minus `title` and minus the document-level `schema`.
+    #[test]
+    fn protocol_row_pins_full_key_set() {
+        assert_eq!(
+            json_keys(&render_row_object(&full_row("%1"), RowSurface::Protocol)),
+            [
+                "agent",
+                "attention",
+                "branch",
+                "context",
+                "context_at_ms",
+                "cost_usd",
+                "detail",
+                "done",
+                "episode_ms",
+                "host",
+                "locator",
+                "muted",
+                "pane",
+                "pct",
+                "pending_call",
+                "pending_summary",
+                "pending_tool",
+                "permission_request",
+                "quota",
+                "repo",
+                "resets_at_ms",
+                "server",
+                "session",
+                "since",
+                "since_ms",
+                "stamped_at_ms",
+                "state",
+                "tokens",
+                "transcript",
+                "window",
+                "worktree",
+            ]
+        );
+    }
+
+    /// A title that would need escaping cannot smuggle itself onto the protocol surface. The key
+    /// check runs on the parsed key set rather than a substring, because a value containing a
+    /// literal `"title":` puts those bytes in the output no matter which surface rendered it.
+    #[test]
+    fn protocol_row_carries_no_title_even_when_it_needs_escaping() {
+        let mut r = full_row("%1");
+        r.title = "SENTINEL \"title\": c:\\work\ttab\u{1}".to_string();
+
+        let protocol = render_row_object(&r, RowSurface::Protocol);
+        assert!(
+            !row_keys(&r, RowSurface::Protocol).contains("title"),
+            "no title key: {protocol}"
+        );
+        assert!(
+            !protocol.contains("SENTINEL"),
+            "and none of the title's text: {protocol}"
+        );
+
+        let local = render_row_object(&r, RowSurface::Local);
+        assert!(
+            row_keys(&r, RowSurface::Local).contains("title") && local.contains("SENTINEL"),
+            "while the local surface still carries it verbatim: {local}"
+        );
     }
 
     /// The sorted, de-duplicated object keys of a JSON document (a quoted string whose next non-space

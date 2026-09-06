@@ -872,3 +872,168 @@ fn wrapper_exits_zero_silently_when_binary_missing() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+/// The hook reply lane, end to end on a scratch server: the real wrapper holds a
+/// `PermissionRequest` open, `tma act approve` answers it over the lane, and the decision object
+/// comes back out of the wrapper's stdout.
+///
+/// It is the wrapper and not `tma event` directly on purpose: passing that stdout through is the
+/// wrapper change the lane needed, and a test on the binary alone would not see it break.
+#[test]
+fn the_hook_lane_answers_a_permission_request_over_tma_act() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    use std::io::Write;
+
+    let s = Scratch::new("hook_lane");
+    let pane = s.new_pane();
+
+    // Lane on. 20 s is plenty of headroom for a dispatch that lands in well under one.
+    let config = s.workdir.join("lane.toml");
+    std::fs::write(
+        &config,
+        "[hooks]\nclaude_reply_lane = { hold_ms = 20000 }\n[fold]\nfreshness_secs = 600\n",
+    )
+    .unwrap();
+
+    let bash_permission_request = format!(
+        r#"{{"session_id":"{SESSION}","transcript_path":"{TRANSCRIPT}",
+            "prompt_id":"20edf0d8-a22b-43de-94ab-4ecce0c78d11",
+            "hook_event_name":"PermissionRequest","tool_name":"Bash",
+            "tool_input":{{"command":"touch marker && echo done"}}}}"#
+    );
+
+    let mut hook = spawn_wrapper(
+        Command::new(wrapper(&s))
+            .arg("claude")
+            .arg("PermissionRequest")
+            .env("TMUX_PANE", &pane)
+            .env("TMA_HOOK_SOCKET", &s.socket)
+            .env("TMA_BIN", common::tma_bin())
+            .env("TMA_CONFIG", &config)
+            .env("XDG_RUNTIME_DIR", &s.workdir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    );
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(bash_permission_request.as_bytes())
+        .unwrap();
+
+    // The hook is holding once it has stamped the request it minted.
+    assert!(
+        common::wait_until(std::time::Duration::from_secs(10), || !s
+            .pane_option(&pane, "@agent_permission_request")
+            .is_empty()),
+        "the lane should stamp @agent_permission_request before it holds"
+    );
+    let request = s.pane_option(&pane, "@agent_permission_request");
+    assert_eq!(
+        request,
+        s.pane_option(&pane, "@agent_pending_call"),
+        "the lane parks the id @agent_pending_call already carries"
+    );
+    assert_eq!(s.pane_option(&pane, "@agent_state"), "blocked");
+    assert_eq!(s.pane_option(&pane, "@agent_detail"), "permission");
+    let record = s.workdir.join(format!("tma/requests/{request}.json"));
+    let parked = std::fs::read_to_string(&record).expect("the request record is on disk");
+    assert!(
+        parked.contains(r#""tool_name":"Bash""#) && parked.contains("touch marker && echo done"),
+        "the record carries the payload's own call: {parked}"
+    );
+
+    let out = Command::new(common::tma_bin())
+        .args(["act", "approve", "--pane", &pane])
+        .args(["--expect-permission-request", &request])
+        .arg("--json")
+        .arg("--socket-name")
+        .arg(&s.socket)
+        .arg("--manifest-dir")
+        .arg(s.manifest_dir())
+        .env("TMA_CONFIG", &config)
+        .env("XDG_CONFIG_HOME", &s.workdir)
+        .env("XDG_RUNTIME_DIR", &s.workdir)
+        .output()
+        .expect("spawn tma act");
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the dispatch is accepted: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(r#""outcome":"replied""#),
+        "answered over the lane: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+
+    let hook_out = hook.wait_with_output().expect("wait wrapper");
+    assert!(hook_out.status.success(), "the wrapper always exits 0");
+    assert_eq!(
+        String::from_utf8_lossy(&hook_out.stdout).trim(),
+        "{\"hookSpecificOutput\":{\"hookEventName\":\"PermissionRequest\",\
+         \"decision\":{\"behavior\":\"allow\"}}}",
+        "claude reads its decision object off the wrapper's stdout"
+    );
+    assert!(!record.exists(), "the hook consumed the record");
+    assert!(
+        s.pane_option(&pane, "@agent_permission_request").is_empty(),
+        "and the id is spent"
+    );
+}
+
+/// The lane off (zero config) is the shipped behaviour, unchanged: the same payload stamps the
+/// same pane, returns immediately, and prints nothing at all.
+#[test]
+fn without_the_lane_a_permission_request_stamps_and_returns_silently() {
+    if !tma_test_support::tmux_available() {
+        eprintln!("skipping: tmux not installed");
+        return;
+    }
+    use std::io::Write;
+
+    let s = Scratch::new("hook_lane_off");
+    let pane = s.new_pane();
+    let payload = format!(
+        r#"{{"session_id":"{SESSION}","hook_event_name":"PermissionRequest",
+            "tool_name":"Bash","tool_input":{{"command":"true"}}}}"#
+    );
+
+    let mut hook = spawn_wrapper(
+        Command::new(wrapper(&s))
+            .arg("claude")
+            .arg("PermissionRequest")
+            .env("TMUX_PANE", &pane)
+            .env("TMA_HOOK_SOCKET", &s.socket)
+            .env("TMA_BIN", common::tma_bin())
+            .env("TMA_CONFIG", common::empty_config_path())
+            .env("XDG_RUNTIME_DIR", &s.workdir)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null()),
+    );
+    hook.stdin
+        .take()
+        .unwrap()
+        .write_all(payload.as_bytes())
+        .unwrap();
+    let out = hook.wait_with_output().expect("wait wrapper");
+
+    assert!(out.status.success());
+    assert!(
+        out.stdout.is_empty(),
+        "no decision, so claude's own prompt is untouched: {:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert_eq!(s.pane_option(&pane, "@agent_state"), "blocked");
+    assert_eq!(s.pane_option(&pane, "@agent_detail"), "permission");
+    assert!(
+        s.pane_option(&pane, "@agent_permission_request").is_empty(),
+        "nothing is minted with the lane off"
+    );
+    assert!(!s.workdir.join("tma/requests").exists(), "no record parked");
+}

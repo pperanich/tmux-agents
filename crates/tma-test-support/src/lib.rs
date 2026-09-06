@@ -225,6 +225,104 @@ pub fn python3_available() -> bool {
     ok
 }
 
+// ---- the live-agent lane -----------------------------------------------------------------------
+
+/// The launcher binary of every agent tma ships a manifest for. Only `cursor` differs from its
+/// manifest stem: the CLI installs itself as `cursor-agent`.
+const AGENT_BINARIES: &[(&str, &str)] = &[
+    ("claude", "claude"),
+    ("codex", "codex"),
+    ("cursor", "cursor-agent"),
+    ("gemini", "gemini"),
+    ("opencode", "opencode"),
+    ("pi", "pi"),
+];
+
+/// Whether the live-agent lane is switched on. The counterpart of `TMA_REQUIRE_TMUX=1`, and
+/// deliberately opt-in: a live fire costs a real model call, so availability alone never enables it.
+fn live_agents_enabled() -> bool {
+    std::env::var("TMA_LIVE_AGENTS").as_deref() == Ok("1")
+}
+
+/// The launcher binary for `agent`. An unknown name panics rather than returning `false`: a typo in
+/// a test would otherwise skip green forever.
+fn agent_binary(agent: &str) -> &'static str {
+    AGENT_BINARIES
+        .iter()
+        .find(|(name, _)| *name == agent)
+        .map(|(_, bin)| *bin)
+        .unwrap_or_else(|| panic!("unknown agent {agent:?}; tma ships no manifest for it"))
+}
+
+/// Whether `bin` resolves to an executable file on `PATH`. A path walk rather than a `--version`
+/// spawn: starting an agent to ask whether it exists can write into its own configuration.
+fn on_path(bin: &str) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    let Some(path) = std::env::var_os("PATH") else {
+        return false;
+    };
+    std::env::split_paths(&path).any(|dir| {
+        std::fs::metadata(dir.join(bin))
+            .map(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false)
+    })
+}
+
+/// The gate every `[live-gated]` test opens with: `true` only when `TMA_LIVE_AGENTS=1` is set AND
+/// `agent`'s binary is on PATH.
+///
+/// Without the env var it prints the skip line and returns `false`, so the test returns green on
+/// any machine. With it, a MISSING binary panics naming the binary rather than skipping, the same
+/// fail-closed shape as [`tmux_available`] under `TMA_REQUIRE_TMUX=1`: a job that opted into the
+/// lane cannot report all-green while running none of it.
+pub fn have_agent(agent: &str) -> bool {
+    let bin = agent_binary(agent);
+    if !live_agents_enabled() {
+        eprintln!("skipping: live agents not enabled (set TMA_LIVE_AGENTS=1)");
+        return false;
+    }
+    assert!(
+        on_path(bin),
+        "agent {agent} required by TMA_LIVE_AGENTS=1 but its binary `{bin}` is not on PATH"
+    );
+    true
+}
+
+/// The environment that pins `agent`'s own configuration home at `scratch_home`, so a live fire can
+/// never write a persistent grant (an "always allow", a trusted folder) into the developer's real
+/// configuration. `HOME` is pinned alongside it, since that is the fallback each variable has.
+///
+/// Every variable here was read off the shipped agent rather than off its docs: gemini's own
+/// `homedir()` returns `GEMINI_CLI_HOME` and appends `.gemini` itself (gemini-cli 0.46.0 bundle),
+/// cursor reads `CURSOR_CONFIG_DIR` / `CURSOR_DATA_DIR` (cursor-agent 2026.08.11), pi documents
+/// `PI_CODING_AGENT_DIR` (pi 0.85.0 `docs/environment-variables.md`), opencode is plain XDG.
+///
+/// A pinned home carries no login, so an agent that needs a model call needs a credential put there
+/// first. CONTRIBUTING.md's "Live-gated tests" says which file per agent; copying it is the
+/// developer's own act and never this harness's.
+pub fn live_agent_env(agent: &str, scratch_home: &Path) -> Vec<(String, String)> {
+    let at = |rel: &str| scratch_home.join(rel).display().to_string();
+    let home = scratch_home.display().to_string();
+    let pinned: Vec<(&str, String)> = match agent {
+        "claude" => vec![("CLAUDE_CONFIG_DIR", at(".claude"))],
+        "codex" => vec![("CODEX_HOME", at(".codex"))],
+        "cursor" => vec![
+            ("CURSOR_CONFIG_DIR", at(".cursor")),
+            ("CURSOR_DATA_DIR", at(".local/share/cursor-agent")),
+        ],
+        "gemini" => vec![("GEMINI_CLI_HOME", home.clone())],
+        "opencode" => vec![
+            ("XDG_CONFIG_HOME", at(".config")),
+            ("XDG_DATA_HOME", at(".local/share")),
+        ],
+        "pi" => vec![("PI_CODING_AGENT_DIR", at(".pi/agent"))],
+        other => panic!("unknown agent {other:?}; tma ships no manifest for it"),
+    };
+    std::iter::once(("HOME".to_string(), home))
+        .chain(pinned.into_iter().map(|(k, v)| (k.to_string(), v)))
+        .collect()
+}
+
 /// Drop the ambient tmux session from a scratch child's environment.
 ///
 /// A suite run from inside tmux exports `TMUX_PANE` (say `%3`). tmux resolves a command's default
@@ -1320,5 +1418,60 @@ mod tests {
         assert!(pid_is_live(std::process::id()));
         // pid 1 always exists and is not ours: the EPERM leg must still read as live.
         assert!(pid_is_live(1));
+    }
+
+    /// Every agent tma ships a manifest for has a launcher, and cursor's is not its manifest stem.
+    #[test]
+    fn every_agent_has_a_launcher_binary() {
+        for agent in ["claude", "codex", "cursor", "gemini", "opencode", "pi"] {
+            assert!(!agent_binary(agent).is_empty());
+        }
+        assert_eq!(agent_binary("cursor"), "cursor-agent");
+    }
+
+    /// The pin is the whole point of the lane: every agent's env pins `HOME` at the scratch AND
+    /// names at least one of that agent's own home variables under it.
+    #[test]
+    fn the_live_env_pins_home_and_the_agents_own_config_dir() {
+        let home = Path::new("/tmp/tma_live_scratch");
+        for (agent, key) in [
+            ("claude", "CLAUDE_CONFIG_DIR"),
+            ("codex", "CODEX_HOME"),
+            ("cursor", "CURSOR_CONFIG_DIR"),
+            ("gemini", "GEMINI_CLI_HOME"),
+            ("opencode", "XDG_CONFIG_HOME"),
+            ("pi", "PI_CODING_AGENT_DIR"),
+        ] {
+            let env = live_agent_env(agent, home);
+            assert_eq!(
+                env.iter()
+                    .find(|(k, _)| k == "HOME")
+                    .map(|(_, v)| v.as_str()),
+                Some("/tmp/tma_live_scratch"),
+                "{agent} must run with HOME at the scratch"
+            );
+            let pinned = env
+                .iter()
+                .find(|(k, _)| k == key)
+                .unwrap_or_else(|| panic!("{agent} must pin {key}"));
+            assert!(
+                pinned.1.starts_with("/tmp/tma_live_scratch"),
+                "{agent}'s {key} must sit under the scratch, got {:?}",
+                pinned.1
+            );
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "unknown agent")]
+    fn an_unknown_agent_panics_rather_than_skipping_green() {
+        agent_binary("not-an-agent");
+    }
+
+    /// `on_path` finds a real executable and rejects a name nothing provides.
+    #[test]
+    fn path_lookup_finds_an_executable_and_misses_a_nonexistent_one() {
+        assert!(on_path("sh"));
+        assert!(!on_path("tma-no-such-binary-ever"));
     }
 }

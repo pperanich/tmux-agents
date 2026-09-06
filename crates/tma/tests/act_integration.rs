@@ -104,6 +104,9 @@ fn act(s: &Scratch, args: &[&str]) -> Output {
         .arg(s.manifest_dir())
         .env("TMA_CONFIG", config)
         .env("XDG_CONFIG_HOME", &s.workdir)
+        // The hook lane's request and verdict files hang off the runtime dir; pinning it at the
+        // workdir keeps every act test out of the developer's real one, not just the lane's own.
+        .env("XDG_RUNTIME_DIR", &s.workdir)
         .output()
         .expect("spawn tma act")
 }
@@ -910,4 +913,296 @@ fn the_repeat_run_warns_at_three_and_resets_on_a_new_episode() {
     assert!(lines[2].contains(r#""episode_ms":1000"#), "{}", lines[2]);
     assert!(lines[3].contains(r#""repeat":1"#), "{}", lines[3]);
     assert!(lines[3].contains(r#""episode_ms":2000"#), "{}", lines[3]);
+}
+
+/// A user action whose key sequence is an unmistakable marker, so "the pane received no keys" is a
+/// real assertion rather than a hunt for a digit in a shell prompt. Gated like `approve`.
+fn write_probe_action(s: &Scratch) {
+    let dir = s.workdir.join("tma/actions");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("probe.toml"),
+        "min_engine_version = \"0.1\"\nname = \"probe\"\nlabel = \"Probe\"\nkind = \"keys\"\n\
+         when = { state = [\"blocked\"], detail = [\"permission\"] }\n\
+         [keys]\nclaude = [\"TMAPROBE\"]\n",
+    )
+    .unwrap();
+}
+
+/// A-212 through the CLI. A remote caller reads a row's `episode_ms`, hands it back on the
+/// dispatch, and the broker refuses when the pane has moved on: the pane is still
+/// `blocked/permission` so the ordinary gate passes, and only the binder can tell it is a different
+/// prompt. Then the same fire with the episode the pane is actually in goes through, so the refusal
+/// is the binder deciding and not the action being unfireable.
+#[test]
+fn a_stale_expect_episode_ms_refuses_and_sends_nothing() {
+    if !have_tmux() {
+        return;
+    }
+    let s = Scratch::new("act_expect_episode");
+    let pane = s.new_shell_pane();
+    stamp_blocked_claude(&s, &pane);
+    s.set_opt(&pane, "@agent_since", "1700000000000");
+    write_probe_action(&s);
+
+    let out = act(
+        &s,
+        &[
+            "probe",
+            "--pane",
+            &pane,
+            "--expect-episode-ms",
+            "1699999000000",
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(4), "a stale episode refuses with 4");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(r#""outcome":"refused""#)
+            && stdout.contains(r#""reason":"episode-changed""#),
+        "the result names the binder: {stdout}"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("episode-changed"),
+        "the refusing fact reaches the terminal: {stderr}"
+    );
+    let capture = s.tmux(&["capture-pane", "-p", "-t", &pane]);
+    assert!(
+        !String::from_utf8_lossy(&capture.stdout).contains("TMAPROBE"),
+        "a refused dispatch delivers no keystrokes"
+    );
+    assert!(
+        s.pane_option(&pane, "@agent_action").is_empty(),
+        "the lock it took is released"
+    );
+
+    // The episode the pane really is in: same pane, same action, same gate.
+    let out = act(
+        &s,
+        &[
+            "probe",
+            "--pane",
+            &pane,
+            "--expect-episode-ms",
+            "1700000000000",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "the expected episode fires");
+    assert!(
+        wait_capture_contains(&s.socket, &pane, "TMAPROBE", POLL_CEILING),
+        "the keystrokes reach the pane"
+    );
+}
+
+/// A-214 through the CLI: an OpenCode pane whose pending id has been replaced refuses
+/// `request-gone` before any HTTP call, which is why this needs no mock server. The endpoint is
+/// stamped so the API-lane `requires` is satisfied and the binder is what refuses.
+#[test]
+fn a_stale_expect_permission_request_refuses_before_any_http() {
+    if !have_tmux() {
+        return;
+    }
+    let s = Scratch::new("act_expect_request");
+    let pane = s.new_shell_pane();
+    stamp_blocked_opencode(&s, &pane, "per_current", "http://127.0.0.1:1");
+
+    let out = act(
+        &s,
+        &[
+            "approve",
+            "--pane",
+            &pane,
+            "--expect-permission-request",
+            "per_spent",
+            "--json",
+        ],
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(4),
+        "a refused dispatch, not the exit 3 a 404 would give"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(r#""outcome":"refused""#) && stdout.contains(r#""reason":"request-gone""#),
+        "the result names the request: {stdout}"
+    );
+    assert_eq!(
+        s.pane_option(&pane, "@agent_permission_request"),
+        "per_current",
+        "a refusal leaves the pane exactly as it found it"
+    );
+}
+
+// ---- the hook reply lane ------------------------------------------------------------------------
+
+/// Park a request record where the broker looks for one, and stamp the pane with its id.
+/// `XDG_RUNTIME_DIR` is the scratch workdir (see [`act`]), so this is the same path the fired
+/// binary derives.
+fn park_request(s: &Scratch, pane: &str, id: &str) -> std::path::PathBuf {
+    let requests = s.workdir.join("tma/requests");
+    std::fs::create_dir_all(&requests).unwrap();
+    let record = requests.join(format!("{id}.json"));
+    std::fs::write(
+        &record,
+        format!(
+            "{{\"id\":\"{id}\",\"pane\":\"{pane}\",\"session_id\":\"s\",\"prompt_id\":\"p\",\
+             \"tool_name\":\"Bash\",\"tool_input\":{{\"command\":\"true\"}},\
+             \"episode_ms\":0,\"stamped_at_ms\":0}}"
+        ),
+    )
+    .unwrap();
+    s.set_opt(pane, "@agent_permission_request", id);
+    record
+}
+
+/// A stand-in for the holding hook: poll the verdict file, append what it saw and when to
+/// `log`, then consume both files exactly as the real hold loop does. Runs until `stop` appears,
+/// so a SECOND verdict against the same request is observed rather than missed.
+fn spawn_fake_hook(s: &Scratch, id: &str, log: &std::path::Path) -> std::process::Child {
+    let script = s.workdir.join("fake-hook.sh");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\n\
+             v=\"$1\"/tma/verdicts/{id}\n\
+             r=\"$1\"/tma/requests/{id}.json\n\
+             log=\"$2\"\n\
+             stop=\"$3\"\n\
+             while [ ! -f \"$stop\" ]; do\n\
+             \tif [ -f \"$v\" ]; then\n\
+             \t\tprintf '%s %s\\n' \"$(cat \"$v\")\" \"$(date +%s)\" >> \"$log\"\n\
+             \t\trm -f \"$v\" \"$r\"\n\
+             \tfi\n\
+             \tsleep 0.05\n\
+             done\n"
+        ),
+    )
+    .unwrap();
+    Command::new("sh")
+        .arg(&script)
+        .arg(&s.workdir)
+        .arg(log)
+        .arg(s.workdir.join("stop"))
+        .spawn()
+        .expect("spawn the fake hook")
+}
+
+/// A-524: the hook verdict is written under the held pane lock, once.
+///
+/// Three assertions, exactly as ACCEPTANCE §7.1 words them: the fake hook observes one verdict, the
+/// stamp is absent after the first fire, and the second fire's refusal token is `request-gone`
+/// rather than `vanished`. The second fire is the two-devices case: the request it names is spent.
+///
+/// [MUT] Hoisting the hook arm's verdict write out of `act_under_lock` and above the
+/// `io.acquire` in `act_sequence` must fail this test: the second dispatch then writes before it
+/// can be refused, the fake hook observes two verdicts, and both devices believe they answered.
+#[test]
+fn a524_the_hook_verdict_is_written_once_under_the_lock() {
+    if !have_tmux() {
+        return;
+    }
+    let s = Scratch::new("act_hook_lane");
+    hold_the_stamp(&s);
+    let pane = s.new_shell_pane();
+    stamp_blocked_claude(&s, &pane);
+    let id = "a1b2c3d4e5f60718";
+    let record = park_request(&s, &pane, id);
+
+    let log = s.workdir.join("observed.log");
+    let mut hook = spawn_fake_hook(&s, id, &log);
+
+    let out = act(
+        &s,
+        &[
+            "approve",
+            "--pane",
+            &pane,
+            "--expect-permission-request",
+            id,
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(0), "the lane answered");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(r#""outcome":"replied""#),
+        "answered over the lane, not typed: {stdout}"
+    );
+    assert!(
+        tma_test_support::wait_until(POLL_CEILING, || log.exists()
+            && !std::fs::read_to_string(&log).unwrap().is_empty()),
+        "the waiting hook should see the verdict"
+    );
+    assert_eq!(
+        s.pane_option(&pane, "@agent_permission_request"),
+        "",
+        "the id is spent under the same lock the verdict was written under"
+    );
+
+    // The second device, dispatching against a request that has already been answered.
+    let out = act(
+        &s,
+        &[
+            "approve",
+            "--pane",
+            &pane,
+            "--expect-permission-request",
+            id,
+            "--json",
+        ],
+    );
+    assert_eq!(out.status.code(), Some(4), "refused, not a second reply");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(r#""outcome":"refused""#) && stdout.contains(r#""reason":"request-gone""#),
+        "the binder refuses at the missing stamp, and it is not `vanished`: {stdout}"
+    );
+
+    // Give a second write time to land before counting; the hook polls every 50 ms.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    std::fs::write(s.workdir.join("stop"), b"").unwrap();
+    let _ = hook.wait();
+    let observed = std::fs::read_to_string(&log).unwrap();
+    let lines: Vec<&str> = observed.lines().collect();
+    assert_eq!(
+        lines.len(),
+        1,
+        "exactly one verdict reached the waiting hook: {observed:?}"
+    );
+    assert!(
+        lines[0].contains(r#""decision":"allow""#) && lines[0].contains(id),
+        "and it was this request's allow: {observed:?}"
+    );
+    assert!(
+        !record.exists(),
+        "the hook consumed the record it was given"
+    );
+}
+
+/// The degradation guarantee through the CLI: the same pane, the same stamped request, but no
+/// record parked. `approve` sends the keystroke it always did.
+#[test]
+fn no_request_record_leaves_approve_on_the_keyboard() {
+    if !have_tmux() {
+        return;
+    }
+    let s = Scratch::new("act_hook_absent");
+    hold_the_stamp(&s);
+    let pane = s.new_shell_pane();
+    stamp_blocked_claude(&s, &pane);
+    s.set_opt(&pane, "@agent_permission_request", "a1b2c3d4e5f60718");
+
+    let out = act(&s, &["approve", "--pane", &pane, "--json"]);
+    assert_eq!(out.status.code(), Some(0));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(r#""outcome":"sent""#),
+        "no hook is holding, so this is the keys arm"
+    );
+    assert!(
+        wait_capture_contains(&s.socket, &pane, "1", POLL_CEILING),
+        "the approve keystroke reaches the pane"
+    );
 }

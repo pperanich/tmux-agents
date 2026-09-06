@@ -37,6 +37,8 @@ pub struct Config {
     #[serde(default)]
     pub install: InstallSection,
     #[serde(default)]
+    pub hooks: HooksSection,
+    #[serde(default)]
     pub telemetry: TelemetrySection,
     #[serde(default)]
     pub tmux: TmuxSection,
@@ -672,6 +674,53 @@ pub struct InstallSection {
     pub wrapper_ref: WrapperRef,
 }
 
+// ---- [hooks] -----------------------------------------------------------------------------
+
+/// `[hooks]` posture: what an installed agent hook does beyond stamping the pane. Its own section
+/// rather than a key under `[install]`, which is about how agent configs NAME the wrapper and is
+/// read at install time; this is read by the hook itself, on every fire.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HooksSection {
+    /// `[hooks.claude_reply_lane]`: naming the sub-table opts a pane's claude hooks into holding a
+    /// `PermissionRequest` open for a structured answer. Absent means today's behaviour exactly:
+    /// the hook stamps and exits with no output, and claude's own prompt is untouched.
+    #[serde(default)]
+    pub claude_reply_lane: Option<ClaudeReplyLane>,
+}
+
+/// The hold bound, in milliseconds. Default 25 000.
+const DEFAULT_HOLD_MS: u64 = 25_000;
+/// Below this a hold is shorter than the round trip it exists to wait for.
+const MIN_HOLD_MS: u64 = 1_000;
+/// Ten seconds under claude's own 600 s default hook timeout, so tma always stops waiting before
+/// claude kills the hook (research/27 §3 measured that default).
+const MAX_HOLD_MS: u64 = 590_000;
+
+/// `[hooks.claude_reply_lane]`: how long a `PermissionRequest` hook parks waiting for a verdict.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ClaudeReplyLane {
+    #[serde(default = "default_hold_ms", deserialize_with = "hold_ms")]
+    pub hold_ms: u64,
+}
+
+fn default_hold_ms() -> u64 {
+    DEFAULT_HOLD_MS
+}
+
+/// Bound the hold at load: a value claude would kill mid-flight, or one too short to answer, is a
+/// config error naming the range rather than a lane that quietly never works.
+fn hold_ms<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u64, D::Error> {
+    let ms = u64::deserialize(d)?;
+    if !(MIN_HOLD_MS..=MAX_HOLD_MS).contains(&ms) {
+        return Err(serde::de::Error::custom(format!(
+            "hooks.claude_reply_lane hold_ms {ms} is out of {MIN_HOLD_MS}..={MAX_HOLD_MS}"
+        )));
+    }
+    Ok(ms)
+}
+
 // ---- [telemetry] -------------------------------------------------------------------------
 
 /// `[telemetry]` config: the recognized-model table. A metric-named posture matching the
@@ -950,6 +999,9 @@ mod tests {
         assert!(c.api.api_base("opencode").is_none());
         // State-derived window names are opt-in: absent by default, so tma renames nothing.
         assert!(c.daemon.window_names.is_none());
+        // The claude hook reply lane is opt-in: absent by default, so a `PermissionRequest` hook
+        // stamps and exits without output exactly as it did before the lane existed.
+        assert!(c.hooks.claude_reply_lane.is_none());
         // Telemetry windows: zero-config recognizes the shipped names and nothing else.
         assert!(c.telemetry.windows.knows("gemini-1.5-pro"));
         assert!(!c.telemetry.windows.knows("some-unknown-model"));
@@ -992,6 +1044,28 @@ mod tests {
             err.to_string().contains("unknown token `{model}`"),
             "the error names the token: {err}"
         );
+    }
+
+    /// `[hooks.claude_reply_lane]`: naming the sub-table is the opt-in, `hold_ms` inside it
+    /// optional, and a hold outside the bound fails the load rather than parking a hook for longer
+    /// than claude will wait for it.
+    #[test]
+    fn claude_reply_lane_opts_in_by_name_and_bounds_the_hold() {
+        let c: Config = toml::from_str("[hooks]\nclaude_reply_lane = {}\n").unwrap();
+        assert_eq!(c.hooks.claude_reply_lane.unwrap().hold_ms, 25_000);
+
+        let c: Config = toml::from_str("[hooks.claude_reply_lane]\nhold_ms = 8000\n").unwrap();
+        assert_eq!(c.hooks.claude_reply_lane.unwrap().hold_ms, 8_000);
+
+        for bad in ["0", "999", "600000"] {
+            let err =
+                toml::from_str::<Config>(&format!("[hooks.claude_reply_lane]\nhold_ms = {bad}\n"))
+                    .expect_err("an out-of-range hold is a config error");
+            assert!(
+                err.to_string().contains("out of 1000..=590000"),
+                "the error names the range: {err}"
+            );
+        }
     }
 
     /// A partial section fills only the named field; the rest stay at their per-field defaults.

@@ -64,6 +64,10 @@ pub(crate) enum Command {
     /// Jump focus to an agent pane across sessions
     /// (`--attention` / `--blocked` / `--next` / `--back` / `--home`).
     Jump(JumpArgs),
+    /// Hand this terminal to the session holding a pane (`--pane %5`): select its window and pane,
+    /// then replace this process with `tmux attach-session`. What a fresh client needs, where
+    /// `jump` moves one that is already attached. Inside tmux it behaves as `jump --pane`.
+    Attach(AttachArgs),
     /// Block until the target reaches one of `--until`'s states, then print the matched row(s). The
     /// scripting primitive: one pane, or a fleet (`--all` / `--count`). Exit 0 = observed,
     /// 124 = timeout, 3 = a watched pane vanished, 4 = its agent died.
@@ -72,6 +76,10 @@ pub(crate) enum Command {
     /// scope), or enumerate/menu the fireable ones (`--list` / `--menu`). Exit 0 acted, 4 gate
     /// refused, 5 pane locked, 3 target gone, 124 exec timeout, 2 usage, 1 runtime failure.
     Act(ActArgs),
+    /// Read the dispatch ledger `tma act --slot` writes: one line per receipt, or the schema-1
+    /// document with `--json`. Reads only, so it answers "did my dispatch land" without
+    /// dispatching anything to find out.
+    Receipts(ReceiptsArgs),
     /// Suppress notifications for the matched panes (`--for <DURATION>`, or indefinitely), or lift
     /// it with `--clear`. Detection, stamping, and the counts are untouched; the deadline lives in
     /// `@agent_mute_until`, so a mute survives a tma or daemon restart.
@@ -80,6 +88,10 @@ pub(crate) enum Command {
     /// pushes when present and degrading to an `--interval` poll otherwise (contract-identical). A
     /// plugin spawns this instead of a polling timer; it exits on a signal or when its stdout closes.
     Subscribe(SubscribeArgs),
+    /// Read what the agent in a pane has been writing: its own transcript, as normalized events,
+    /// newest first. `--last`/`--before` page backwards in bounded chunks; `--event <cursor>`
+    /// fetches one event's body. Exit 4 when the pane has no readable transcript.
+    Transcript(TranscriptArgs),
     /// Persistent live dashboard for a normal pane, window, or terminal of its own. Enter jumps
     /// and normally stays open; `--temporary-session` closes after a jump; `q`/Esc quits.
     Watch(WatchArgs),
@@ -495,6 +507,34 @@ pub(crate) struct JumpArgs {
     pub(crate) selector: SelectorArgs,
 }
 
+/// Args for `tma attach`. `--pane` is the only target: the handover replaces this process, so there
+/// is no surface left afterwards for a selector to have narrowed anything for.
+#[derive(clap::Args)]
+#[command(
+    long_about = "Hand this terminal to the tmux session holding a pane. Selects the pane's window \
+and pane on its session, then replaces this process with `tmux attach-session -t <session>` \
+(carrying --socket-name/--socket-path through), so the terminal you are sitting at becomes the \
+tmux client.\n\n\
+This is the handover `jump` cannot do. `tma jump --pane` is `switch-client`, which moves a client \
+that is ALREADY attached, so it does nothing from a terminal that has none (a fresh ssh session, a \
+phone's terminal app). Run inside tmux ($TMUX set), `attach` is exactly `tma jump --pane`: there is \
+already a client to move, and a nested attach is never what anybody means.\n\n\
+Exit codes:\n  \
+0    attached (the exec does not return), or --print printed the argv\n  \
+2    stdin is not a terminal, so there is no tty to hand over\n  \
+3    the pane vanished (before, or between the selects and the attach)\n  \
+1    a runtime failure"
+)]
+pub(crate) struct AttachArgs {
+    /// The pane to land on (e.g. `%5`). Its window and pane are selected before the attach.
+    #[arg(long, value_name = "ID")]
+    pub(crate) pane: String,
+    /// Print the `tmux attach-session` argv instead of exec'ing it; the window and pane are still
+    /// selected. Needs no terminal of its own, since it hands one over to nothing.
+    #[arg(long)]
+    pub(crate) print: bool,
+}
+
 /// Args for `tma wait`. `--pane`/`--any`/`--all`/`--count` are mutually exclusive targets; with none
 /// of them the selector's `--agent` is the target. `--pane` rejects the selector flags. The global
 /// flags drive the tier-2 poll cycle.
@@ -594,9 +634,39 @@ pub(crate) struct ActArgs {
     /// one is a usage error.
     #[arg(long = "arg", value_name = "VALUE", conflicts_with_all = ["list", "menu"])]
     pub(crate) args: Vec<String>,
+    /// The string a `text` action delivers into the pane, literally and as one line. Required for
+    /// a `text` action and a usage error for any other kind; the host refuses a payload that is
+    /// empty, over 4096 bytes, carries a control byte, or starts with one of the action's sigils.
+    /// A message beginning with `-` is a message, not a flag, so the token after `--text` is always
+    /// taken as its value.
+    #[arg(
+        long = "text",
+        value_name = "STRING",
+        allow_hyphen_values = true,
+        conflicts_with_all = ["list", "menu"]
+    )]
+    pub(crate) text: Option<String>,
     /// Skip the `when` gate only (never `requires`, never the lock).
     #[arg(long, conflicts_with_all = ["list", "menu"])]
     pub(crate) force: bool,
+    /// Refuse (`episode-changed`) unless the pane is still in this episode: the `episode_ms` of
+    /// the `tma ls --json` row you acted on. Checked under the action lock, so a prompt that
+    /// turned over since you read the row cannot be answered by mistake.
+    #[arg(long = "expect-episode-ms", value_name = "MS", conflicts_with_all = ["list", "menu", "all"])]
+    pub(crate) expect_episode_ms: Option<u64>,
+    /// Refuse (`request-gone`) unless the pane still carries this `@agent_permission_request`:
+    /// the `permission_request` of the row you acted on. Checked under the same lock.
+    #[arg(long = "expect-permission-request", value_name = "ID", conflicts_with_all = ["list", "menu", "all"])]
+    pub(crate) expect_permission_request: Option<String>,
+    /// Make this dispatch idempotent under `<ID>`: the first fire writes a receipt into the host
+    /// ledger, and a retry with the same id replays that receipt without sending anything. Read
+    /// them back with `tma receipts`.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["list", "menu", "all"])]
+    pub(crate) slot: Option<String>,
+    /// Record which device dispatched, on the slot's receipt. Never part of the slot's identity,
+    /// so a second device's retry still replays the first one's receipt.
+    #[arg(long, value_name = "NAME", requires = "slot", conflicts_with_all = ["list", "menu", "all"])]
+    pub(crate) device: Option<String>,
     /// Satisfy a `confirm` action non-interactively.
     #[arg(long, conflicts_with_all = ["list", "menu"])]
     pub(crate) yes: bool,
@@ -609,6 +679,20 @@ pub(crate) struct ActArgs {
     /// Render a tmux `display-menu` of the currently-fireable actions.
     #[arg(long, conflicts_with_all = ["list", "name", "agent"])]
     pub(crate) menu: bool,
+}
+
+/// Args for `tma receipts`. Both filters are optional and combine; neither touches tmux.
+#[derive(clap::Args)]
+pub(crate) struct ReceiptsArgs {
+    /// Only the receipt for this slot id.
+    #[arg(long, value_name = "ID")]
+    pub(crate) slot: Option<String>,
+    /// Only dispatches claimed at or after this epoch-ms instant.
+    #[arg(long = "since-ms", value_name = "MS")]
+    pub(crate) since_ms: Option<u64>,
+    /// Emit the schema-1 document instead of one tab-separated line per receipt.
+    #[arg(long)]
+    pub(crate) json: bool,
 }
 
 /// Args for `tma watch`. The invoking tmux client comes from the global `--client`
@@ -665,6 +749,51 @@ pub(crate) struct LsArgs {
     pub(crate) pane: Option<String>,
     #[command(flatten)]
     pub(crate) selector: SelectorArgs,
+}
+
+/// Args for `tma transcript`. The window is end-anchored: `--last` counts back from the newest
+/// event, and `--before` (a cursor from a previous page's `older`) walks further back. `--event`
+/// is the other request entirely, so it takes neither.
+#[derive(clap::Args)]
+#[command(
+    long_about = "Serve one pane's conversation from the agent's own transcript store, as \
+normalized events, newest first.\n\n\
+Discovery prefers the pane's @agent_transcript stamp and falls back to walking the store's layout \
+from @agent_session. Claude Code, Codex, Gemini and pi are served; cursor-agent and OpenCode are \
+refused by name (`--json` carries the reason as a `refusal` object).\n\n\
+A window carries event HEADERS, not bodies, and pages backwards in bounded chunks, so the cost of \
+opening a 44 MiB session is the same as a 4 KiB one. Take the `older` cursor a page reports and \
+pass it back as --before for the page behind it; pass one event's cursor to --event for its body.\n\n\
+Exit codes:\n  \
+0    the window (or the body) was served\n  \
+3    no such pane\n  \
+4    a typed refusal: no transcript, a store this reader does not serve, or a stale cursor\n  \
+1    a runtime failure"
+)]
+pub(crate) struct TranscriptArgs {
+    /// The agent pane to read (e.g. `%5`).
+    #[arg(long, value_name = "ID")]
+    pub(crate) pane: String,
+    /// How many events to return, counting back from the newest (default 50).
+    #[arg(long, value_name = "N", default_value_t = 50, conflicts_with = "event")]
+    pub(crate) last: usize,
+    /// Return only events older than this cursor: the `older` a previous page reported.
+    #[arg(long, value_name = "CURSOR", conflicts_with = "event")]
+    pub(crate) before: Option<String>,
+    /// Drop bodies and cap every string at the header budget, which is what a remote reader wants.
+    /// Without it a local run carries each event's body inline.
+    #[arg(long, conflicts_with = "event")]
+    pub(crate) headers: bool,
+    /// Fetch one event's body by its cursor instead of a window.
+    #[arg(long, value_name = "CURSOR")]
+    pub(crate) event: Option<String>,
+    /// Read a nested agent's own transcript instead of the parent's (the `child_id` a
+    /// `subagent_ref` event carries). Claude only; no other store writes a child to its own file.
+    #[arg(long, value_name = "ID")]
+    pub(crate) subagent: Option<String>,
+    /// Emit the schema-1 JSON document instead of one tab-separated line per event.
+    #[arg(long)]
+    pub(crate) json: bool,
 }
 
 /// Args for `tma subscribe`: a long-running stream of `ls --json` documents, one per line.

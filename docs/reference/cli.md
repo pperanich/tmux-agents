@@ -102,10 +102,13 @@ your other sessions exactly as an unscoped one does.
 | `ls` | List agent panes, one tab-separated line each (`--json` for the versioned schema). |
 | `status` | Print the status-line one-liner: state counts with glyphs and `#[fg=]` styling. |
 | `jump` | Jump focus to an agent pane across sessions (`--attention` / `--blocked` / `--next` / `--back` / `--home` / `--pane`), or menu them (`--menu`). |
+| `attach` | Hand this terminal to the session holding a pane (`--pane %5`): select its window and pane, then replace this process with `tmux attach-session`. |
 | `wait` | Block until the target reaches one of `--until`'s states, then print the matched row(s). One pane, or a fleet (`--all` / `--count`). |
 | `act` | Fire a guarded action into an agent pane (`--all` for every pane in scope), or enumerate/menu the fireable ones (`--list` / `--menu`). |
+| `receipts` | Read the dispatch ledger `act --slot` writes: what a dispatch ended as, without dispatching to find out. |
 | `mute` | Suppress notifications for the panes in scope, for `--for <DURATION>` or until `--clear`. |
 | `subscribe` | Stream the read path: one complete `ls --json` document per line, pushed when a daemon is present. |
+| `transcript` | Read what the agent in a pane has been writing, as normalized events, newest first, a bounded page at a time. |
 | `watch` | Persistent live dashboard for a pane, window, or terminal of its own. |
 | `daemon` | Run the event-hub daemon in the foreground; `--ensure` spawns it if absent then exits. |
 | `reload` | Signal the running daemon to hot-reload its config and manifests (SIGHUP). |
@@ -298,6 +301,47 @@ with the acting client and the invoking server resolved into the command. It is
 what a right-click on a [clickable status
 segment](../how-to/install-the-keybindings.md#clickable-status-segments) opens.
 
+## `tma attach`
+
+Hand the terminal you are sitting at to the tmux session a pane lives in. It
+selects the pane's window and pane on that session, then replaces this process
+with `tmux attach-session -t <session>`, carrying `--socket-name` /
+`--socket-path` through, so what comes back is a real tmux client showing the
+pane you named.
+
+```
+Usage: tma attach --pane <ID> [--print]
+```
+
+| option | meaning |
+|---|---|
+| `--pane <ID>` | The pane to land on (e.g. `%5`). The only target: the handover replaces this process, so there is nothing left afterwards for a selector to have narrowed. |
+| `--print` | Print the `tmux attach-session` argv instead of running it. The window and pane are still selected. Needs no terminal of its own, since it hands one over to nothing. |
+
+This is the half `jump` cannot do. `tma jump --pane` is `switch-client`, which
+moves a client that is **already attached**. From a terminal that has none (a
+fresh ssh session, a phone's terminal app) there is nothing for it to move.
+
+**Inside tmux, `attach` is `jump`.** When `$TMUX` is set there is already a client
+here, and replacing it with a nested one is never what anybody means, so the
+command runs exactly `tma jump --pane <ID>`: same origin trail, same attention
+clear, same "no agent in pane" note. `--print` then has no argv to show and says
+so on stderr.
+
+**It refuses without a terminal.** `tma attach` hands its own tty to tmux, so a
+run whose stdin is not a terminal (a pipe, a `run-shell`, cron) exits `2` before
+moving anything, rather than letting tmux fail with its own terse line after the
+selects have already changed somebody's focus. `--print` is exempt.
+
+Exit codes:
+
+| code | meaning |
+|---|---|
+| `0` | attached (the exec does not return), or `--print` printed the argv |
+| `2` | stdin is not a terminal, so there is no tty to hand over |
+| `3` | the pane vanished, whether before the selects or between them and the attach |
+| `1` | a runtime failure (no tmux binary, an attach tmux refused) |
+
 ## `tma wait`
 
 Block until the target reaches one of `--until`'s states, then print the matched
@@ -396,8 +440,13 @@ Usage: tma act [OPTIONS] [NAME]
 | [selector flags](#selector-flags) | Scope the target. Alone they must resolve to exactly one pane: none is exit 3, more than one is exit 1 naming the candidates (`--agent <NAME>` is the common form). With `--all` the whole selection is the target set. |
 | `--all` | Fire on EVERY selector-matched pane, one after another. |
 | `--dry-run` | Print the resolved targets and each one's gate verdict; execute nothing, acquire no lock. For a single target it also prints the resolved context (with each value's age) and the would-be keys or command. |
-| `--arg <VALUE>` | Repeatable. Pass a value to an `exec` action's command as environment (`TMA_ARG`, `TMA_ARG_1..N`, `TMA_ARG_COUNT`); never interpolated into the command string. A `keys` action rejects it (exit 2). Under `--all` every target gets the same values. |
+| `--arg <VALUE>` | Repeatable. Pass a value to an `exec` action's command as environment (`TMA_ARG`, `TMA_ARG_1..N`, `TMA_ARG_COUNT`); never interpolated into the command string. Every other kind rejects it (exit 2). Under `--all` every target gets the same values. |
+| `--text <STRING>` | The string a `text` action delivers into the pane, literally and as one line. Required for a `text` action, rejected by every other kind (exit 2). The token after it is always taken as its value, so a message starting with `-` needs no quoting games. |
 | `--force` | Skip the `when` gate only, never `requires` and never the lock. |
+| `--expect-episode-ms <MS>` | Refuse (`episode-changed`, exit 4) unless the pane is still in this episode: the `episode_ms` of the `tma ls --json` row you acted on. Checked inside the action lock. A usage error alongside `--all` (exit 2). See [Binding a dispatch to the pane you saw](#binding-a-dispatch-to-the-pane-you-saw). |
+| `--expect-permission-request <ID>` | Refuse (`request-gone`, exit 4) unless the pane still carries this `@agent_permission_request`: the `permission_request` of that same row. Checked inside the same lock. A usage error alongside `--all` (exit 2). |
+| `--slot <ID>` | Dispatch at most once under this id. The first fire writes a receipt into the host ledger; a retry with the same id replays that receipt, exits with its code, and sends nothing. A usage error alongside `--all` (exit 2). See [Retrying a dispatch safely](#retrying-a-dispatch-safely). |
+| `--device <NAME>` | Record which device dispatched, on the slot's receipt. Requires `--slot` and is never part of the slot's identity, so another device's retry still replays the first one's receipt. A usage error alongside `--all` (exit 2). |
 | `--yes` | Satisfy a `confirm` action non-interactively (a non-TTY without `--yes` refuses). Under `--all` it covers the whole batch. |
 | `--json` | Emit schema-1 JSON: the fire result object (the `results` envelope under `--all`), or the `--list` document. |
 | `--list` | Enumerate actions; with `--pane`, include each one's fireability verdict. |
@@ -406,6 +455,115 @@ Usage: tma act [OPTIONS] [NAME]
 The `--json` result object, the `--all` envelope, and the `--list` document are
 specified in
 [Pane options and JSON contracts](pane-options-and-json.md#tma-act-json-result).
+
+A `keys` action can also carry a per-agent `[hook]` arm. On a claude pane whose
+[hook reply
+lane](../how-to/install-agent-hooks.md#answer-claudes-prompts-over-the-hook-lane) is
+holding a prompt open, `approve` and `deny` hand the verdict to that hook rather
+than sending the key sequence: outcome `replied`, exit 0, `kind` `hook` in the audit
+log. With no hook holding, the same fire sends the keys as it always did. `--dry-run`
+names which of the two it would take.
+
+### Binding a dispatch to the pane you saw
+
+A surface that reads a pane, shows a person the prompt, and dispatches their
+answer some seconds later is answering a pane it can no longer see. If the agent
+asked a second question in between, the approve meant for the first one lands on
+the second. The `--expect-*` flags close that: a script reads `episode_ms` and
+`permission_request` off the `tma ls --json` row it acted on and hands them back
+on the fire.
+
+```
+episode=$(tma ls --json | jq -r '.agents[] | select(.pane == "%5") | .episode_ms')
+# ... a person looks at the prompt and decides, some seconds later ...
+tma act approve --pane %5 --expect-episode-ms "$episode"
+```
+
+Both are checked inside the pane's single-flight action lock, against the same
+read the gate is re-asserted from, so nothing can turn the prompt over between
+the check and the keystrokes. A pane that has moved on refuses `episode-changed`;
+one that no longer carries the quoted request id refuses `request-gone`. Both
+exit 4 and send nothing. (`request-gone` on a `vanished` outcome is a different
+event, exit 3: the API server's own 404. The `outcome` field separates them.)
+
+Two limits are worth knowing. The comparison is equality, not order, so a
+backward wall-clock step can leave the pane at an *earlier* episode than the one
+you read and that refuses `episode-changed` too, which is the honest answer: the
+pane is not where you saw it. And a matching `permission_request` is a necessary
+condition, not proof the prompt is still open, because tma clears the stamp only
+when its own reply lands or the agent's next event arrives; a matching id can
+still name a request that has already been answered.
+
+`--dry-run` reports the gate verdict and never fires, so it does not evaluate
+either expectation.
+
+### Steering (`--text`)
+
+```sh
+tma act steer --pane %5 --text "use the existing helper instead of a new one"
+tma act steer_now --pane %5 --text "stop and rebase onto main first"
+```
+
+`steer` sends one line to an **idle** agent; `steer_now` sends the same line to a
+**working** one, where the agent queues it. They are separate actions rather than
+one with a wider gate, because the second is only offered for agents that declared
+they queue a mid-turn message rather than losing it. Neither is `confirm = true`,
+so a script can drive them; neither is offered in the `--menu`, which has nowhere
+to ask for the string.
+
+The string reaches the pane exactly as typed. `--text Enter` types five characters
+and presses nothing; `--text C-c` types three and interrupts nothing. Before any
+tmux command runs, the host refuses a payload that is empty, over 4096 bytes,
+carries a control byte (a steer is one line), or begins with one of the action's
+`sigils` (`/` and `!` by default), so a caller cannot reach `/clear` or `/compact`
+through a message. Each refusal is exit 4 with its own `reason` token (`empty`,
+`too-long`, `control-bytes`, `sigil`), and delivers nothing. The rules and the
+manifest side of steering are in
+[Action manifest schema](action-manifest-schema.md#text-per-agent-text-transports).
+
+### Retrying a dispatch safely
+
+A caller that dispatches over a network cannot tell "the action never ran" from
+"the response never arrived". A phone that suspends mid-request, or an ssh
+connection that drops, leaves the sender with no answer and exactly one bad
+option: send it again, and maybe approve twice.
+
+`--slot <ID>` closes that. The caller invents an id for the dispatch it means to
+make, and tma dispatches at most once per id:
+
+```
+tma act approve --pane %5 --slot "approve:%5:$episode" --device phone
+# ... the response is lost; the phone reconnects and sends the same line ...
+tma act approve --pane %5 --slot "approve:%5:$episode" --device phone
+```
+
+The second invocation prints the first one's receipt, exits with the first one's
+code, and sends nothing. In `--json` it carries `"cached": true` (a fire that
+actually happened carries `"cached": false`, so a slotted caller always finds the
+key); in text it says `cached receipt for slot ...` on stderr.
+
+The id is opaque to tma and it is the whole identity, so make it name the
+dispatch you mean: the action, the pane and the episode you read off the row, not
+just the action. Reuse an id for a different action and you get the first
+dispatch's receipt back, which is what "at most once per id" means.
+
+Three rules are worth knowing before you build on it.
+
+- **A `locked` refusal (exit 5) releases the slot**, because it is the one
+  refusal that changed nothing and will pass on a retry. Every other outcome
+  writes a terminal receipt, `error` included: a broker failure cannot prove the
+  keystroke did not land, so its receipt records `fired-unknown` and a retry
+  replays it rather than sending a second time.
+- **A receipt answers for 24 hours.** Entries are evicted by size (the newest
+  4096 dispatches), never by age below that floor, because a short-lived receipt
+  turns a late retry back into a genuine second fire.
+- **The ledger is one file per host**, `0600` under tma's runtime directory,
+  shared by every process on the machine. Two devices and two connections land on
+  the same slot, which is what makes the retry idempotent rather than
+  per-connection. A record that cannot be parsed refuses (exit 1) instead of
+  guessing: `tma` names the file so you can remove it.
+
+`--dry-run` fires nothing, so it claims no slot.
 
 ### Fan-out (`--all`)
 
@@ -467,7 +625,7 @@ The key set, in order:
 | `pane` | string | target pane id |
 | `agent` | string \| null | `@agent_name` as read under the lock; `null` when the pane vanished before any read |
 | `action` | string | the action name |
-| `kind` | string | `keys`, `api`, or `exec`: the transport the fire used, not just the manifest kind |
+| `kind` | string | `keys`, `api`, `hook`, `text`, or `exec`: the transport the fire used, not just the manifest kind |
 | `outcome` | string | the [`--json` outcome vocabulary](pane-options-and-json.md#tma-act-json-result) |
 | `reason` | string \| null | the refusal or vanish token, `null` for every other outcome |
 | `source` | string | which surface asked: `cli` (a person at a TTY), `cli-yes` (`--yes`, or no TTY to prompt on: a script, a hook, an agent), `menu` (the tmux action menu) |
@@ -520,13 +678,13 @@ lives on the pane as `@agent_act_repeat`.
 
 | code | meaning |
 |---|---|
-| `0` | Acted: keys delivered, an API-channel answer delivered (2xx), a synchronous exec child exited `0`, or a detached supervisor spawned. |
+| `0` | Acted: keys or a `text` string delivered, an API-channel answer delivered (2xx), a hook-lane verdict written, a synchronous exec child exited `0`, or a detached supervisor spawned. |
 | `124` | A synchronous exec child was killed at `timeout_ms`. |
-| `4` | The gate refused: state did not satisfy `when`, `requires` was unmet (including an API `permission-reply` op with no pending request id or no resolvable endpoint), the action does not apply to this agent, or the gated metric has no coverage. The refusing fact goes to stderr. |
+| `4` | The gate refused: state did not satisfy `when`, `requires` was unmet (including an API `permission-reply` op with no pending request id or no resolvable endpoint), the action does not apply to this agent, or the gated metric has no coverage. Also the two binder refusals, `episode-changed` and `request-gone`, when the fire carried an `--expect-*` the pane no longer satisfies (see [Binding a dispatch to the pane you saw](#binding-a-dispatch-to-the-pane-you-saw)). The refusing fact goes to stderr. |
 | `5` | The pane action lock is held by another invocation. |
-| `3` | The act's target disappeared mid-act: tmux reports the pane gone (`can't find pane` / `no such pane`), `reason` `pane-gone`; or an API permission was answered/withdrawn between the gate and the act (a 404), `reason` `request-gone` — the pane itself is still there. |
+| `3` | The act's target disappeared mid-act: tmux reports the pane gone (`can't find pane` / `no such pane`), `reason` `pane-gone`; or the permission was answered or withdrawn between the gate and the act (an API 404, or a hook-lane verdict file that already exists), `reason` `request-gone` — the pane itself is still there. |
 | `2` | Usage error (bad flag combination, selector flags alongside `--pane`, or `--all` whose selector matched no pane). |
-| `1` | A runtime failure (no tmux server, a broker error, or an ambiguous selection without `--all`). A tmux command the server refused lands here, with tmux's own stderr in the message — only a pane tmux reports as gone is exit `3`. |
+| `1` | A runtime failure (no tmux server, a broker error, or an ambiguous selection without `--all`). A tmux command the server refused lands here, with tmux's own stderr in the message — only a pane tmux reports as gone is exit `3`. A `--slot` dispatch whose ledger cannot be read is also `1`, and nothing is dispatched. |
 
 Under `--all` the code is the worst target's on the ladder above (see
 [Fan-out](#fan-out---all)).
@@ -535,6 +693,39 @@ The reserved band (`3`, `4`, `5`, `2`) is strictly pre-spawn broker verdicts. An
 exec action that did spawn passes its child's own exit code through verbatim, so
 a child code can land inside that band; scripted consumers that branch beyond
 success/failure read the `--json` `outcome` field, which is authoritative.
+
+## `tma receipts`
+
+Read the dispatch ledger [`tma act --slot`](#retrying-a-dispatch-safely) writes.
+This is how a caller learns what a dispatch ended as when it lost the response,
+without dispatching the action again to find out. It reads one local file: no
+tmux, no pane lock, no keystroke.
+
+```
+Usage: tma receipts [OPTIONS]
+```
+
+| option | meaning |
+|---|---|
+| `--slot <ID>` | Only the receipt for this slot id. |
+| `--since-ms <MS>` | Only dispatches claimed at or after this epoch-ms instant (inclusive). |
+| `--json` | Emit the schema-1 document instead of one line per receipt. |
+
+Text output is one tab-separated line per receipt, oldest first, with `-` for an
+absent field so the column count never varies:
+
+```
+at_ms   slot   pane   action   outcome   reason   exit_code   device
+```
+
+`--json` emits `{"schema":1,"receipts":[...]}`, each element carrying `slot`,
+`pane`, `action`, `device`, `at_ms`, `outcome`, `exit_code` and `reason`.
+
+A dispatch still in flight has no receipt and is not listed. Entries stay until
+the size cap evicts them, so a receipt older than the 24 h TTL can still be
+listed even though a fresh dispatch on that slot would fire again; `at_ms` is
+what says which. Exit `0` (an empty result is not an error), or `1` when the
+ledger is torn.
 
 ## `tma mute`
 
@@ -703,6 +894,133 @@ as you read it that way.
 The jsonl logging recipe is in
 [Stream state
 changes](../how-to/stream-state-changes.md#log-every-transition-to-jsonl).
+
+## `tma transcript`
+
+Read what the agent in a pane has been writing. Every state surface above tells
+you *that* a pane is blocked; this one tells you what it was doing when it
+stopped, out of the agent's own transcript file. The events are normalized
+across stores, so a claude pane and a codex pane answer in the same vocabulary.
+
+```
+Usage: tma transcript --pane <ID> [OPTIONS]
+```
+
+| option | meaning |
+|---|---|
+| `--pane <ID>` | Required. The agent pane to read (e.g. `%5`). |
+| `--last <N>` | How many events to return, counting back from the newest (default `50`). |
+| `--before <CURSOR>` | Return only events older than this cursor: the `older` a previous page reported. |
+| `--headers` | Drop bodies and cap every string at the header budget (256 bytes). Without it a local run carries each event's body inline. |
+| `--event <CURSOR>` | Fetch one event's body instead of a window. Excludes `--last`, `--before` and `--headers`. |
+| `--subagent <ID>` | Read a nested agent's own transcript (the `child_id` a `subagent_ref` event carries). Claude only. |
+| `--json` | Emit the schema-1 document instead of one tab-separated line per event. |
+
+Text mode is one line per event, newest first: kind, the store's own timestamp,
+and the first line of the body.
+
+```
+$ tma transcript --pane %0 --last 5
+user_message     2026-01-01T00:00:11.000Z  can you check the failing test
+compaction       2026-01-01T00:00:10.000Z  compact_boundary
+turn_boundary    2026-01-01T00:00:09.000Z  end turn_duration
+bookkeeping      2026-01-01T00:00:08.000Z  mode
+attachment       2026-01-01T00:00:07.000Z  file (64 bytes)
+tma: more before this page: --before t1.1000013.a3e191d3.e36.8c6.0
+```
+
+The `older` line goes to stderr, so a pipe gets only the events.
+
+### Which agents are served
+
+Four stores are read: **claude**, **codex**, **gemini** and **pi**.
+**cursor-agent** and **OpenCode** are refused by name rather than served empty;
+[Agent transcript stores](../explanation/transcript-stores.md) is the argument
+for why, and what else the reader cannot tell you.
+
+Discovery prefers the pane's `@agent_transcript` stamp (the path the agent's own
+hook payload named) and falls back to walking the store's layout from
+`@agent_session`. A pane detected from the screen alone, with no session id, has
+neither, and is refused.
+
+### Paging
+
+The window is end-anchored: `--last` counts back from the newest event, never
+forward from the head. Take the `older` cursor a page reports and pass it back
+as `--before` for the page behind it; repeat until `older` is null, which means
+the head of the file is in the page you are holding. Pages never overlap and
+never skip, including when a page boundary lands inside a record that produced
+several events.
+
+Cursors are opaque. They encode the file's identity and its size when the cursor
+was minted, so a cursor into a file that has since been compacted, truncated or
+replaced is refused (`cursor-invalid`) rather than silently reinterpreted
+against whatever now sits at that offset. Re-request without `--before` to get a
+fresh window.
+
+Three budgets bound one call: at most 1 MiB read from disk, at most 32 KiB of
+headers returned, and at most 256 bytes per string. When one of them bites
+before `--last` does, the page comes back short with `budget_truncated` set and
+a usable `older`. A 44 MiB claude session costs the same first page as a 4 KiB
+pi one.
+
+### `--json`
+
+A schema-1 document. `events` is newest-first, and each event carries an opaque
+`cursor`, its `kind`, the store's `ts`, a `preview` (the body's first line), the
+keys that kind defines, and `body` (null under `--headers`).
+
+```json
+{
+  "schema": 1,
+  "pane": "%0",
+  "agent": "claude",
+  "path": "/Users/you/.claude/projects/-Users-you-app/0f3c….jsonl",
+  "session": { "agent": "claude", "session_id": "0f3c…", "cwd": "/Users/you/app",
+               "version": "2.1.236", "model": null },
+  "older": "t1.1000013.a3e191d3.e36.c0c.0",
+  "budget_truncated": false,
+  "unknown": 0,
+  "events": [
+    { "cursor": "t1.1000013.a3e191d3.e36.d20.0", "kind": "user_message",
+      "ts": "2026-01-01T00:00:11.000Z", "preview": "can you check the failing test",
+      "bytes": 30, "attachments": 0, "body": null }
+  ]
+}
+```
+
+The kinds are `session_meta`, `user_message`, `assistant_text`, `thinking`,
+`tool_call`, `tool_result`, `permission_request`, `turn_boundary`, `usage`,
+`subagent_ref`, `compaction`, `attachment`, `bookkeeping` and `unknown`. The
+last two are the pair that matters for drift: `bookkeeping` is a record tma
+knows and deliberately does not draw, `unknown` is one no adapter claimed, and
+the document's `unknown` count is how many of the latter this page held. A store
+that grows a record type raises that count; it never fails the read.
+
+`--event <cursor> --json` answers with the same envelope and a single `event`
+key carrying that one event with its `body` filled in.
+
+A refusal is a document too, so a `--json` consumer parses one shape either way:
+
+```json
+{"schema":1,"pane":"%0","refusal":{"code":"store-incomplete","message":"…"}}
+```
+
+The codes are `no-transcript`, `unsupported-store`, `store-incomplete`,
+`cursor-invalid`, `record-too-large` and `io-error`.
+
+### Exit codes
+
+```
+0    the window (or the body) was served
+3    no such pane
+4    a typed refusal: no transcript, a store this reader does not serve, or a stale cursor
+1    a runtime failure
+2    usage error
+```
+
+Exit 4 is separate from exit 1 on purpose: "there is nothing to show you, and
+here is why" is a different fact from "something broke".
 
 ## `tma watch`
 

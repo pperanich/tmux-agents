@@ -24,10 +24,11 @@ emit today:
 | `permission` | `blocked` | a tool-use permission prompt: approving grants the one action in front of the user |
 | `plan` | `blocked` | a plan-approval dialog. Its affirmative option grants **every following action**, so `tma act approve` deliberately does not resolve here |
 | `trust` | `blocked` | a workspace-trust gate. Its affirmative option grants the **whole folder**, so neither `approve` nor `deny` resolves here |
+| `question` | `blocked` | the agent asked *you* something and is waiting on the answer (OpenCode's `question` tool). There is nothing to grant, so `approve` and `deny` do not resolve here either: answering means picking one of the options on screen |
 | `rate_limit` | `working` **or** `blocked` | a usage-limit wait. The state is the whole point of the pair: `working/rate_limit` is the agent waiting out its own limit and resuming by itself, `blocked/rate_limit` is a wait that halted and needs you (a keypress, or a fresh prompt). A `wait --until blocked` that also reads the detail can tell "needs the clock" from "needs permission" |
 
-`tma-core` additionally declares `question`, `error`,
-`background` and `compacting` as constants; no bundled manifest emits them yet.
+`tma-core` additionally declares `error`, `background` and `compacting` as
+constants; no bundled manifest emits those three yet.
 
 Every `@agent_*_at` value is epoch **milliseconds** (13 digits today), not
 seconds. Millisecond resolution is what keeps two episodes opening in the same
@@ -82,7 +83,7 @@ options carry rollups and hints.
 | `@agent_quota_at` | pane | epoch **ms** of the evidence behind the quota trio and `@agent_cost_usd`; written last in the quota mini-chain and the `not older` arbitration basis, exactly as `@agent_context_at` is for the gauge. Its own marker, so a quiet context gauge never gates a fresh quota push |
 | `@agent_cost_usd` | pane | the agent's own reported cost for the CURRENT session, a string with two decimals (`3.50`). Absent for a channel that publishes none (Codex's rollout carries no cost). It is the vendor's live estimate for one session, not a total tma computed and not a price table; tma reports **which pane, right now** and aggregates nothing across sessions or over time ([`ccusage`](https://ccusage.com) is what answers "how much since Monday") |
 | `@agent_model` | pane | best-effort model-name label the context intake reads from the payload it already has: the Codex rollout window's model record, or the Claude statusline's `model.id` (an object, so the registration path's top-level-string read cannot reach it); never load-bearing for a gauge, it only feeds `tma doctor`'s recognized-model line (a model no `[telemetry.windows]` entry names). Plain-set, cleared on deregister, absent when no model record sat in the tail |
-| `@agent_permission_request` | pane | the pending OpenCode permission request id, stamped by the event intake from a `permission.asked` edge (ownership-filtered against `@agent_session`) and cleared on the edges that end the prompt (a working/idle transition, or a `permission.replied`); the action broker reads it to answer an `[api]` `permission-reply` op, and an empty value refuses that op `requires-unmet`. The broker also clears it itself on a 2xx reply, so a spent id does not read as a pending request until the plugin's next event; it leaves the option alone on a 404, which may already name a newer request |
+| `@agent_permission_request` | pane | the id of the permission decision the pane is waiting on. Two producers write it: OpenCode's plugin publishes the server's own request id on a `permission.asked` edge (ownership-filtered against `@agent_session`), and a claude pane whose [hook reply lane](agent-coverage.md#claude-code-mapping) is on **mints** one in the `PermissionRequest` hook, the same 16 hex digits `@agent_pending_call` carries, since claude's payload names no request of its own. Cleared on the edges that end the prompt (a working/idle transition, or a `permission.replied`); the action broker reads it to answer an `[api]` `permission-reply` op or to find the parked hook request, and an empty value refuses the API op `requires-unmet`. The broker also clears it itself once its own reply lands (a 2xx, or a written hook verdict), so a spent id does not read as a pending request until the agent's next event; it leaves the option alone on a 404, which may already name a newer request |
 | `@agent_pending_tool`, `@agent_pending_call` | pane | the tool name and call id of the permission decision a `blocked` pane is waiting on, stamped from Claude Code's `PermissionRequest` hook (`tool_name` / `tool_use_id`). Set together with `@agent_pending_summary` and cleared together on every edge that ends the prompt: the pane leaving `blocked` (a `PostToolUse`/`Stop` working-or-idle stamp), and `SessionEnd`, which removes the whole tuple. Absent on an agent with no such hook. On a build whose payload omits `tool_use_id` (Claude Code 2.1.261 does, while its `PreToolUse` and `PostToolUse` for the same call still send one) the call id is **minted** instead: 16 hex digits over the session id, the prompt id, the tool name and the tool input, so it stays the same across repeated fires of one call and differs for the next call. A minted id is a value to compare, not a handle to give back to the agent |
 | `@agent_pending_summary` | pane | a one-line summary of that call, derived from the hook's `tool_input`: the command for `Bash`, the file path for `Edit`/`Write`/`Read`, otherwise the first string-valued field. **Agent-supplied text**, capped at 120 bytes with control characters stripped and a `…` marking a truncation. Treat it the way you treat a pane title: it is not a machine token, and tma deliberately keeps it out of the notification payload, the notify audit line, and every `TMA_*` env var, so a summary can never reach a `[notify] command` sink or a third-party push carrier. It is here and on the JSON rows, both of which stay on your machine |
 | `@agent_api_endpoint` | pane | the OpenCode server base URL, stamped at registration by the plugin from its serving address; the broker's `permission-reply` endpoint, with a `[api.opencode] api_base` config fallback (neither present refuses `requires-unmet`) |
@@ -129,7 +130,7 @@ A versioned, additive-only document. The top level is `{ "schema": 1, "agents":
 | `done` | boolean | `true` when the pane is idle **and** carries `@agent_attention`: finished with output nobody has reviewed |
 | `session` | string or null | owning agent session id, `null` when the pane never registered one |
 | `transcript` | string or null | path to the agent's transcript file (`@agent_transcript`), `null` when no hook payload ever named one |
-| `permission_request` | string or null | the id of the permission decision the pane is waiting on (`@agent_permission_request`), `null` when none is outstanding or the pane's channel publishes no id (OpenCode is the one that does today). A consumer answering the prompt must quote this id, but a match is necessary and not sufficient: it is no proof the request is still open, since the plugin's next event and tma's own successful reply both clear the option |
+| `permission_request` | string or null | the id of the permission decision the pane is waiting on (`@agent_permission_request`), `null` when none is outstanding or nothing on that pane publishes an id (OpenCode's plugin does; a claude pane does while its hook reply lane is on). A consumer answering the prompt must quote this id, but a match is necessary and not sufficient: it is no proof the request is still open, since the agent's next event and tma's own successful reply both clear the option |
 | `stamped_at_ms` | number or null | epoch **ms** of this pane's last stamp (`@agent_stamped_at`), the freshness anchor for the whole tuple: compare it against your own clock to decide whether the row is stale before acting on it. `null` for a pane nothing has stamped yet |
 | `context` | number or null | context-utilization percent (`0`–`100`), `null` when the agent has no telemetry coverage or the channel reported no window |
 | `context_at_ms` | number or null | epoch **ms** of the evidence behind `context`, `null` when `context` is |
@@ -160,6 +161,15 @@ or `cost_usd` as absence (no gauge, no count, no quota, no cost), never as `0`. 
 keys are best-effort: the resolver memoizes one bounded `git` call per unique cwd
 and degrades every field to `null` on any failure, so a consumer treats them as
 hints, never guarantees.
+
+The row writer has a second, title-free protocol surface for consumers that are
+not on this machine, and `title` is the only key that differs between the two: a
+pane title is agent-supplied text, kept off a remote surface for the reason
+`pending_summary` is kept out of the notification payload. Both surfaces are
+written by one function, so every other key, its order, and its null handling are
+the same on both, and a key added to either is added to both. Nothing tma ships
+today emits the protocol form; `tma ls --json`, `tma wait --json` and `tma
+subscribe` are the local surface and carry `title` exactly as documented above.
 
 ### `server` and `host`: merging rows from more than one place
 
@@ -270,6 +280,7 @@ The result of firing one action, a schema-1 object with this exact key set. See
 | `outcome` | string | the closed outcome token (below) |
 | `exit_code` | number | the process exit code this outcome maps to; for an `exited` outcome it is the exec child's own code |
 | `reason` | string or null | the refusal reason token when `outcome` is `refused`, which target went away when `outcome` is `vanished`, `null` otherwise |
+| `cached` | boolean | present only with `--slot`: `false` on the dispatch that fired, `true` when this is a replay of that slot's stored receipt and nothing was sent |
 
 `tma act --all --json` wraps those same objects: `{ "schema": 1, "results":
 [ ... ] }`, one element per resolved target in the order they were fired, each
@@ -287,11 +298,27 @@ launched), `timeout` (a synchronous child killed at `timeout_ms`), `refused`
 API target answered/withdrawn between gate and act — a 404; `reason` carries
 which), `error` (broker runtime failure: an unreachable API server, or a tmux
 command the server refused, whose stderr rides in the message). `reason` is one
-of `gated`, `requires-unmet`, `wrong-agent`, `no-coverage` (all exit `4`),
-`locked` (exit `5`), or — on a `vanished` outcome, both exit `3` — `pane-gone`
-(tmux says the pane is gone) and `request-gone` (the API server answered `404`:
-the permission request was already answered or withdrawn, on a pane that is
-still there).
+of `gated`, `requires-unmet`, `wrong-agent`, `no-coverage`, `episode-changed`,
+`request-gone` (all exit `4`) and `locked` (exit `5`). On a `vanished` outcome
+(both exit `3`) it is instead `pane-gone` (tmux says the pane is gone) or
+`request-gone` (the API server answered `404`: the permission request was
+already answered or withdrawn, on a pane that is still there).
+
+A `--slot` dispatch carries one additive key, `cached`, and the replay's object
+is the fire's object with `cached` flipped: same `outcome`, same `reason`, same
+`exit_code`, which is the point of a receipt. An `error` replayed from the ledger
+reads `reason` `fired-unknown`, a token that appears on no live fire: the broker
+could not prove the keystroke did not land, so the ledger records the doubt
+rather than inviting a second one. The ledger and its own document are in
+[`tma receipts`](cli.md#tma-receipts).
+
+`episode-changed` and `request-gone` are the binder refusals: the fire carried
+`--expect-episode-ms` or `--expect-permission-request` and the pane, read under
+the action lock, no longer matches what the caller saw (see [Binding a dispatch
+to the pane you saw](cli.md#binding-a-dispatch-to-the-pane-you-saw)). Note that
+`request-gone` is deliberately one token across two outcomes: `refused` means
+the pane stopped carrying the id the caller quoted, `vanished` means the server
+answered `404` for it. Read `outcome` to tell them apart.
 
 ## `tma act` list document
 
@@ -303,8 +330,8 @@ A schema-1 document enumerating the loaded actions from `tma act --list --json`:
 |---|---|---|
 | `name` | string | the action name (also its file stem) |
 | `label` | string | the human label |
-| `kind` | string | `keys` or `exec` |
-| `agents` | array of string | the agents this action applies to (empty means all, for an `exec` action). For a `keys` action this is the union of its `[keys]` and `[api]` transport agents — no per-transport surface in v1, a deck does not care how the answer travels |
+| `kind` | string | `keys`, `text`, or `exec` |
+| `agents` | array of string | the agents this action applies to (empty means all, for an `exec` action). For a `keys` action this is the union of its `[keys]` and `[api]` transport agents (no per-transport surface in v1: a deck does not care how the answer travels), and for a `text` action its `[text]` agents |
 | `when` | object or null | the gate, or `null` when the action is always fireable for its agents |
 | `fireable` | boolean | present only with `--pane`: whether the action can fire on that pane right now |
 | `reason` | string or null | present only with `--pane`: the refusal reason token when not fireable, `null` when fireable |

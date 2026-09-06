@@ -160,6 +160,26 @@ pub(crate) fn run_jump_cmd(
         jump::JumpKind::Next
     };
 
+    run_jump_kind(
+        kind,
+        &args.selector.selector(),
+        server,
+        manifest_dir,
+        config,
+        client,
+    )
+}
+
+/// Run one already-resolved jump. Split out of [`run_jump_cmd`] so `tma attach` inside tmux, which
+/// degrades to exactly `jump --pane`, reaches the same code path rather than a copy of it.
+pub(crate) fn run_jump_kind(
+    kind: jump::JumpKind,
+    selector: &tma_core::Selector,
+    server: &tmux::Server,
+    manifest_dir: Option<PathBuf>,
+    config: &config::Config,
+    client: Option<String>,
+) -> ExitCode {
     let manifests =
         match cli_support::load_manifests_or_exit(manifest_dir.as_deref(), &config.agent_overrides)
         {
@@ -172,7 +192,7 @@ pub(crate) fn run_jump_cmd(
         &manifests,
         &config.fold_config(),
         kind,
-        &args.selector.selector(),
+        selector,
         client.as_deref(),
     ) {
         Ok(outcome) => {

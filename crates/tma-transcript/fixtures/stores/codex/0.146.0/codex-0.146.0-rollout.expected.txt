@@ -1,0 +1,15 @@
+session_meta	agent=codex session=00000000-0000-0000-0000-0000000cx01 version=0.146.0 model=synthetic-model
+bookkeeping	type=turn_context
+turn_boundary	kind=start reason=-
+user_message	bytes=17 attachments=0
+bookkeeping	type=response_item/message
+thinking	bytes=11 redacted=false
+bookkeeping	type=response_item/reasoning
+tool_call	name=shell call_id=call_0001 args=[command] bytes=34
+bookkeeping	type=event_msg/exec_command_begin
+bookkeeping	type=event_msg/exec_command_end
+tool_result	call_id=call_0001 status=unknown bytes=9
+assistant_text	bytes=25
+bookkeeping	type=response_item/message
+usage	input=88010 output=1044 total=90150 window=272000 cost=-
+turn_boundary	kind=end reason=-

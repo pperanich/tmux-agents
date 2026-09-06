@@ -96,6 +96,15 @@ impl JsonWriter {
         self.buf.push_str("null");
     }
 
+    /// Write an already-serialized JSON value under `k`, verbatim. The one caller is the hook
+    /// lane's request record, which copies the agent's own `tool_input` object rather than
+    /// reshaping it; `v` must therefore be JSON the caller lifted out of a payload, never text.
+    pub fn raw_value(&mut self, k: &str, v: &str) {
+        self.key(k);
+        self.buf.push_str(v);
+        self.mark();
+    }
+
     /// Write a bare string as an array element (no key), separator-managed like [`Self::raw_null`].
     pub fn raw_string(&mut self, v: &str) {
         self.sep();

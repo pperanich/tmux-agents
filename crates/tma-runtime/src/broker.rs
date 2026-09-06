@@ -2,15 +2,19 @@
 //! `tma act <name> --pane %N`" to keystrokes on the pane or a spawned process. The sequence is
 //! pinned:
 //!
-//! 1. **identity** — the pane exists and `@agent_name` matches an agent the action applies to;
-//! 2. **gate** — the stamped state satisfies `when`, and for a `keys` action an on-demand
-//!    single-pane re-verify runs first when the stamp is older than [`FRESHNESS_MS`] (a stale paint
-//!    must never fire a blind keystroke);
-//! 3. **lock** — acquire the single-flight `@agent_action` lock ([`tma_tmux::lock`]) with an
+//! 0. **payload**: a `text` action's caller-supplied string satisfies the host-side rules
+//!    ([`tma_core::ActionManifest::check_text`]), checked before any tmux command runs at all;
+//! 1. **identity**: the pane exists and `@agent_name` matches an agent the action applies to;
+//! 2. **gate**: the stamped state satisfies `when`, and for a keystroke-sending kind
+//!    ([`ActionKind::sends_keystrokes`]) an on-demand single-pane re-verify runs first when the
+//!    stamp is older than [`FRESHNESS_MS`] (a stale paint must never fire a blind keystroke);
+//! 3. **lock**: acquire the single-flight `@agent_action` lock ([`tma_tmux::lock`]) with an
 //!    absolute expiry of `timeout_ms + `[`SLACK_MS`]` and the broker's pid;
-//! 4. **act** — re-assert the gate once under the held lock, then deliver the keys (through the
-//!    `tma-tmux` `send_keys` choke point) or spawn the exec command;
-//! 5. **release** — clear the lock nonce-conditionally on *every* synchronous exit path.
+//! 4. **act**: re-assert the gate once under the held lock, then deliver the keys or the literal
+//!    text (through the `tma-tmux` `send_keys` / `send_text` choke point) or spawn the exec command.
+//!    The caller's binder ([`FireArgs::expect_episode_ms`] / [`FireArgs::expect_permission_request`])
+//!    is checked against that same under-lock read, between the gate and the effect;
+//! 5. **release**: clear the lock nonce-conditionally on *every* synchronous exit path.
 //!
 //! `--force` skips the `when` gate only, never `requires` and never the lock. A `detach = true`
 //! action does not run synchronously: after the same identity/gate/lock sequence the broker
@@ -25,13 +29,14 @@
 
 use tma_core::{
     ActionKind, ActionManifest, AgentState, ApiOp, ApiReply, ContextKeys, FoldConfig, GateInput,
-    GateOutcome, RefusalReason, Requirement,
+    GateOutcome, HookVerdict, RefusalReason, Requirement, TextRefusal,
 };
 
 use tma_tmux::lock::{Acquire, LockError, LockValue};
 use tma_tmux::tmux::{Tmux, TmuxError};
 
 use crate::config::ApiSection;
+use crate::hook_lane::VerdictWrite;
 use crate::http::HttpOutcome;
 use crate::manifests::LoadedManifest;
 
@@ -69,7 +74,7 @@ pub struct ActResult {
 /// value is reachable synchronously.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Outcome {
-    /// A `keys` sequence was delivered.
+    /// Keystrokes were delivered: a `keys` sequence, or a `text` action's wrapped literal string.
     Sent,
     /// An API-channel answer was delivered (2xx). Distinct from `sent` (keys) so a pinned
     /// meaning does not silently change under scripts.
@@ -125,22 +130,34 @@ impl Gone {
     }
 }
 
-/// Why the broker refused before acting. The gate reasons plus `locked`, which is a
-/// broker-time verdict and so is not part of [`RefusalReason`].
+/// Why the broker refused before acting. The gate reasons plus the broker-time verdicts that are
+/// not part of [`RefusalReason`]: the lock, the caller's two binder expectations, and the `text`
+/// payload rules, which refuse earlier than any of them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Refusal {
     /// A gate refusal: `wrong-agent` / `no-coverage` / `requires-unmet` / `gated`.
     Gate(RefusalReason),
     /// The single-flight lock is held by a live, unexpired holder.
     Locked,
+    /// [`FireArgs::expect_episode_ms`] named an episode the pane is no longer in.
+    EpisodeChanged,
+    /// [`FireArgs::expect_permission_request`] named a request the pane no longer carries.
+    RequestGone,
+    /// The caller's `text` payload broke a host-side rule: `sigil` / `control-bytes` /
+    /// `too-long` / `empty`.
+    Payload(TextRefusal),
 }
 
 impl Refusal {
-    /// The reason token, matching the fireability vocabulary.
+    /// The reason token, matching the fireability vocabulary. `request-gone` is deliberately the
+    /// same word [`Gone::Request`] uses; the `outcome` beside it says which of the two happened.
     pub const fn token(self) -> &'static str {
         match self {
             Refusal::Gate(r) => r.token(),
             Refusal::Locked => "locked",
+            Refusal::EpisodeChanged => "episode-changed",
+            Refusal::RequestGone => "request-gone",
+            Refusal::Payload(r) => r.token(),
         }
     }
 }
@@ -154,7 +171,14 @@ impl ActResult {
             Outcome::Sent | Outcome::Replied | Outcome::Spawned => 0,
             Outcome::Exited(code) => *code,
             Outcome::Timeout => 124,
-            Outcome::Refused(Refusal::Gate(_)) => 4,
+            // A payload refusal exits with the gate refusals: the world (here, the string) has to
+            // change before this fire can land, which is exactly what 4 means.
+            Outcome::Refused(
+                Refusal::Gate(_)
+                | Refusal::EpisodeChanged
+                | Refusal::RequestGone
+                | Refusal::Payload(_),
+            ) => 4,
             Outcome::Refused(Refusal::Locked) => 5,
             Outcome::Vanished(_) => 3,
             Outcome::Error(_) => 1,
@@ -169,7 +193,12 @@ impl ActResult {
         match &self.outcome {
             Outcome::Sent | Outcome::Replied | Outcome::Spawned | Outcome::Exited(0) => 0,
             Outcome::Refused(Refusal::Locked) => 1,
-            Outcome::Refused(Refusal::Gate(_)) => 2,
+            Outcome::Refused(
+                Refusal::Gate(_)
+                | Refusal::EpisodeChanged
+                | Refusal::RequestGone
+                | Refusal::Payload(_),
+            ) => 2,
             Outcome::Vanished(_) => 3,
             Outcome::Timeout => 4,
             Outcome::Exited(_) => 5,
@@ -299,6 +328,15 @@ pub trait BrokerIo {
     fn reverify(&self, pane_id: &str) -> Result<(), TmuxError>;
     /// Deliver a key sequence through the `tma-tmux` `send_keys` choke point.
     fn send_keys(&self, pane_id: &str, keys: &[String]) -> Result<(), TmuxError>;
+    /// Deliver a `text` action: the prefix keys, the caller's string literally, then the suffix
+    /// keys, through the `tma-tmux` `send_text` choke point and inside one lock hold.
+    fn send_text(
+        &self,
+        pane_id: &str,
+        prefix: &[String],
+        text: &str,
+        suffix: &[String],
+    ) -> Result<(), TmuxError>;
     /// Answer an OpenCode permission over HTTP: one POST to `{endpoint}/permission/{request}/
     /// reply` with the reply verdict, bounded by `timeout_ms` (connect + total), no retry. The real
     /// impl calls [`crate::http`]; the mock returns canned outcomes.
@@ -309,6 +347,12 @@ pub trait BrokerIo {
         reply: ApiReply,
         timeout_ms: u64,
     ) -> HttpOutcome;
+    /// Whether a hook-lane request record is parked for `request_id`. The test for "a hook is
+    /// holding on this prompt": false means no lane to answer over, and the caller uses keystrokes.
+    fn hook_request_pending(&self, request_id: &str) -> bool;
+    /// Create the hook-lane verdict for `request_id`, exclusively. The real impl calls
+    /// [`crate::hook_lane::write_verdict`]; the mock records the call and returns a canned outcome.
+    fn write_hook_verdict(&self, request_id: &str, verdict: HookVerdict) -> VerdictWrite;
     /// Write the pane's `@agent_act_repeat` run under the held lock. Best-effort and infallible by
     /// construction, like [`BrokerIo::clear_permission_request`]: the counter is a mis-tap signal,
     /// and a failed option write must never turn a delivered action into a reported failure.
@@ -357,16 +401,46 @@ pub struct FireArgs<'a> {
     /// value stays data the shell cannot re-parse, exactly as the pane title does. A `keys` action
     /// takes no values — its sequence is manifest-static — and the CLI rejects them before here.
     pub args: &'a [String],
+    /// The caller's `--text` string, for a `text` action and nothing else. It is checked against
+    /// the host-side payload rules before any tmux command runs, then delivered literally.
+    pub text: Option<&'a str>,
     /// Where the `[act] log` line goes and which surface asked for the fire. The default writes
     /// nothing, so a caller that is not the `tma act` CLI stays silent.
     pub audit: AuditCtx<'a>,
+    /// Refuse `episode-changed` unless the pane is still in this episode: the `episode_ms` of the
+    /// row the caller acted on. `None` checks nothing, which is every pre-binder caller.
+    pub expect_episode_ms: Option<u64>,
+    /// Refuse `request-gone` unless the pane still carries this `@agent_permission_request`. A
+    /// necessary condition, not proof of liveness: a matching id can still name a spent request.
+    pub expect_permission_request: Option<&'a str>,
+}
+
+/// The caller's binder against one pane read: `None` when every expectation it supplied still
+/// holds. Both callers pass the facts read under the held lock, which is the whole point of it.
+fn binder_refusal(facts: &PaneFacts, fire_args: FireArgs) -> Option<Refusal> {
+    // Any difference counts, a backward clock step included: the caller named one instant, and a
+    // pane that is not at it is not the pane the caller saw. `episode_ms` is the `ls --json` value.
+    if fire_args
+        .expect_episode_ms
+        .is_some_and(|want| want != facts.episode_ms)
+    {
+        return Some(Refusal::EpisodeChanged);
+    }
+    if fire_args
+        .expect_permission_request
+        .is_some_and(|want| facts.permission_request.as_deref() != Some(want))
+    {
+        return Some(Refusal::RequestGone);
+    }
+    None
 }
 
 /// Fire an action against `pane_id`. `fire_args` carries `--force` (the `when` gate only), the
-/// `--arg` values, and the audit context. A synchronous action runs and releases the lock here; a
-/// `detach = true` action hands the lock to a spawned supervisor and returns `spawned`. `detach`
-/// carries the server + notify command forwarded to that supervisor. The ergonomic entry the CLI
-/// calls; builds the real [`TmuxBroker`] and writes the `[act] log` line for whatever came back.
+/// `--arg` values, the audit context, and the caller's binder expectations. A synchronous action
+/// runs and releases the lock here; a `detach = true` action hands the lock to a spawned supervisor
+/// and returns `spawned`. `detach` carries the server + notify command forwarded to that
+/// supervisor. The ergonomic entry the CLI calls; builds the real [`TmuxBroker`] and writes the
+/// `[act] log` line for whatever came back.
 #[allow(clippy::too_many_arguments)]
 pub fn fire(
     tmux: &Tmux,
@@ -413,7 +487,7 @@ fn write_audit_line<T: BrokerIo>(
             io.now_ms(),
             pane_id,
             &action.name,
-            audit::kind_token(action.kind, api),
+            audit::kind_token(action.kind, api, observed.took_hook_lane),
             result.outcome.token(),
             result.reason(),
             observed,
@@ -463,6 +537,15 @@ fn act_sequence<T: BrokerIo>(
     fire_args: FireArgs,
     observed: &mut ActObserved,
 ) -> Outcome {
+    // 0. payload rules, host-side and before the first tmux command. A refused steer never reaches
+    // the pane, the re-verify, or the lock, so a client that can reach the broker at all still
+    // cannot reach the agent's own command plane through a message.
+    if action.kind == ActionKind::Text {
+        if let Err(r) = action.check_text(fire_args.text.unwrap_or_default()) {
+            return Outcome::Refused(Refusal::Payload(r));
+        }
+    }
+
     // The gate half is read here; the values ride on to whichever under-lock arm assembles the env.
     let force = fire_args.force;
     let now = io.now_ms();
@@ -478,9 +561,10 @@ fn act_sequence<T: BrokerIo>(
         return Outcome::Refused(Refusal::Gate(RefusalReason::WrongAgent));
     };
 
-    // 2. gate. A stale `keys` action re-verifies on-demand first (skipped under `--force`, which
-    // does not gate on state at all).
-    let facts = if action.kind == ActionKind::Keys && !force && is_stale(now, facts.stamped_at) {
+    // 2. gate. A stale keystroke-sending action re-verifies on-demand first (skipped under
+    // `--force`, which does not gate on state at all). The predicate is the kind's own answer, so a
+    // fourth kind cannot inherit "no freshness check" by omission.
+    let facts = if action.kind.sends_keystrokes() && !force && is_stale(now, facts.stamped_at) {
         match io.reverify(pane_id) {
             Ok(()) => {}
             Err(e) => return io_error(e),
@@ -585,6 +669,9 @@ fn spawn_detached_under_lock<T: BrokerIo>(
     if let Some(refusal) = gate_refusal(action, &facts, agent, force) {
         return Outcome::Refused(refusal);
     }
+    if let Some(refusal) = binder_refusal(&facts, fire_args) {
+        return Outcome::Refused(refusal);
+    }
     observed.repeat = bump_repeat(io, &action.name, pane_id, &facts);
     let spec = SupervisorSpec {
         pane_id: pane_id.to_string(),
@@ -631,13 +718,18 @@ fn act_under_lock<T: BrokerIo>(
     if let Some(refusal) = gate_refusal(action, &facts, agent, force) {
         return Outcome::Refused(refusal);
     }
+    // The caller's binder, checked here and nowhere earlier: from the under-lock read, so a prompt
+    // that turned over between the caller's observation and now cannot be answered by mistake.
+    if let Some(refusal) = binder_refusal(&facts, fire_args) {
+        return Outcome::Refused(refusal);
+    }
     observed.repeat = bump_repeat(io, &action.name, pane_id, &facts);
     let _ = prior; // the pre-lock facts are superseded by the re-read; kept for a clear signature.
 
     match action.kind {
         ActionKind::Keys => {
-            // Transport is per-agent and exclusive: an `api` agent answers over HTTP, a
-            // `keys` agent gets the send-keys sequence. Applicability guaranteed exactly one covers.
+            // Three arms, tried in order. `api` and `hook` are structured and mutually exclusive
+            // per agent; `keys` is the floor every fire lands on when neither one applies.
             if let Some(transport) = action.api_for(agent) {
                 // The endpoint + request id are guaranteed present (the API requires re-asserted
                 // under the lock). Empty defaults here would only surface as the server's own 404.
@@ -660,9 +752,43 @@ fn act_under_lock<T: BrokerIo>(
                     HttpOutcome::Error(msg) => Outcome::Error(msg),
                 };
             }
+            // The hook reply lane, taken only when a hook is actually parked on this request:
+            // with no record on disk this falls through to the keys arm below, which is the whole
+            // degradation guarantee. `binder_refusal` has already re-asserted the id under the lock.
+            if let Some(transport) = action.hook_for(agent) {
+                let request = facts.permission_request.as_deref().unwrap_or_default();
+                if io.hook_request_pending(request) {
+                    return match io.write_hook_verdict(request, transport.verdict) {
+                        VerdictWrite::Written => {
+                            observed.took_hook_lane = true;
+                            // Spend the id here, under the same lock, for the same reason the API
+                            // arm does: a second dispatch then refuses `request-gone` at the binder
+                            // rather than reaching a verdict file that would refuse it anyway.
+                            io.clear_permission_request(pane_id);
+                            Outcome::Replied
+                        }
+                        // A verdict already existed: the request was answered between the binder's
+                        // read and this write, so its target is gone.
+                        VerdictWrite::Exists => Outcome::Vanished(Gone::Request),
+                        VerdictWrite::Error(msg) => Outcome::Error(msg),
+                    };
+                }
+            }
             // Applicability guaranteed the sequence exists; an empty one is a no-op send.
             let seq = action.keys_for(agent).unwrap_or(&[]);
             match io.send_keys(pane_id, seq) {
+                Ok(()) => Outcome::Sent,
+                Err(e) => io_error(e),
+            }
+        }
+        ActionKind::Text => {
+            // The payload cleared the host-side rules before the lock; what is left is the
+            // manifest's own wrapping, delivered prefix → text → suffix inside this one hold.
+            let Some(transport) = action.text_for(agent) else {
+                return Outcome::Refused(Refusal::Gate(RefusalReason::WrongAgent));
+            };
+            let text = fire_args.text.unwrap_or_default();
+            match io.send_text(pane_id, &transport.prefix, text, &transport.suffix) {
                 Ok(()) => Outcome::Sent,
                 Err(e) => io_error(e),
             }
@@ -824,6 +950,8 @@ mod tests {
     struct MockIo {
         now: u64,
         reads: RefCell<Vec<Option<PaneFacts>>>,
+        /// How many times the broker read the pane: the payload refusal must leave it at zero.
+        read_calls: RefCell<u32>,
         reverify_state: RefCell<Option<PaneFacts>>,
         reverify_called: RefCell<bool>,
         acquire: Acquire,
@@ -839,6 +967,11 @@ mod tests {
         request_cleared: RefCell<Vec<String>>,
         /// Every `@agent_act_repeat` value the broker wrote, in order.
         repeat_writes: RefCell<Vec<String>>,
+        /// Whether a hook-lane request record is "parked" (default false: no lane, keys arm).
+        hook_pending: bool,
+        /// Canned verdict-write outcome, and every `(request_id, verdict)` the broker wrote.
+        hook_result: VerdictWrite,
+        hook_writes: RefCell<Vec<(String, HookVerdict)>>,
     }
 
     impl MockIo {
@@ -846,6 +979,7 @@ mod tests {
             MockIo {
                 now: 1_000_000,
                 reads: RefCell::new(reads),
+                read_calls: RefCell::new(0),
                 reverify_state: RefCell::new(None),
                 reverify_called: RefCell::new(false),
                 acquire,
@@ -858,7 +992,21 @@ mod tests {
                 api_call: RefCell::new(None),
                 request_cleared: RefCell::new(Vec::new()),
                 repeat_writes: RefCell::new(Vec::new()),
+                hook_pending: false,
+                hook_result: VerdictWrite::Written,
+                hook_writes: RefCell::new(Vec::new()),
             }
+        }
+        /// A hook is parked on the request, so the hook arm is live.
+        fn with_hook_pending(mut self) -> MockIo {
+            self.hook_pending = true;
+            self
+        }
+        /// The verdict write returns `outcome` instead of creating the file.
+        fn with_hook_result(mut self, outcome: VerdictWrite) -> MockIo {
+            self.hook_pending = true;
+            self.hook_result = outcome;
+            self
         }
         /// The API lane returns `outcome` instead of the default 2xx.
         fn with_api_result(mut self, outcome: HttpOutcome) -> MockIo {
@@ -877,6 +1025,10 @@ mod tests {
         }
     }
 
+    /// Marks the literal element inside [`MockIo`]'s flattened `send_text` record, so the ordering
+    /// assertion can tell the caller's string from a manifest key.
+    const LITERAL: &str = "literal:";
+
     fn acquired() -> Acquire {
         Acquire::Acquired(lock::LockValue {
             expiry_ms: 2_000_000,
@@ -891,6 +1043,7 @@ mod tests {
             self.now
         }
         fn read_pane(&self, _pane: &str) -> Result<Option<PaneFacts>, TmuxError> {
+            *self.read_calls.borrow_mut() += 1;
             let mut reads = self.reads.borrow_mut();
             if reads.len() > 1 {
                 Ok(reads.remove(0))
@@ -910,6 +1063,21 @@ mod tests {
             *self.sent.borrow_mut() = Some(keys.to_vec());
             Ok(())
         }
+        fn send_text(
+            &self,
+            _pane: &str,
+            prefix: &[String],
+            text: &str,
+            suffix: &[String],
+        ) -> Result<(), TmuxError> {
+            // Recorded as one flat sequence with the literal marked, so a test asserts the
+            // prefix → text → suffix ordering the pane actually saw.
+            let mut seq = prefix.to_vec();
+            seq.push(format!("{LITERAL}{text}"));
+            seq.extend(suffix.iter().cloned());
+            *self.sent.borrow_mut() = Some(seq);
+            Ok(())
+        }
         fn api_reply(
             &self,
             endpoint: &str,
@@ -920,6 +1088,15 @@ mod tests {
             *self.api_call.borrow_mut() =
                 Some((endpoint.to_string(), request_id.to_string(), reply));
             self.api_result.clone()
+        }
+        fn hook_request_pending(&self, request_id: &str) -> bool {
+            self.hook_pending && !request_id.is_empty()
+        }
+        fn write_hook_verdict(&self, request_id: &str, verdict: HookVerdict) -> VerdictWrite {
+            self.hook_writes
+                .borrow_mut()
+                .push((request_id.to_string(), verdict));
+            self.hook_result.clone()
         }
         fn set_act_repeat(&self, _pane: &str, value: &str) {
             self.repeat_writes.borrow_mut().push(value.to_string());
@@ -1256,6 +1433,119 @@ mod tests {
         );
     }
 
+    // ---- hook reply lane ------------------------------------------------------------------------
+
+    /// The shipped `approve`: a `[keys]` arm for claude AND a `[hook]` arm for the same agent. The
+    /// overlap is the degradation path, so both tests below run against this one manifest.
+    fn hook_action() -> ActionManifest {
+        let src = "min_engine_version = \"0.1\"\nname = \"approve\"\nlabel = \"Approve\"\nkind = \"keys\"\nwhen = { state = [\"blocked\"], detail = [\"permission\"] }\n[keys]\nclaude = [\"1\"]\n[hook]\nclaude = { verdict = \"allow\" }\n";
+        ActionManifest::parse(src, "approve", "approve.toml").unwrap()
+    }
+
+    /// A blocked/permission claude pane carrying the minted request id the lane stamps.
+    fn blocked_claude_with_request(stamped_at: u64) -> PaneFacts {
+        PaneFacts {
+            permission_request: Some("d41d8cd98f00b204".to_string()),
+            ..blocked_claude(stamped_at)
+        }
+    }
+
+    #[test]
+    fn hook_verdict_replies_and_spends_the_request() {
+        let io = MockIo::new(
+            vec![Some(blocked_claude_with_request(1_000_000))],
+            acquired(),
+        )
+        .with_hook_pending();
+        let r = act(&io, &hook_action(), "%1", FireArgs::default());
+        assert_eq!(r.outcome, Outcome::Replied);
+        assert_eq!(r.exit_code(), 0);
+        assert!(
+            io.sent.borrow().is_none(),
+            "the hook lane sends no keystrokes"
+        );
+        assert_eq!(
+            *io.hook_writes.borrow(),
+            vec![("d41d8cd98f00b204".to_string(), HookVerdict::Allow)]
+        );
+        assert_eq!(
+            *io.request_cleared.borrow(),
+            vec!["%1".to_string()],
+            "the id is spent under the same held lock the verdict was written under"
+        );
+        assert!(*io.cleared.borrow(), "the lock is released after the reply");
+    }
+
+    /// The degradation guarantee at the broker: no record on disk, so the same action delivers the
+    /// keystroke it always did.
+    #[test]
+    fn no_request_record_falls_through_to_the_keys_arm() {
+        let io = MockIo::new(
+            vec![Some(blocked_claude_with_request(1_000_000))],
+            acquired(),
+        );
+        let r = act(&io, &hook_action(), "%1", FireArgs::default());
+        assert_eq!(r.outcome, Outcome::Sent);
+        assert_eq!(*io.sent.borrow(), Some(vec!["1".to_string()]));
+        assert!(io.hook_writes.borrow().is_empty(), "nothing was written");
+        assert!(
+            io.request_cleared.borrow().is_empty(),
+            "a keys fire does not spend the id"
+        );
+    }
+
+    /// A pane with no stamped request cannot be on the lane at all, record or no record.
+    #[test]
+    fn an_unstamped_pane_takes_the_keys_arm() {
+        let io = MockIo::new(vec![Some(blocked_claude(1_000_000))], acquired()).with_hook_pending();
+        let r = act(&io, &hook_action(), "%1", FireArgs::default());
+        assert_eq!(r.outcome, Outcome::Sent);
+        assert!(io.hook_writes.borrow().is_empty());
+    }
+
+    /// A verdict that already exists is the request having been answered in the gap: `vanished`
+    /// with the same `request-gone` token the API lane's 404 reports, and nothing is clobbered.
+    #[test]
+    fn an_existing_verdict_maps_to_vanished() {
+        let io = MockIo::new(
+            vec![Some(blocked_claude_with_request(1_000_000))],
+            acquired(),
+        )
+        .with_hook_result(VerdictWrite::Exists);
+        let r = act(&io, &hook_action(), "%1", FireArgs::default());
+        assert_eq!(r.outcome.token(), "vanished");
+        assert_eq!(r.exit_code(), 3);
+        assert_eq!(r.reason(), Some("request-gone"));
+        assert!(
+            io.request_cleared.borrow().is_empty(),
+            "a request that was already answered is not ours to unstamp"
+        );
+    }
+
+    /// The binder is checked before the arm is chosen, so a dispatch quoting a request the pane no
+    /// longer carries never reaches the verdict file.
+    #[test]
+    fn a_stale_expectation_refuses_before_the_verdict_is_written() {
+        let io = MockIo::new(
+            vec![Some(blocked_claude_with_request(1_000_000))],
+            acquired(),
+        )
+        .with_hook_pending();
+        let r = act(
+            &io,
+            &hook_action(),
+            "%1",
+            FireArgs {
+                expect_permission_request: Some("some-other-id"),
+                ..FireArgs::default()
+            },
+        );
+        assert_eq!(r.reason(), Some("request-gone"));
+        assert_eq!(r.exit_code(), 4);
+        assert!(io.hook_writes.borrow().is_empty(), "nothing was written");
+        assert!(io.sent.borrow().is_none(), "and nothing was typed either");
+    }
+
     // ---- API-channel lane -----------------------------------------------------------------------
 
     #[test]
@@ -1393,6 +1683,210 @@ mod tests {
         );
     }
 
+    // ---- the caller's binder --------------------------------------------------------------------
+
+    /// The action every binder test fires. `blocked_claude` satisfies its `when`, so the ordinary
+    /// gate passes and only the binder can decide the outcome.
+    fn approve_when_blocked() -> ActionManifest {
+        keys_action(
+            "when = { state = [\"blocked\"], detail = [\"permission\"] }",
+            "claude = [\"1\"]",
+        )
+    }
+
+    /// A fresh blocked/permission claude pane in episode `ms`.
+    fn at_episode(ms: u64) -> PaneFacts {
+        PaneFacts {
+            episode_ms: ms,
+            ..blocked_claude(1_000_000)
+        }
+    }
+
+    fn expecting_episode(ms: u64) -> FireArgs<'static> {
+        FireArgs {
+            expect_episode_ms: Some(ms),
+            ..Default::default()
+        }
+    }
+
+    /// A-212. The pane is still blocked on a permission prompt, so the ordinary gate passes: only
+    /// the binder can tell it is a DIFFERENT prompt. Delete the check and this fires, which is the
+    /// stale approve the binder exists to stop.
+    #[test]
+    fn an_advanced_episode_refuses_episode_changed_and_sends_nothing() {
+        let io = MockIo::new(vec![Some(at_episode(1_700_000_005_000))], acquired());
+        let r = act(
+            &io,
+            &approve_when_blocked(),
+            "%5",
+            expecting_episode(1_700_000_000_000),
+        );
+        assert_eq!(r.outcome, Outcome::Refused(Refusal::EpisodeChanged));
+        assert_eq!(r.reason(), Some("episode-changed"));
+        assert_eq!(r.exit_code(), 4);
+        assert!(io.sent.borrow().is_none(), "a stale approve sends no keys");
+        assert!(
+            io.repeat_writes.borrow().is_empty(),
+            "and does not extend the run"
+        );
+        assert!(*io.cleared.borrow(), "the lock it took is released");
+    }
+
+    /// The same fire naming the episode the pane is actually in goes through: the refusal above is
+    /// the binder deciding, not the gate or the mock.
+    #[test]
+    fn the_expected_episode_fires() {
+        let io = MockIo::new(vec![Some(at_episode(1_700_000_000_000))], acquired());
+        let r = act(
+            &io,
+            &approve_when_blocked(),
+            "%5",
+            expecting_episode(1_700_000_000_000),
+        );
+        assert_eq!(r.outcome, Outcome::Sent);
+        assert_eq!(io.sent.borrow().clone(), Some(vec!["1".to_string()]));
+    }
+
+    /// A-213. The check reads the facts from UNDER the lock, not the pre-lock read: the mock's two
+    /// reads disagree, and both directions follow the second one. Move the check to the pre-lock
+    /// read and each half fails with the other's verdict.
+    #[test]
+    fn the_binder_reads_the_under_lock_facts_not_the_pre_lock_ones() {
+        // Pre-lock the episode still matches; it advances before the lock is held.
+        let io = MockIo::new(
+            vec![
+                Some(at_episode(1_700_000_000_000)),
+                Some(at_episode(1_700_000_005_000)),
+            ],
+            acquired(),
+        );
+        let r = act(
+            &io,
+            &approve_when_blocked(),
+            "%5",
+            expecting_episode(1_700_000_000_000),
+        );
+        assert_eq!(
+            r.reason(),
+            Some("episode-changed"),
+            "the pre-lock read matched, so a pre-lock check would have fired"
+        );
+        assert!(io.sent.borrow().is_none());
+
+        // And the reverse: pre-lock it differs, under the lock it is the expected one.
+        let io = MockIo::new(
+            vec![
+                Some(at_episode(1_700_000_005_000)),
+                Some(at_episode(1_700_000_000_000)),
+            ],
+            acquired(),
+        );
+        let r = act(
+            &io,
+            &approve_when_blocked(),
+            "%5",
+            expecting_episode(1_700_000_000_000),
+        );
+        assert_eq!(
+            r.outcome,
+            Outcome::Sent,
+            "the pre-lock read differed, so a pre-lock check would have refused"
+        );
+    }
+
+    /// A-215. The documented residual, pinned rather than fixed: under a backward wall-clock step
+    /// the pane's episode can be EARLIER than the one the caller saw, and that still counts as
+    /// changed. The binder compares for equality, never for order, so the refusal is
+    /// `episode-changed` either way and field instrumentation can classify it from the receipt.
+    #[test]
+    fn an_episode_that_moved_backwards_still_counts_as_changed() {
+        let io = MockIo::new(vec![Some(at_episode(1_699_999_995_000))], acquired());
+        let r = act(
+            &io,
+            &approve_when_blocked(),
+            "%5",
+            expecting_episode(1_700_000_000_000),
+        );
+        assert_eq!(r.reason(), Some("episode-changed"));
+        assert_eq!(r.exit_code(), 4);
+        assert!(io.sent.borrow().is_none());
+    }
+
+    /// A-214, the refusing half: the opencode pane's pending id has been replaced by the one for a
+    /// newer prompt. The API `requires` is satisfied (an id IS stamped), so the binder is the only
+    /// thing that can refuse, and no HTTP call leaves the process.
+    #[test]
+    fn a_replaced_permission_request_refuses_request_gone() {
+        let io = MockIo::new(vec![Some(blocked_opencode(1_000_000))], acquired());
+        let r = act(
+            &io,
+            &api_action(),
+            "%1",
+            FireArgs {
+                expect_permission_request: Some("per_older"),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.outcome, Outcome::Refused(Refusal::RequestGone));
+        assert_eq!(r.reason(), Some("request-gone"));
+        assert_eq!(
+            r.exit_code(),
+            4,
+            "a refused dispatch, not the 404 that exits 3"
+        );
+        assert!(io.api_call.borrow().is_none(), "nothing is answered");
+    }
+
+    /// A-214, the passing half: the id the caller quoted is the one the pane still carries, so the
+    /// ordinary gate and the API lane run exactly as they would without the binder.
+    #[test]
+    fn a_matching_permission_request_proceeds() {
+        let io = MockIo::new(vec![Some(blocked_opencode(1_000_000))], acquired());
+        let r = act(
+            &io,
+            &api_action(),
+            "%1",
+            FireArgs {
+                expect_permission_request: Some("per_abc123"),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.outcome, Outcome::Replied);
+        let call = io.api_call.borrow().clone().expect("api_reply was called");
+        assert_eq!(call.1, "per_abc123");
+    }
+
+    /// A pane carrying no request id at all refuses the same way a mismatched one does: absent and
+    /// different are one case to a caller that named an id. (A keys agent, so the API-lane
+    /// `requires` check is not what refuses.)
+    #[test]
+    fn an_absent_permission_request_refuses_request_gone() {
+        let io = MockIo::new(vec![Some(blocked_claude(1_000_000))], acquired());
+        let r = act(
+            &io,
+            &approve_when_blocked(),
+            "%5",
+            FireArgs {
+                expect_permission_request: Some("per_abc123"),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.reason(), Some("request-gone"));
+        assert!(io.sent.borrow().is_none());
+    }
+
+    /// The detach handoff re-asserts the gate under the same held lock, so the binder is checked
+    /// there too: a stale expectation hands nothing to a supervisor.
+    #[test]
+    fn a_stale_binder_refuses_the_detach_handoff() {
+        let io = MockIo::new(vec![Some(at_episode(1_700_000_005_000))], acquired());
+        let action = exec_action("detach = true");
+        let r = act(&io, &action, "%1", expecting_episode(1_700_000_000_000));
+        assert_eq!(r.reason(), Some("episode-changed"));
+        assert!(io.spawned.borrow().is_none(), "no supervisor is launched");
+        assert!(*io.cleared.borrow(), "the lock is released");
+    }
+
     // ---- outcome / exit-code vocabulary (drift) --------------------------------------------------
 
     #[test]
@@ -1423,6 +1917,177 @@ mod tests {
         );
         assert_eq!(Refusal::Gate(RefusalReason::Gated).token(), "gated");
         assert_eq!(Refusal::Locked.token(), "locked");
+        assert_eq!(Refusal::EpisodeChanged.token(), "episode-changed");
+        assert_eq!(Refusal::RequestGone.token(), "request-gone");
+        // The same word as the `vanished` reason, on purpose: one names a request the pane stopped
+        // carrying (exit 4), the other one the server answered 404 for (exit 3).
+        assert_eq!(Gone::Request.token(), Refusal::RequestGone.token());
+        assert_eq!(Refusal::Payload(TextRefusal::Sigil).token(), "sigil");
+        assert_eq!(
+            Refusal::Payload(TextRefusal::ControlBytes).token(),
+            "control-bytes"
+        );
+        assert_eq!(Refusal::Payload(TextRefusal::TooLong).token(), "too-long");
+        assert_eq!(Refusal::Payload(TextRefusal::Empty).token(), "empty");
+    }
+
+    // ---- text actions ---------------------------------------------------------------------------
+
+    fn text_action(when: &str, table: &str) -> ActionManifest {
+        let src = format!(
+            "min_engine_version = \"0.1\"\nname = \"steer\"\nlabel = \"Steer\"\nkind = \"text\"\n{when}\n[text]\n{table}\n"
+        );
+        ActionManifest::parse(&src, "steer", "steer.toml").unwrap()
+    }
+
+    fn idle_claude(stamped_at: u64) -> PaneFacts {
+        PaneFacts {
+            state: AgentState::Idle,
+            detail: None,
+            ..blocked_claude(stamped_at)
+        }
+    }
+
+    /// A-251: the manifest's keys wrap the caller's string, in that order, inside one lock hold.
+    /// The caller supplies the middle element and nothing else: the wrapping is the manifest's.
+    #[test]
+    fn prefix_and_suffix_wrap_the_literal_in_one_lock_hold() {
+        let io = MockIo::new(vec![Some(idle_claude(1_000_000))], acquired());
+        let action = text_action(
+            "when = { state = [\"idle\"] }",
+            "claude = { prefix = [\"i\"], suffix = [\"Enter\"] }",
+        );
+        let r = act(
+            &io,
+            &action,
+            "%1",
+            FireArgs {
+                text: Some("ship it"),
+                ..FireArgs::default()
+            },
+        );
+        assert_eq!(r.outcome, Outcome::Sent);
+        assert_eq!(
+            io.sent.borrow().clone(),
+            Some(vec![
+                "i".to_string(),
+                format!("{LITERAL}ship it"),
+                "Enter".to_string(),
+            ])
+        );
+        assert!(*io.cleared.borrow(), "the one hold is released after it");
+    }
+
+    /// A-281: the sigil refusal is host-side, and it lands before the broker has asked tmux
+    /// anything at all: no pane read, no re-verify, no lock, and so nothing to release.
+    #[test]
+    fn a_sigil_payload_refuses_before_any_tmux_call() {
+        let action = text_action("", "claude = { suffix = [\"Enter\"] }");
+        for payload in ["/clear", "  /compact", "!ls"] {
+            let io = MockIo::new(vec![Some(idle_claude(1_000_000))], acquired());
+            let r = act(
+                &io,
+                &action,
+                "%1",
+                FireArgs {
+                    text: Some(payload),
+                    ..FireArgs::default()
+                },
+            );
+            assert_eq!(
+                r.outcome,
+                Outcome::Refused(Refusal::Payload(TextRefusal::Sigil)),
+                "{payload:?}"
+            );
+            assert_eq!(r.exit_code(), 4);
+            assert_eq!(*io.read_calls.borrow(), 0, "the pane was never read");
+            assert!(io.sent.borrow().is_none(), "and nothing was delivered");
+            assert!(!*io.cleared.borrow(), "no lock was taken");
+        }
+    }
+
+    /// A-282(a): a control byte anywhere in the payload refuses, the newline included. A steer is
+    /// one line, and a `\r` in the middle of one would submit it early.
+    #[test]
+    fn control_bytes_and_an_empty_payload_refuse_before_any_tmux_call() {
+        let action = text_action("", "claude = { suffix = [\"Enter\"] }");
+        let cases = [
+            ("first\rsecond", TextRefusal::ControlBytes),
+            ("first\nsecond", TextRefusal::ControlBytes),
+            ("\x1b[31m", TextRefusal::ControlBytes),
+            ("", TextRefusal::Empty),
+            ("   ", TextRefusal::Empty),
+        ];
+        for (payload, want) in cases {
+            let io = MockIo::new(vec![Some(idle_claude(1_000_000))], acquired());
+            let r = act(
+                &io,
+                &action,
+                "%1",
+                FireArgs {
+                    text: Some(payload),
+                    ..FireArgs::default()
+                },
+            );
+            assert_eq!(
+                r.outcome,
+                Outcome::Refused(Refusal::Payload(want)),
+                "{payload:?}"
+            );
+            assert_eq!(*io.read_calls.borrow(), 0, "{payload:?} read the pane");
+        }
+    }
+
+    /// A-252: a text action at a blocked pane is refused by the ordinary gate, `awaiting-text`
+    /// included, and nothing reaches the pane.
+    #[test]
+    fn text_at_a_blocked_pane_is_refused_including_awaiting_text() {
+        let action = text_action("when = { state = [\"idle\"] }", "claude = {}");
+        for detail in ["permission", "awaiting-text"] {
+            let mut facts = idle_claude(1_000_000);
+            facts.state = AgentState::Blocked;
+            facts.detail = Some(detail.to_string());
+            let io = MockIo::new(vec![Some(facts)], acquired());
+            let r = act(
+                &io,
+                &action,
+                "%1",
+                FireArgs {
+                    text: Some("try the other branch"),
+                    ..FireArgs::default()
+                },
+            );
+            assert_eq!(
+                r.outcome,
+                Outcome::Refused(Refusal::Gate(RefusalReason::Gated)),
+                "blocked/{detail}"
+            );
+            assert!(io.sent.borrow().is_none(), "blocked/{detail} delivered");
+        }
+    }
+
+    /// A stale stamp re-verifies for a text action exactly as it does for keys: the predicate is
+    /// the kind's own `sends_keystrokes`, so steering cannot fire off an arbitrarily old paint.
+    #[test]
+    fn a_stale_text_action_reverifies_before_it_gates() {
+        let mut stale = idle_claude(1); // stamped at ~epoch start: stale
+        stale.state = AgentState::Working;
+        let io = MockIo::new(vec![Some(stale)], acquired()).with_reverify(idle_claude(1_000_000));
+        let action = text_action("when = { state = [\"idle\"] }", "claude = {}");
+        let r = act(
+            &io,
+            &action,
+            "%1",
+            FireArgs {
+                text: Some("rebase onto main"),
+                ..FireArgs::default()
+            },
+        );
+        assert!(
+            *io.reverify_called.borrow(),
+            "a stale text stamp re-verifies"
+        );
+        assert_eq!(r.outcome, Outcome::Sent);
     }
 
     // ---- dry-run --------------------------------------------------------------------------------

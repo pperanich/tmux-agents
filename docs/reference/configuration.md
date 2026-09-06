@@ -68,6 +68,9 @@ events = false               # set true to also install a pane-focus-in hook (ne
 [install]                    # what install-hooks writes into your agent configs
 wrapper_ref = "bare"         # writes just `tma-hook`, resolved off $PATH; "absolute" writes the path
 
+[hooks]                      # what an installed hook does at fire time, beyond stamping the pane
+# claude_reply_lane = { hold_ms = 25000 }  # let `tma act` answer claude's permission prompt
+
 [tmux]                       # which tmux-compatible binary tma spawns
 # bin = "tmate"              # default: plain `tmux` off PATH; env TMA_TMUX_BIN overrides this
 
@@ -246,6 +249,41 @@ trust to the exact command string (`trusted_hash` per entry in
 `~/.codex/config.toml`), so rewriting those entries makes them inert until you
 open codex, run `/hooks`, and trust them again. Codex's `notify` channel and every
 other agent are unaffected.
+
+## `[hooks]`: what an installed hook does at fire time
+
+| key | default | meaning |
+|---|---|---|
+| `claude_reply_lane` | unset | A sub-table `{ hold_ms = <milliseconds> }`. When present, claude's `PermissionRequest` hook parks the pending call and waits up to `hold_ms` for a decision from `tma act` instead of returning immediately. Naming the sub-table is the opt-in; `hold_ms` is optional and defaults to `25000`. |
+
+```toml
+[hooks]
+claude_reply_lane = { hold_ms = 25000 }
+```
+
+Unset is not a reduced mode, it is the behaviour every release before this one had:
+the hook writes its stamps (`blocked` / `permission`, the pending-call trio), exits
+0 with nothing on stdout, and claude draws the prompt it always drew. Naming the
+sub-table adds a hold on top of those same stamps. The dialog is on screen for the
+whole of it either way, and the keyboard still answers it.
+
+`hold_ms` is bounded at load into `1000..=590000`; a value outside that fails the
+config with an error naming the range, rather than loading a lane that quietly never
+works. The ceiling is ten seconds under claude's own 600-second default hook
+timeout, so tma is always the side that stops waiting first: a longer hold would end
+with claude killing its own hook mid-flight, which is a worse outcome than the hook
+returning empty-handed. The floor is there because a hold under a second cannot
+outlast the round trip it exists to wait for.
+
+This is its own section rather than a key under `[install]` because the two are read
+at different times by different processes. `[install]` decides how an agent config
+NAMES the wrapper, and `tma install-hooks` reads it once, at install. This one is
+read by the hook itself on every fire, so changing it takes effect on the next
+permission prompt with nothing to reinstall.
+
+The lane, and the recipe for answering over it, are in [Answer Claude's prompts over
+the hook
+lane](../how-to/install-agent-hooks.md#answer-claudes-prompts-over-the-hook-lane).
 
 ## `[tmux]`: which tmux binary to spawn
 

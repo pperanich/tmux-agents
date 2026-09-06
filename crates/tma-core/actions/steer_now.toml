@@ -1,0 +1,20 @@
+min_engine_version = "0.5.13"
+name = "steer_now"
+label = "Steer now"
+kind = "text"
+when = { state = ["working"] }
+
+# Steer an agent that is still working. Same delivery as `steer` (the string, then Enter), and the
+# agent is what queues it: claude's composer switches to `Press up to edit queued messages` and
+# codex's to `Messages to be submitted after next tool call`, both observed live. tma does not
+# compose an interrupt on top of the send, because what an interrupt does to a queued message is
+# per-agent, not generic: gemini returns the queued text to the composer unsent.
+sigils = ["/", "!"]
+
+# `steer_now = true` is each agent's own declaration that a message typed mid-turn is queued rather
+# than lost, and it is what lets this action fire at a `working` pane at all. Only agents whose
+# queueing was actually watched are listed: opencode is absent because its steering was verified over
+# the HTTP API rather than by typing into a busy pane, and gemini is absent permanently.
+[text]
+claude = { suffix = ["Enter"], steer_now = true }
+codex = { suffix = ["Enter"], steer_now = true }

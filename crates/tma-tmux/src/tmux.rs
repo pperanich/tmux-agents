@@ -3,7 +3,8 @@
 //! parent holds the `Tmux` handle, spawn plumbing, and session/probe lifecycle; one submodule per
 //! concern: `read` (list-panes/capture/ps, the poll cycle's whole input), `options` (pane/server
 //! option writes behind the stamp guard), `hooks` (global hook management), `display` (menu,
-//! focus, keys, bell), `window` (the opt-in window-name pass's own read).
+//! focus, keys, bell), `attach` (the process-replacement handover), `window` (the opt-in
+//! window-name pass's own read).
 //!
 //! Every tmux invocation handles a gone server gracefully: [`TmuxError::ServerGone`] is a clean,
 //! expected outcome distinct from a real failure.
@@ -16,6 +17,7 @@ use std::sync::{mpsc, Arc};
 use std::thread;
 use std::time::Duration;
 
+mod attach;
 mod display;
 mod hooks;
 mod options;
@@ -119,18 +121,24 @@ impl Server {
         }
     }
 
+    /// The socket selector on its own (`-L <name>` / `-S <path>`), empty for the ambient server.
+    /// Split out for the interactive attach, which wants the target but not the `-u` below.
+    pub fn socket_args(&self) -> Vec<String> {
+        if let Some(name) = &self.socket_name {
+            vec!["-L".to_string(), name.clone()]
+        } else if let Some(path) = &self.socket_path {
+            vec!["-S".to_string(), path.to_string_lossy().into_owned()]
+        } else {
+            Vec::new()
+        }
+    }
+
     /// The `-u …` server args every spawn prepends. `-u`: a client tmux deems non-UTF-8 (no TMUX
     /// var, no UTF-8 locale — launchd/cron/hook envs) gets utf8_sanitize()d output, turning the
     /// U+001F stamp separator into `_`.
     fn args(&self) -> Vec<String> {
         let mut args = vec!["-u".to_string()];
-        if let Some(name) = &self.socket_name {
-            args.push("-L".to_string());
-            args.push(name.clone());
-        } else if let Some(path) = &self.socket_path {
-            args.push("-S".to_string());
-            args.push(path.to_string_lossy().into_owned());
-        }
+        args.extend(self.socket_args());
         args
     }
 
@@ -160,6 +168,9 @@ impl Server {
 /// tests can target a scratch server and no output is locale-sanitized (see [`Server::args`]).
 pub struct Tmux {
     server_args: Vec<String>,
+    /// The same target without `-u`: the argv `tma attach` execs is an interactive client, which
+    /// parses no output and must not have UTF-8 forced over the attaching terminal's own locale.
+    socket_args: Vec<String>,
     /// The tmux binary resolved once at construction: `Some(path)` is the absolute path every spawn
     /// reuses (so PATH is not re-walked per call), `None` records a resolution miss so each call
     /// returns a guided [`TmuxError::NotInstalled`] instead of a bare per-spawn error.
@@ -184,6 +195,7 @@ impl Tmux {
     fn with_bin(bin: Option<PathBuf>, server: &Server) -> Self {
         Tmux {
             server_args: server.args(),
+            socket_args: server.socket_args(),
             bin,
         }
     }
@@ -414,7 +426,9 @@ fn describe_argv(args: &[&str]) -> String {
 /// Keep the subcommand and the leading flag block (tmux places all flags before positionals), with
 /// `-t <pane>` kept whole so the target stays visible; redact every positional payload argument to
 /// `[redacted N chars]`. A realistic key (`Enter`, `C-c`, `/compact`) does not lead with `-`, so the
-/// flag scan stops at the first key and the whole payload is redacted.
+/// flag scan stops at the first key and the whole payload is redacted. The literal-send path's `--`
+/// ends the scan too: everything after it is a caller's message, and a message that happens to begin
+/// with `-` must not be mistaken for one more flag to print verbatim.
 fn redact_payload_argv(args: &[&str]) -> Vec<String> {
     let mut out = Vec::with_capacity(args.len());
     let mut i = 0;
@@ -423,6 +437,10 @@ fn redact_payload_argv(args: &[&str]) -> Vec<String> {
         if i == 0 {
             out.push(arg.to_string());
             i += 1;
+        } else if arg == "--" {
+            out.push(arg.to_string());
+            i += 1;
+            break;
         } else if arg.starts_with('-') {
             out.push(arg.to_string());
             if arg == "-t" && i + 1 < args.len() {
@@ -525,6 +543,17 @@ mod tests {
             desc.contains("[redacted"),
             "no redaction placeholder: {desc}"
         );
+    }
+
+    /// The literal-send argv, whose payload is a person's message rather than a key name. The `--`
+    /// stays visible (it is the safety, not the secret) and everything after it is redacted, a
+    /// leading `-` included.
+    #[test]
+    fn literal_send_redacts_the_message_after_the_terminator() {
+        let desc = describe_argv(&["send-keys", "-t", "%3", "-l", "--", "-my message"]);
+        assert!(desc.contains("-l --"), "the literal flags are kept: {desc}");
+        assert!(!desc.contains("my message"), "message leaked: {desc}");
+        assert!(desc.contains("[redacted 11 chars]"), "not redacted: {desc}");
     }
 
     #[test]

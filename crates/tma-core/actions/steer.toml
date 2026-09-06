@@ -1,0 +1,28 @@
+min_engine_version = "0.5.13"
+name = "steer"
+label = "Steer"
+kind = "text"
+when = { state = ["idle"] }
+
+# Send one line of your own text to an idle agent: the caller's string, then Enter to submit it.
+# The string is delivered with `send-keys -l --`, so a message containing `Enter` or `C-c` is five
+# or three characters of text rather than a keypress, and one beginning with `-` is not a flag.
+#
+# Idle only. Steering a working agent is `steer_now`, and only for the agents that have declared
+# they queue rather than swallow a message typed mid-turn.
+#
+# The host refuses a payload that is empty, over 4096 bytes, carries a control byte (a `\r` would
+# submit early, an `\x1b` is an escape), or begins with one of the `sigils` below: `/compact`,
+# `/clear` and `!ls` are the agent's own command plane, and a steer is a message, not a command.
+# Widen or narrow the list by shadowing this file.
+sigils = ["/", "!"]
+
+# Enter submits the composer in all three TUIs. opencode also accepts a prompt over its HTTP API
+# (`/tui/append-prompt` + `/tui/submit-prompt`); this delivers into its pane like the others,
+# because a keys-lane steer needs no endpoint and no session id to reach the composer in front of
+# you. gemini is deliberately absent: it queues a message and then hands it back to the composer,
+# unsent, when the turn is interrupted. pi and cursor await a captured composer of their own.
+[text]
+claude = { suffix = ["Enter"] }
+codex = { suffix = ["Enter"] }
+opencode = { suffix = ["Enter"] }

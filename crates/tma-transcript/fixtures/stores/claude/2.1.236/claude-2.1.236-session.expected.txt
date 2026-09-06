@@ -1,0 +1,12 @@
+user_message	bytes=17 attachments=0
+thinking	bytes=11 redacted=false
+tool_call	name=Bash call_id=toolu_call01 args=[command,description] bytes=47
+tool_result	call_id=toolu_call01 status=ok bytes=50
+subagent_ref	child=sub01 external=true
+tool_result	call_id=sub01 status=ok bytes=32
+assistant_text	bytes=25
+attachment	kind=file bytes=64
+bookkeeping	type=mode
+turn_boundary	kind=end reason=turn_duration
+compaction	kind=compact_boundary
+user_message	bytes=11 attachments=0

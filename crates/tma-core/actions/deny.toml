@@ -9,11 +9,22 @@ when = { state = ["blocked"], detail = ["permission"] }
 #   codex  — footer `Press enter to confirm or esc to cancel`, so Escape cancels.
 #   claude — Escape dismisses the permission prompt (rejects the tool call); safer than guessing the
 #            "No" option's number, which varies with the prompt variant.
+#   gemini: `3. No, suggest changes (esc)`. Fired live on gemini 0.46.0, `3` printed
+#           `ℹ Request cancelled.`
+#   cursor: `Skip & tell the agent what to do instead (esc or n)`. `n` registers the rejection
+#           and opens cursor's own composer, which takes an optional reason ("empty to skip").
 # Same coverage caveat as approve (ACTIONS.md open question 2).
 [keys]
 claude = ["Escape"]
 codex = ["Escape"]
+cursor = ["n"]
+gemini = ["3"]
 
 # OpenCode rejects over HTTP instead of keystrokes: `reject` denies the pending request.
 [api]
 opencode = { op = "permission-reply", reply = "reject" }
+
+# The refusing half of the hook reply lane: claude is told the call was denied, with a reason it
+# reports back to the model. Falls through to the `Escape` sequence above when no hook is holding.
+[hook]
+claude = { verdict = "deny" }

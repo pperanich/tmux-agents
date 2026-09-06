@@ -11,6 +11,15 @@ that host too, beside the agents: install it there and everything works exactly
 as it does locally, because nothing is remote from tmux's point of view. Your
 terminal is a client and tma never sees it.
 
+What a fresh connection does want is a way in that lands on the right pane.
+`tma jump` is `switch-client`, so it moves a client that is already attached and
+does nothing from a terminal that has none. [`tma
+attach`](../reference/cli.md#tma-attach) is the other half: `tma attach --pane %5`
+selects that pane's window and pane, then replaces itself with `tmux
+attach-session`, so one command over ssh (or from a phone's terminal app) puts you
+in front of the agent instead of wherever the session was last left. Inside tmux
+it is `jump --pane`, so the same command works from both ends.
+
 The only thing your connection changes is where a notification lands. `osascript`
 and `notify-send` fire on the host running tmux, which is not the machine you are
 sitting at, and neither fails loudly. [Notifying from a remote

@@ -12,13 +12,29 @@ when = { state = ["blocked"], detail = ["permission"] }
 #            the current selection, and nothing in tma's read path knows where that is. Measured on
 #            codex 0.146.0 with the marker moved two `Down` presses onto option 3 ("No"): `y`
 #            approved (the probe file was created), `Enter` denied.
+#   gemini: `● 1. Allow once` heads the numbered list. Fired live on gemini 0.46.0, `1`
+#           approved and the probe file appeared on disk.
+#   cursor: the approve option prints its own accelerator, `Run (once) (y)`, and cursor's
+#           dialog has no digits at all. Read off a live cursor 2026.08.11 dialog; not yet fired.
 # Only agents whose confirm key is unambiguous captured chrome are covered; a per-agent, per-version
 # fixture capture (ACTIONS.md open question 2) precedes widening this to selection-list agents.
+#
+# NOT covered here, deliberately: the always/session-wide options (claude `2`, codex `p`, cursor
+# `tab` and `shift+tab`). Each writes a persistent grant, and `approve` answers one request.
 [keys]
 claude = ["1"]
 codex = ["y"]
+cursor = ["y"]
+gemini = ["1"]
 
 # OpenCode answers over HTTP instead of keystrokes: the broker POSTs the reply to the pending
 # permission request rather than sending a key into the pane. `once` grants this one request.
 [api]
 opencode = { op = "permission-reply", reply = "once" }
+
+# Claude answers over the hook reply lane when one is holding: a `PermissionRequest` hook that
+# tma parked on a request record reads this verdict and returns claude's own decision object, so
+# the tool runs with no keystroke. Purely additive to the `[keys]` arm above, which is still what
+# fires when no record is on disk (`[hooks] claude_reply_lane` unset, or the hold already expired).
+[hook]
+claude = { verdict = "allow" }

@@ -160,7 +160,9 @@ impl Tmux {
     /// tmux would call current), and it resolves from a window target or a pane target alike.
     /// An unreadable answer is `false`, which falls through to the plain `select-window` this
     /// guards — the behaviour before the guard existed.
-    fn window_is_current(&self, window_target: &str) -> bool {
+    ///
+    /// Shared with the attach path, whose `select-window` carries the same hook cost.
+    pub(super) fn window_is_current(&self, window_target: &str) -> bool {
         self.display(window_target, "#{window_active}")
             .is_ok_and(|v| v.trim() == "1")
     }
@@ -176,6 +178,27 @@ impl Tmux {
         let mut argv: Vec<&str> = vec!["send-keys", "-t", pane_id];
         argv.extend(keys.iter().map(String::as_str));
         self.run(&argv).map(|_| ())
+    }
+
+    /// Deliver a caller-supplied string into a pane as literal characters, wrapped in the
+    /// manifest's `prefix` and `suffix` key sequences. Three invocations at most, ordered
+    /// prefix → text → suffix, and the broker holds the pane's single-flight lock across all of
+    /// them.
+    ///
+    /// The middle one is the whole point: `-l` turns off named-key interpretation, so a message
+    /// containing the word `Enter` types five characters instead of pressing Return, and `--`
+    /// terminates the flags, so a message beginning with `-` is data rather than something tmux's
+    /// own getopt reads. Neither is optional; both are asserted by the send-keys source guard.
+    pub fn send_text(
+        &self,
+        pane_id: &str,
+        prefix: &[String],
+        text: &str,
+        suffix: &[String],
+    ) -> Result<(), TmuxError> {
+        self.send_keys(pane_id, prefix)?;
+        self.run(&["send-keys", "-t", pane_id, "-l", "--", text])?;
+        self.send_keys(pane_id, suffix)
     }
 
     /// Run `command` through the server's own `run-shell -b`, returning as soon as tmux has taken

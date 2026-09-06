@@ -18,9 +18,9 @@ use std::process::ExitCode;
 
 use tma_core::{ActionKind, ActionManifest, AgentRow, FoldConfig, Selector, When};
 use tma_runtime::broker::audit::{ActSource, AuditCtx};
-use tma_runtime::broker::{self, ActResult, Gone, Outcome, TmuxBroker};
+use tma_runtime::broker::{self, ActResult, Gone, Outcome, Refusal, TmuxBroker};
 use tma_runtime::json::{JsonWriter, JSON_SCHEMA};
-use tma_runtime::{actions, cycle, manifests, MenuItem};
+use tma_runtime::{actions, cycle, manifests, slots, MenuItem};
 
 use crate::cli_support;
 use crate::config::Config;
@@ -35,9 +35,20 @@ pub(crate) struct ActOpts {
     /// Fire on every selector-matched pane instead of requiring a unique one.
     pub all: bool,
     pub dry_run: bool,
-    /// The `--arg` values, for an `exec` action's environment (`keys` actions reject them).
+    /// The `--arg` values, for an `exec` action's environment (every other kind rejects them).
     pub args: Vec<String>,
+    /// The `--text` string a `text` action delivers (every other kind rejects it).
+    pub text: Option<String>,
     pub force: bool,
+    /// `--expect-episode-ms`: the episode the caller observed, re-checked under the pane lock.
+    pub expect_episode_ms: Option<u64>,
+    /// `--expect-permission-request`: the request id the caller observed, checked under that lock.
+    pub expect_permission_request: Option<String>,
+    /// `--slot`: the caller's idempotency key. A slot that already carries a receipt replays it and
+    /// dispatches nothing.
+    pub slot: Option<String>,
+    /// `--device`: which device dispatched, recorded on the receipt. Never part of the slot key.
+    pub device: Option<String>,
     pub yes: bool,
     pub json: bool,
     pub list: bool,
@@ -98,13 +109,10 @@ pub(crate) fn run(opts: ActOpts) -> ExitCode {
         eprintln!("tma: unknown action {name:?} (run `tma act --list` to see them)");
         return ExitCode::from(2);
     };
-    // A `keys` action's sequence is manifest-static by design (that is what makes it reviewable), so
-    // there is nowhere for a value to go: refuse rather than accept and silently drop it.
-    if !opts.args.is_empty() && action.kind == ActionKind::Keys {
-        eprintln!(
-            "tma: `{name}` is a keys action and takes no --arg \
-             (its key sequence comes from the manifest); use an exec action to pass values"
-        );
+    // Each kind takes exactly one caller payload flag, or none. A value with nowhere to go is
+    // refused rather than accepted and silently dropped.
+    if let Some(usage) = payload_flag_usage_error(action, &opts) {
+        eprintln!("tma: {usage}");
         return ExitCode::from(2);
     }
 
@@ -157,28 +165,177 @@ pub(crate) fn run(opts: ActOpts) -> ExitCode {
         all: opts.all,
         batch: batch.as_deref(),
     };
+    let fire = |pane: &str| {
+        broker::fire(
+            &tmux,
+            &manifests,
+            &cfg,
+            &opts.config.api,
+            detach,
+            action,
+            pane,
+            broker::FireArgs {
+                force: opts.force,
+                args: &opts.args,
+                text: opts.text.as_deref(),
+                audit,
+                expect_episode_ms: opts.expect_episode_ms,
+                expect_permission_request: opts.expect_permission_request.as_deref(),
+            },
+        )
+    };
+    // `--slot` makes the dispatch idempotent: the ledger decides whether it happens at all, and
+    // `--slot` conflicts with `--all`, so there is exactly one target here.
+    if let Some(slot) = opts.slot.as_deref() {
+        return fire_once(
+            slot,
+            opts.device.as_deref(),
+            &panes[0],
+            action,
+            opts.json,
+            fire,
+        );
+    }
     // Sequential, one full broker sequence per pane: each target takes its own single-flight lock
     // and re-verifies its own gate, so a fan-out is exactly N independent fires, never a shortcut.
-    let results: Vec<ActResult> = panes
-        .iter()
-        .map(|pane| {
-            broker::fire(
-                &tmux,
-                &manifests,
-                &cfg,
-                &opts.config.api,
-                detach,
-                action,
-                pane,
-                broker::FireArgs {
-                    force: opts.force,
-                    args: &opts.args,
-                    audit,
-                },
-            )
-        })
-        .collect();
+    let results: Vec<ActResult> = panes.iter().map(|pane| fire(pane)).collect();
     emit_all(&results, opts.json, opts.all)
+}
+
+// ---- idempotent dispatch (`--slot`) ------------------------------------------------------------
+
+/// Fire `pane` at most once for `slot`. The claim happens BEFORE the fire, so a replay returns the
+/// cached receipt and sends nothing; `locked` releases the claim, because it is the one refusal that
+/// changed nothing and will pass on a retry. Every other outcome writes a terminal receipt, `error`
+/// included: the broker failed somewhere it cannot prove the keystroke did not land, and a second
+/// dispatch is the worse answer.
+fn fire_once(
+    slot: &str,
+    device: Option<&str>,
+    pane: &str,
+    action: &ActionManifest,
+    json: bool,
+    fire: impl FnOnce(&str) -> ActResult,
+) -> ExitCode {
+    let ledger = match slots::Ledger::at_runtime_dir() {
+        Ok(ledger) => ledger,
+        Err(err) => {
+            eprintln!("tma: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let guard = match ledger.claim(slot, pane, &action.name, device, tma_runtime::now_ms()) {
+        Ok(slots::Claim::Hit(receipt)) => {
+            return emit_cached(slot, &action.name, pane, &receipt, json)
+        }
+        Ok(slots::Claim::Claimed(guard)) => guard,
+        Err(err) => {
+            eprintln!("tma: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let result = fire(pane);
+    let resolved = if matches!(result.outcome, Outcome::Refused(Refusal::Locked)) {
+        guard.release()
+    } else {
+        guard.write(slots::Receipt::from_act_result(&result))
+    };
+    // The dispatch already happened; a ledger that could not record it is a warning, not a failure,
+    // and the exit code stays the broker's.
+    if let Err(err) = resolved {
+        eprintln!("tma: {err}");
+    }
+    if json {
+        println!("{}", render_slot_json(&result));
+    }
+    if let Some(note) = human_note(&result) {
+        eprintln!("{note}");
+    }
+    ExitCode::from(result.exit_code() as u8)
+}
+
+/// Replay a receipt: the original exit code, the same `--json` object the fire printed, and a
+/// stderr line saying nothing was dispatched this time.
+fn emit_cached(
+    slot: &str,
+    action: &str,
+    pane: &str,
+    receipt: &slots::Receipt,
+    json: bool,
+) -> ExitCode {
+    if json {
+        println!("{}", render_cached_json(action, pane, receipt));
+    }
+    let outcome = match &receipt.reason {
+        Some(reason) => format!("{}: {reason}", receipt.outcome),
+        None => receipt.outcome.clone(),
+    };
+    eprintln!(
+        "tma: cached receipt for slot `{slot}`: `{action}` on {pane} {outcome} (exit {}); \
+         nothing was dispatched",
+        receipt.exit_code
+    );
+    ExitCode::from(receipt.exit_code as u8)
+}
+
+/// A replayed receipt as the same object a fire prints: the ledger stores the tokens, so this
+/// rebuilds the key set rather than reconstructing an [`ActResult`] it cannot know the payload of.
+fn render_cached_json(action: &str, pane: &str, receipt: &slots::Receipt) -> String {
+    let mut j = JsonWriter::new();
+    j.begin_object();
+    j.number("schema", JSON_SCHEMA);
+    j.string("action", action);
+    j.string("pane", pane);
+    j.string("outcome", &receipt.outcome);
+    j.number("exit_code", receipt.exit_code as i64);
+    match &receipt.reason {
+        Some(reason) => j.string("reason", reason),
+        None => j.null("reason"),
+    }
+    j.bool("cached", true);
+    j.end_object();
+    j.finish()
+}
+
+/// A slotted fire's result object: the ordinary key set plus `cached`, which a `--slot` caller can
+/// always read (`false` here, `true` on the replay).
+fn render_slot_json(result: &ActResult) -> String {
+    let mut j = JsonWriter::new();
+    j.begin_object();
+    j.number("schema", JSON_SCHEMA);
+    write_act_result_fields(&mut j, result);
+    j.bool("cached", false);
+    j.end_object();
+    j.finish()
+}
+
+/// Which caller payload flag this action's kind takes: `exec` takes `--arg`, `text` takes exactly
+/// one `--text`, and `keys` takes neither (its sequence is manifest-static, which is what makes it
+/// reviewable). Returns the usage sentence for a mismatch, `None` when the flags fit the kind.
+fn payload_flag_usage_error(action: &ActionManifest, opts: &ActOpts) -> Option<String> {
+    let name = &action.name;
+    let kind = kind_token(action.kind);
+    if !opts.args.is_empty() && action.kind != ActionKind::Exec {
+        let instead = match action.kind {
+            ActionKind::Text => "the string it sends is --text",
+            _ => "use an exec action to pass values",
+        };
+        return Some(format!(
+            "`{name}` is a {kind} action and takes no --arg \
+             (its sequence comes from the manifest); {instead}"
+        ));
+    }
+    match (action.kind, opts.text.is_some()) {
+        (ActionKind::Text, false) => Some(format!(
+            "`{name}` is a text action and needs the string to send: \
+             `tma act {name} --pane <ID> --text \"<string>\"`"
+        )),
+        (ActionKind::Keys | ActionKind::Exec, true) => Some(format!(
+            "`{name}` is a {kind} action and takes no --text \
+             (only a text action delivers a caller's string)"
+        )),
+        _ => None,
+    }
 }
 
 // ---- audit context -----------------------------------------------------------------------------
@@ -421,8 +578,10 @@ fn human_note(r: &ActResult) -> Option<String> {
     let code = r.exit_code();
     match &r.outcome {
         Outcome::Sent => Some(format!("tma: sent `{}` to {}", r.action, r.pane)),
+        // Two lanes reach `replied` now, API and hook, and the result carries no transport. What
+        // the line has to say is the part they share: the answer went as data, not as a keypress.
         Outcome::Replied => Some(format!(
-            "tma: replied `{}` to {} over the API",
+            "tma: replied `{}` to {} without keystrokes",
             r.action, r.pane
         )),
         Outcome::Exited(_) | Outcome::Spawned => None,
@@ -521,8 +680,17 @@ fn render_dry_run_targets(runs: &[broker::DryRun]) -> String {
     out
 }
 
+/// One half of a `text` action's wrapping for `--dry-run`, or `empty` when it declares none.
+fn render_wrap(keys: &[String], empty: &str) -> String {
+    if keys.is_empty() {
+        empty.to_string()
+    } else {
+        keys.join(" ")
+    }
+}
+
 /// Human `--dry-run` output: the resolved context with each value's age, the gate verdict,
-/// and the would-be keys or command — no side effects.
+/// and the would-be keys, text wrapping, or command, with no side effects.
 fn render_dry_run(d: &broker::DryRun) -> String {
     use broker::{DryGate, Effect};
 
@@ -546,7 +714,16 @@ fn render_dry_run(d: &broker::DryRun) -> String {
             op,
             reply,
         } => format!("api: POST {endpoint}/permission/<id>/reply  op={op} reply={reply}"),
+        Effect::Hook { request, verdict } => {
+            format!("hook: verdict={verdict} for the held request {request}")
+        }
         Effect::Command(cmd) => format!("command: {cmd}"),
+        // The caller's own string is deliberately absent: what a dry-run is for is the wrapping.
+        Effect::Text { prefix, suffix } => format!(
+            "text: {} <--text> {}",
+            render_wrap(prefix, "(no prefix)"),
+            render_wrap(suffix, "(no suffix)")
+        ),
         Effect::None => "none".to_string(),
     };
     out.push_str(&format!("effect:  {effect}\n"));
@@ -607,8 +784,8 @@ fn run_list(
     ExitCode::SUCCESS
 }
 
-/// The applicability list: a `keys` action's covered agents are the union of its
-/// `[keys]` and `[api]` tables (the `--list` document reports the union, with no per-transport
+/// The applicability list: a `keys` action's covered agents are the union of its `[keys]`,
+/// `[api]` and `[hook]` tables (the `--list` document reports the union, with no per-transport
 /// surface in v1); an `exec` action's from `agents` (empty means all agents). Sorted + deduped so
 /// the union is stable regardless of table order.
 fn applicability(action: &ActionManifest) -> Vec<&str> {
@@ -618,6 +795,7 @@ fn applicability(action: &ActionManifest) -> Vec<&str> {
                 .keys
                 .keys()
                 .chain(action.api.keys())
+                .chain(action.hook.keys())
                 .map(String::as_str)
                 .collect();
             agents.sort_unstable();
@@ -625,6 +803,7 @@ fn applicability(action: &ActionManifest) -> Vec<&str> {
             agents
         }
         ActionKind::Exec => action.agents.iter().map(String::as_str).collect(),
+        ActionKind::Text => action.text.keys().map(String::as_str).collect(),
     }
 }
 
@@ -632,6 +811,7 @@ fn kind_token(kind: ActionKind) -> &'static str {
     match kind {
         ActionKind::Keys => "keys",
         ActionKind::Exec => "exec",
+        ActionKind::Text => "text",
     }
 }
 
@@ -779,10 +959,12 @@ fn run_menu(
         }
     };
 
+    // A `text` action needs a string the menu has nowhere to ask for, so it is not offered here.
+    // A one-key menu that fired an empty steer would be worse than no entry at all.
     let fireable: Vec<(String, String)> = actions_set
         .iter()
         .zip(&verdicts)
-        .filter(|(_, v)| v.is_none())
+        .filter(|(a, v)| v.is_none() && a.kind != ActionKind::Text)
         .map(|(a, _)| (a.name.clone(), a.label.clone()))
         .collect();
     if fireable.is_empty() {
@@ -833,6 +1015,36 @@ mod tests {
             json_keys(&json),
             ["action", "exit_code", "outcome", "pane", "reason", "schema"]
         );
+    }
+
+    /// A `--slot` dispatch and its replay print the SAME object, `cached` apart: the ordinary key
+    /// set plus one additive key, so a slotted caller parses one shape either way.
+    #[test]
+    fn slot_json_adds_exactly_the_cached_key() {
+        let fired = render_slot_json(&result("approve", "%5", Outcome::Sent));
+        assert_eq!(
+            json_keys(&fired),
+            [
+                "action",
+                "cached",
+                "exit_code",
+                "outcome",
+                "pane",
+                "reason",
+                "schema"
+            ]
+        );
+        assert!(fired.contains("\"cached\":false"), "{fired}");
+        let replay = render_cached_json(
+            "approve",
+            "%5",
+            &slots::Receipt {
+                outcome: "sent".to_string(),
+                reason: None,
+                exit_code: 0,
+            },
+        );
+        assert_eq!(replay, fired.replace("\"cached\":false", "\"cached\":true"));
     }
 
     /// A refusal carries its reason token and exit 4; a locked refusal exits 5.

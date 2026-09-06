@@ -202,28 +202,55 @@ first) and `--check` verifies it. For the installer's per-agent caveats
 
 ## Bundled action key sequences
 
-The `keys` actions tma ships send a per-agent key sequence
-through the `tma-tmux` write path. Each element is one `send-keys` argument with
-named-key interpretation on, so `Enter`, `Escape`, and `/compact` mean what tmux
-says. An agent with no cell for an action is not covered by it (the action does
-not apply to that agent's panes).
+The actions tma ships reach each agent through the `tma-tmux` write path. Each
+key element is one `send-keys` argument with named-key interpretation on, so
+`Enter`, `Escape`, and `/compact` mean what tmux says. An agent with no cell for
+an action is not covered by it (the action does not apply to that agent's panes).
 
-| action | claude | codex | gemini |
-|---|---|---|---|
-| `approve` | `1` | `Enter` | — |
-| `deny` | `Escape` | `Escape` | — |
-| `interrupt` | `Escape` | `Escape` | `Escape` |
-| `compact` | `/compact` `Enter` | — | — |
+| action | claude | codex | cursor | gemini | opencode | pi |
+|---|---|---|---|---|---|---|
+| `approve` | `1` | `y` | `y` | `1` | API `once` | n/a |
+| `deny` | `Escape` | `Escape` | `n` | `3` | API `reject` | n/a |
+| `interrupt` | `Escape` | `Escape` | `C-c` | `Escape` | `Escape` | `Escape` |
+| `compact` | `/compact` `Enter` | n/a | n/a | n/a | n/a | n/a |
+| `steer` | text + `Enter` | text + `Enter` | n/a | n/a | text + `Enter` | n/a |
+| `steer_now` | text + `Enter` | text + `Enter` | n/a | n/a | n/a | n/a |
 
 These sequences derive from each agent's captured prompt chrome (the same
 captures the blocked/working screen rules anchor on): `approve` is the confirm
-key of the permission prompt (Claude's `❯ 1. Yes` selection cursor, Codex's
-`Press enter to confirm` footer), `deny` and `interrupt` are the reject/cancel
-key (`esc`). Gemini has no captured confirm/reject key, so it carries only
-`interrupt`; `compact` is Claude-only until other agents' compact commands are
-captured. The sequences are provisional pending per-agent, per-version keystroke
-fixtures, the same discipline detection rules get (ACTIONS.md open question 2):
-where a prompt offers numbered choices, "approve" means option 1 by convention.
+key of the permission prompt, `deny` the reject key, `interrupt` the cancel key
+its working screen advertises. Where the option prints its own accelerator that
+accelerator wins over the option's position, because tma's read path never knows
+where a selection cursor is resting: that is why Codex approves with `y` (from
+`1. Yes, proceed (y)`) rather than `Enter`, and why Cursor, whose dialog has no
+digits at all, uses `y` and `n`.
+
+Two shapes are deliberately absent. **pi has no permission prompt**, so it
+carries no `approve` or `deny` row in any state; it has `interrupt` because it
+has a working state. **The always/session-wide options are never wired** (Claude's
+`2`, Codex's `p`, Cursor's `tab` and `shift+tab`): each writes a persistent grant
+and `approve` answers one request. `compact` stays Claude-only until other
+agents' compact commands are captured.
+
+Cursor's `n` registers the rejection and then opens its own "tell the agent what
+to do instead" composer, which takes an optional reason and skips on an empty
+one. And `interrupt` does not compose with a queued message everywhere: on Claude
+and Codex interrupting submits the queue immediately, but on Gemini it returns
+the queued text to the composer unsent.
+
+The sequences are provisional pending per-agent, per-version keystroke fixtures,
+the same discipline detection rules get (ACTIONS.md open question 2).
+
+The two steering rows are `text` actions: the keys shown are the manifest's
+wrapping, and the message itself is the caller's, delivered literally (see
+[`--text`](cli.md#steering---text)). `steer` fires at an idle pane, `steer_now`
+at a working one, and only for the agents that declared `steer_now`, meaning
+their composer was watched queueing a message typed mid-turn (Claude shows
+`Press up to edit queued messages`, Codex `Messages to be submitted after next
+tool call`). Gemini is excluded from both, permanently: it queues a mid-turn
+message and then returns it to the composer, unsent, when the turn is
+interrupted. OpenCode steers through its pane like the others here; its HTTP API
+carries a prompt too, but that lane is not what this action uses.
 
 ## Per-agent hook mappings
 
@@ -247,6 +274,18 @@ a tool call needs a decision, carries the pending call in its payload
 the hook exits 0 with nothing on stdout, so Claude Code draws its normal prompt.
 The hook is deliberately **not** installed with `async: true`, the point is to
 stamp the pane before the dialog draws, and a backgrounded hook would race it.
+
+Writing no decision back is the default, not a limit. Name `[hooks]
+claude_reply_lane` in `config.toml` and the same hook, after the same stamps, mints
+the pending call's id onto `@agent_permission_request` and holds for up to `hold_ms`
+(25 seconds by default) waiting for a verdict. An `approve` or `deny` that lands
+inside the hold returns Claude's own decision object on stdout, so the tool runs or
+refuses with no keystroke; a hold that expires prints nothing and leaves the prompt
+exactly as the paragraph above describes. Claude is the only agent with this lane,
+and the lane is the only reason a Claude pane carries `@agent_permission_request`
+at all: its payload names no request of its own, so tma mints one. The recipe is
+[Answer Claude's prompts over the hook
+lane](../how-to/install-agent-hooks.md#answer-claudes-prompts-over-the-hook-lane).
 
 The `Notification permission_prompt|elicitation_dialog` entry stays as the
 fallback for a build without `PermissionRequest`. On its own it was late: the
@@ -297,6 +336,23 @@ matched, since the `■`/`⬝` progress bar beside it animates. `idle` is anchor
 `ctrl+p commands`, the invariant tail of the composer's status row (the rest of that row
 is per-pane: token count, cost, cwd). The permission dialog replaces the composer, so a
 blocked screen never raises it.
+
+A second blocked rule reads OpenCode's `question` tool, which asks *you* to pick an option
+mid-turn: `blocked` with `detail = question`. The turn is technically still in flight, but
+nothing advances until somebody answers, so the ball is with the human. It is anchored on
+the dialog's footer, `↑↓ select  enter submit  esc dismiss`, verbatim at every captured
+width (60 through 200, opencode 1.18.29). The options render as `1. Red` / `2. Blue`, the
+same numbered shape as claude's permission dialog, so the numbering alone is deliberately
+not matched; the tool's own `3. Type your own answer` line is corroboration rather than a
+required token, since it is appended only while the tool's `custom` flag is not false.
+
+**`tma act approve` does not answer a question.** `approve` and `deny` gate on `detail =
+permission`, so a question pane simply offers neither, which is the intended result: for
+OpenCode those two POST a `permission-reply` for a pending request id, and a question is
+not a pending permission. Answering one means typing into the pane, or a `question-reply`
+lane on the API that does not exist yet. It is also a screen read only: the bundled plugin
+forwards no question event, so a pane whose screen tma cannot see, a remote shell, reports
+nothing here even with hooks wired.
 
 The OSC title is not usable. The original audit found it static (`OpenCode`); on 1.18.18
 it is state-bearing (`OC | Running <command>`) but goes stale, still reading `Running`

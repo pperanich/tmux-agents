@@ -97,10 +97,11 @@ once. Identity still applies: an action declaring `agents = ["claude"]` still
 refuses on a codex pane. `--force` is not `--yes`, either; a `confirm` action needs
 both.
 
-One thing `--force` skips that is easy to miss: a `keys` action normally
-re-verifies a stale pane on demand before gating. Under `--force` there is no gate
-to verify for, so no re-verification happens and the keys go out against whatever
-the pane looks like now.
+One thing `--force` skips that is easy to miss: an action that reaches the pane
+with keystrokes (`keys` or `text`) normally re-verifies a stale pane on demand
+before gating. Under `--force` there is no gate to verify for, so no
+re-verification happens and the keys go out against whatever the pane looks like
+now.
 
 ## Pass a value in: `--arg`
 
@@ -138,9 +139,15 @@ builds a command string out of it. Quote it anyway (`"$TMA_ARG"`), as you would
 `TMA_TITLE`.
 
 `keys` actions refuse `--arg` (exit 2) on purpose. A `keys` sequence lives in the
-manifest, which is what makes it reviewable; an action that types caller text into
-a live session is an `exec` action whose script owns that decision — and should
-set `confirm = true`, because it writes.
+manifest, which is what makes it reviewable, so there is nowhere for a value to
+go.
+
+To type a caller's line into a live session, reach for
+[`kind = "text"`](../reference/action-manifest-schema.md#text-per-agent-text-transports)
+before writing a script like the one above. It keeps the wrapping keys, the
+agents and the gate in the manifest, delivers the string with `send-keys -l --`,
+and applies the payload rules (no control bytes, no leading `/` or `!`) that a
+hand-rolled script has to remember for itself. The bundled `steer` action is one.
 
 Driving it from a wait loop is the orchestrator shape:
 
@@ -217,6 +224,47 @@ notification through your `[notify]` command when the child exits. A detached
 action is fire-and-forget: its exit code says nothing about the child's outcome,
 which arrives on the completion payload instead. Use a synchronous action (the
 default) when a script needs to branch on the result.
+
+## Retry an approve safely
+
+A script that fires an action over a network has a problem a local one does not:
+when the response never arrives, it cannot tell whether the action ran. Firing
+again is a guess, and on `approve` it is the expensive kind.
+
+Give the dispatch an id and tma will run it at most once:
+
+```sh
+#!/bin/sh
+# Approve the prompt on %5, and survive losing the answer.
+episode=$(tma ls --json | jq -r '.agents[] | select(.pane == "%5") | .episode_ms')
+slot="approve:%5:$episode"
+
+tma act approve --pane %5 --slot "$slot" --device "$(hostname)" --json
+```
+
+Run that line twice and the pane receives the keystroke once. The second run
+prints the first run's receipt with `"cached": true`, exits with the first run's
+code, and sends nothing. The id is the whole identity, so build it from what
+makes this dispatch this dispatch: the action, the pane, and the episode you read
+off the row. A new episode is a new prompt, so it earns a new slot.
+
+If the connection died before you saw any answer at all, ask instead of firing:
+
+```sh
+tma receipts --slot "$slot" --json
+```
+
+An empty result means the dispatch never reached the host, so it is safe to send
+it. A receipt means it did, and tells you what it ended as.
+
+Two behaviours make this safe to build on. A `locked` refusal (exit `5`) releases
+the slot, because a lock held by another invocation is the one refusal a retry
+fixes. Everything else writes a terminal receipt, including a broker `error`,
+whose receipt records `fired-unknown`: tma cannot prove that keystroke did not
+land, so it will not send a second one on your behalf. Receipts live for 24 hours
+in a per-host ledger, so a retry from a different connection, or a different
+device, still lands on the same slot. The flags and the ledger's rules are in
+[`tma act --slot`](../reference/cli.md#retrying-a-dispatch-safely).
 
 ## Recommend `confirm` for anything that writes
 

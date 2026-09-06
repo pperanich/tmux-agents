@@ -1,0 +1,57 @@
+# agent: opencode
+# state: blocked
+# title: OpenCode
+# command: opencode.exe
+# pid: 41207
+# captured_at: 1788624720
+---
+                                                                                                    
+  ┃                                                                                                 
+  ┃  Use your question tool to ask me one question: which color should the banner be? Offer         
+  ┃  exactly two options, Red and Blue, and wait for my answer. Do not run any other tool.          
+  ┃                                                                                                 
+                                                                                                    
+     + Thought: 422ms                                                                               
+                                                                                                    
+     → Asked 1 question                                                                             
+                                                                                                    
+     ▣  Build · Big Pickle                                                                          
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+                                                                                                    
+  ┃                                                                                                 
+  ┃  Which color should the banner be?                                                              
+  ┃                                                                                                 
+  ┃  1. Red                                                                                         
+  ┃     Use red for the banner                                                                      
+  ┃  2. Blue                                                                                        
+  ┃     Use blue for the banner                                                                     
+  ┃  3. Type your own answer                                                                        
+  ┃                                                                                                 
+  ┃  ↑↓ select  enter submit  esc dismiss                                                           
+  ┃                                                                                                 
+                                                                                                    

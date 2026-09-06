@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use clap::Parser;
 
 mod act;
+mod attach;
 mod cli;
 mod cli_support;
 mod completions;
@@ -16,8 +17,10 @@ mod init;
 mod install;
 mod install_keys;
 mod mute;
+mod receipts;
 mod redact;
 mod subscribe;
+mod transcript;
 mod wait;
 mod watch_session;
 
@@ -125,6 +128,14 @@ fn main() -> ExitCode {
             run_status(args, &server, manifest_dir, debug_timing, &config)
         }
         Some(Command::Jump(args)) => run_jump_cmd(args, &server, manifest_dir, &config, client),
+        Some(Command::Attach(args)) => attach::run(attach::AttachOpts {
+            pane: args.pane,
+            print: args.print,
+            server: server.clone(),
+            manifest_dir,
+            config,
+            client,
+        }),
         Some(Command::Wait(args)) => wait::run(wait::WaitOpts {
             target_pane: args.pane,
             target_any: args.any,
@@ -158,7 +169,12 @@ fn main() -> ExitCode {
             all: args.all,
             dry_run: args.dry_run,
             args: args.args,
+            text: args.text,
             force: args.force,
+            expect_episode_ms: args.expect_episode_ms,
+            expect_permission_request: args.expect_permission_request,
+            slot: args.slot,
+            device: args.device,
             yes: args.yes,
             json: args.json,
             list: args.list,
@@ -166,6 +182,11 @@ fn main() -> ExitCode {
             server: server.clone(),
             manifest_dir,
             config,
+        }),
+        Some(Command::Receipts(args)) => receipts::run(receipts::ReceiptsOpts {
+            slot: args.slot,
+            since_ms: args.since_ms,
+            json: args.json,
         }),
         Some(Command::Mute(args)) => mute::run(mute::MuteOpts {
             pane: args.pane,
@@ -176,6 +197,7 @@ fn main() -> ExitCode {
             manifest_dir,
             config,
         }),
+        Some(Command::Transcript(args)) => transcript::run(args, &server),
         Some(Command::Watch(args)) if args.temporary_session => {
             watch_session::run(watch_session::WatchSessionOpts {
                 args,
@@ -228,6 +250,7 @@ fn main() -> ExitCode {
             notify_on: config.notify.on,
             notify_context_high: config.notify.context_high.as_ref().map(|c| c.threshold),
             agents: config.agent_overrides,
+            claude_reply_hold_ms: config.hooks.claude_reply_lane.as_ref().map(|l| l.hold_ms),
         }),
         Some(Command::Daemon(args)) => tma_daemon::run_cli(tma_daemon::DaemonOpts {
             ensure: args.ensure,
@@ -384,6 +407,7 @@ fn autostart_eligible(command: &Option<Command>) -> bool {
             Command::Ls(_)
                 | Command::Status(_)
                 | Command::Jump(_)
+                | Command::Attach(_)
                 | Command::Wait(_)
                 | Command::Watch(_)
                 | Command::Subscribe(_)
@@ -513,6 +537,8 @@ mod tests {
             vec!["ls"],
             vec!["status"],
             vec!["jump"],
+            // `attach` is a navigation surface too: inside tmux it IS a jump.
+            vec!["attach", "--pane", "%1"],
             vec!["wait", "--any", "--until", "idle"],
             vec!["watch"],
             vec!["subscribe"],

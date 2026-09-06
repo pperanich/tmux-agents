@@ -10,6 +10,99 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **`tma act` can bind a dispatch to the pane the caller actually saw.** `--expect-episode-ms` and
+  `--expect-permission-request` take the `episode_ms` and `permission_request` a script read off a
+  `tma ls --json` row and re-check them inside the pane's single-flight action lock, against the
+  same read the gate is re-asserted from. A surface that shows someone a permission prompt and
+  dispatches their approve some seconds later can no longer land it on the prompt that replaced it:
+  a pane that has moved on refuses `episode-changed`, one that no longer carries the quoted id
+  refuses `request-gone`, and both exit 4 having sent nothing.
+- **`tma attach --pane %5`, the way in from a terminal that is not a tmux client yet.** `tma jump`
+  is `switch-client`, which moves a client that is *already attached*: from a fresh ssh session or
+  a phone's terminal app there is nothing for it to move, so the pane you wanted stayed one manual
+  `tmux attach` and some navigation away. `attach` selects the pane's window and pane on its
+  session, then replaces itself with `tmux attach-session -t <session>` (carrying
+  `--socket-name`/`--socket-path` through), so the terminal you are holding becomes the client
+  showing that pane. Inside tmux (`$TMUX` set) it is exactly `tma jump --pane`, which makes it the
+  one command that works from both ends. It refuses with exit 2 when stdin is not a terminal, since
+  it has no tty to hand over, and exit 3 when the pane vanished; `--print` shows the argv it would
+  run instead of running it.
+- **An OpenCode pane waiting on a `question` now reads `blocked/question` instead of `working`.**
+  OpenCode's `question` tool asks you to pick an option mid-turn. The turn is technically still in
+  flight, so the pane kept the `working` glyph and stayed out of `tma jump --attention` and the
+  blocked count while nothing at all was happening. A new screen rule, anchored on the dialog's
+  `↑↓ select  enter submit  esc dismiss` footer (verbatim at every width from 60 to 200 on
+  opencode 1.18.29), types it as `blocked` with a detail that says which kind of stop it is. The
+  detail matters for what does *not* happen next: `tma act approve` and `deny` gate on `detail =
+  permission`, so they keep offering nothing at a question, which is right, since answering one
+  means choosing an option rather than granting a request. This is a screen read only; the plugin
+  forwards no question event yet.
+- **Steering: send an agent a line of your own text, through the same reviewable manifest every
+  other action goes through.** A third action kind, `kind = "text"`, takes one string at the call
+  (`tma act steer --pane %5 --text "use the existing helper"`) and delivers it with `send-keys -l
+  --`, so a message containing the word `Enter` types five characters instead of pressing Return
+  and one beginning with `-` is data rather than a flag; the manifest still owns the wrapping keys,
+  the agents, and the gate, and the host refuses a payload that is empty, over 4096 bytes, carries
+  a control byte, or begins with one of the action's `sigils` (`/` and `!` by default) before it
+  runs a single tmux command, so `/clear` and `/compact` stay out of reach of anything that can
+  only send a message. Two bundled actions use it: `steer` at an idle pane (Claude, Codex,
+  OpenCode) and `steer_now` at a working one, offered only where the agent declared `steer_now =
+  true` because it was watched queueing a mid-turn message rather than losing it (Claude and
+  Codex; never Gemini, which hands the queued text back to the composer, unsent, when the turn is
+  interrupted).
+- **`tma transcript` reads what the agent in a pane has been writing.** Every surface before this
+  one told you *that* a pane was blocked; this one tells you what it was doing when it stopped, out
+  of the agent's own transcript file, normalized so a claude pane and a codex pane answer in the
+  same vocabulary. The window is end-anchored and bounded on all three axes (1 MiB read, 32 KiB of
+  headers, 256 bytes per string), so opening a 44 MiB claude session costs the same first page as a
+  4 KiB pi one, and the `older` cursor a page reports pages backwards without duplicates or gaps
+  until it reaches the head. Claude Code, Codex, Gemini and pi are served; cursor-agent (no tool
+  results, no timestamps) and OpenCode (SQLite, its own workstream) are refused by name rather than
+  returned empty, because "nothing happened" is a claim and it would be false. Discovery uses the
+  `@agent_transcript` stamp 0.5.12 added, so for three of the four it is one `stat`. See [`tma
+  transcript`](docs/reference/cli.md#tma-transcript) and [Agent transcript
+  stores](docs/explanation/transcript-stores.md).
+- **`approve` and `deny` now work on Gemini and Cursor panes, and `interrupt` on four more agents.**
+  Nine of the eighteen agent-by-action cells the control audit found real were empty: Cursor had no
+  row in any action file, and pi had none either. `approve` sends `1` on Gemini and `y` on Cursor,
+  `deny` sends `3` and `n`, and `interrupt` now covers Cursor (`C-c`, the one agent whose interrupt
+  is not Escape), OpenCode, pi and Gemini. Where an option prints its own accelerator that
+  accelerator is what gets sent, because tma cannot see where a selection cursor is resting: this is
+  the same reason Codex approves with `y` rather than `Enter`. The session-wide grants stay
+  deliberately unwired (Claude's `2`, Codex's `p`, Cursor's `Run Everything`), pi keeps no
+  `approve`/`deny` row because it has no permission prompt, and Cursor's `n` opens its own
+  "tell the agent what to do instead" composer, which takes an optional reason and skips on an empty
+  one. [Agent coverage](docs/reference/agent-coverage.md#bundled-action-key-sequences) has the
+  table.
+- **A dispatch you lost the answer to can be retried without approving twice.** `tma act --slot
+  <ID>` runs at most once per id: the first fire writes a receipt into a per-host ledger under
+  tma's runtime directory, and a retry with the same id replays that receipt, exits with its code,
+  and sends nothing (`"cached": true` in `--json`). `--device <NAME>` records which device
+  dispatched without joining the id, so two devices inside one prompt still get one keystroke. The
+  new `tma receipts` reads that ledger, which is how a caller whose connection dropped mid-request
+  learns the outcome instead of sending the action again to find out. A `locked` refusal releases
+  the slot, since a retry is exactly what fixes it; every other outcome is terminal, and an `error`
+  records `fired-unknown` rather than inviting a second keystroke that may already have landed.
+- **A third reply transport: claude's permission hook can be answered with a decision instead of a
+  keystroke.** Name `[hooks] claude_reply_lane` in `config.toml` and a `PermissionRequest` hook
+  parks the pending call under `$XDG_RUNTIME_DIR/tma/requests/` and holds (25 seconds by default,
+  bounded under claude's own hook timeout) while `tma act approve` / `deny` writes the verdict its
+  new `[hook]` transport declares, so the tool runs or refuses with nothing typed into the pane.
+  Nothing degrades when no one answers: claude draws its dialog immediately either way, the keyboard
+  answers it throughout, and a hold that expires hands the prompt back untouched, with the next
+  dispatch sending the key sequence tma has always sent.
+
+### Changed
+
+- **The JSON row writer has a title-free surface for consumers off this machine.** This is internal
+  plumbing with no user-visible effect: `tma ls --json`, `tma wait --json` and `tma subscribe` emit
+  the bytes they always did, and nothing tma ships today uses the new form. The serializer is public
+  now and takes a surface argument, so one key set stays defined in one place and the remote form
+  drops only `title`, agent-supplied pane text that stays local for the reason `pending_summary`
+  does.
+
 ## [0.5.12] - 2026-09-05
 
 ### Added

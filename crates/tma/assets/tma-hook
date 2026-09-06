@@ -53,10 +53,13 @@ else
   feed_payload() { cat; }
 fi
 
+# stdout is PASSED THROUGH, stderr still discarded. Every event but one prints nothing, so this is
+# byte-identical for them; the exception is the claude hook reply lane, where `tma event` holds a
+# `PermissionRequest` open and prints the decision object claude reads back off this stdout.
 if [ -n "$TMA_HOOK_SOCKET" ]; then
-  feed_payload | "$bin" event --agent "$agent" --kind "$event" --socket-name "$TMA_HOOK_SOCKET" --payload - >/dev/null 2>&1
+  feed_payload | "$bin" event --agent "$agent" --kind "$event" --socket-name "$TMA_HOOK_SOCKET" --payload - 2>/dev/null
 else
-  feed_payload | "$bin" event --agent "$agent" --kind "$event" --payload - >/dev/null 2>&1
+  feed_payload | "$bin" event --agent "$agent" --kind "$event" --payload - 2>/dev/null
 fi
 
 # Always succeed: a hook must never break the agent, even if tma exits nonzero.

@@ -7,7 +7,20 @@ when = { state = ["working"] }
 # Interrupt a working agent. Escape is the interrupt/cancel key each agent advertises on its working
 # screen (captured chrome): claude `esc to interrupt`, codex/gemini `esc to cancel`. Gating on
 # `working` disambiguates the key from `deny` (Escape on a blocked prompt rejects it instead).
+#   gemini:   fired live on 0.46.0, `Escape` mid-turn printed `ℹ Request cancelled.` and stopped
+#             the stream. It does NOT submit a queued message the way claude and codex do (below).
+#   pi:       fired live on 0.84.2, `Escape` mid-turn printed `Operation aborted`.
+#   cursor:   fired live on 2026.08.11, `C-c` stopped the turn and cleared the `ctrl+c to stop`
+#             hint. Cursor is the one agent here whose interrupt is not Escape.
+#   opencode: footer hint `esc interrupt`, not yet fired live (the TUI drive was rate-limited).
+#             Its `POST /session/{id}/abort` is the api-lane alternative, unwired for now.
+#
+# `steer_now` (queue a message, then interrupt to submit it immediately) is claude-and-codex only:
+# on gemini the interrupt returns the queued text to the composer unsent. Do not compose the two.
 [keys]
 claude = ["Escape"]
 codex = ["Escape"]
+cursor = ["C-c"]
 gemini = ["Escape"]
+opencode = ["Escape"]
+pi = ["Escape"]

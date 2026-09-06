@@ -1,0 +1,76 @@
+session_meta	agent=gemini session=00000000-0000-0000-0000-0000000gm01 version=0.46.0 model=synthetic-model
+user_message	bytes=26 attachments=0
+thinking	bytes=49 redacted=false
+assistant_text	bytes=31
+tool_call	name=read_file call_id=tool-00 args=[absolute_path] bytes=48
+tool_result	call_id=tool-00 status=ok bytes=18
+usage	input=1000 output=40 total=1040 window=- cost=-
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+user_message	bytes=26 attachments=0
+thinking	bytes=49 redacted=false
+assistant_text	bytes=31
+tool_call	name=read_file call_id=tool-01 args=[absolute_path] bytes=48
+tool_result	call_id=tool-01 status=ok bytes=18
+usage	input=1001 output=41 total=1042 window=- cost=-
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+user_message	bytes=26 attachments=0
+thinking	bytes=49 redacted=false
+assistant_text	bytes=31
+tool_call	name=read_file call_id=tool-02 args=[absolute_path] bytes=48
+tool_result	call_id=tool-02 status=ok bytes=18
+usage	input=1002 output=42 total=1044 window=- cost=-
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+user_message	bytes=26 attachments=0
+thinking	bytes=49 redacted=false
+assistant_text	bytes=31
+tool_call	name=read_file call_id=tool-03 args=[absolute_path] bytes=48
+tool_result	call_id=tool-03 status=ok bytes=18
+usage	input=1003 output=43 total=1046 window=- cost=-
+bookkeeping	type=gemini/info
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+user_message	bytes=26 attachments=0
+thinking	bytes=49 redacted=false
+assistant_text	bytes=31
+tool_call	name=read_file call_id=tool-04 args=[absolute_path] bytes=48
+tool_result	call_id=tool-04 status=ok bytes=18
+usage	input=1004 output=44 total=1048 window=- cost=-
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+user_message	bytes=26 attachments=0
+thinking	bytes=49 redacted=false
+assistant_text	bytes=31
+usage	input=1005 output=45 total=1050 window=- cost=-
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+user_message	bytes=26 attachments=0
+thinking	bytes=49 redacted=false
+assistant_text	bytes=31
+usage	input=1006 output=46 total=1052 window=- cost=-
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+user_message	bytes=26 attachments=0
+thinking	bytes=49 redacted=false
+assistant_text	bytes=31
+usage	input=1007 output=47 total=1054 window=- cost=-
+bookkeeping	type=gemini/info
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+assistant_text	bytes=31
+usage	input=1008 output=48 total=1056 window=- cost=-
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+assistant_text	bytes=31
+usage	input=1009 output=49 total=1058 window=- cost=-
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set
+assistant_text	bytes=32
+usage	input=1010 output=50 total=1060 window=- cost=-
+bookkeeping	type=gemini/$set
+bookkeeping	type=gemini/$set

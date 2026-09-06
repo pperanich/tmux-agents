@@ -66,6 +66,8 @@ impl Detail {
     pub const PLAN: &'static str = "plan";
     /// A workspace-trust gate. Its affirmative option grants the whole folder, not one action.
     pub const TRUST: &'static str = "trust";
+    /// A question the agent asked mid-turn, answered by picking one of its options. Distinct from
+    /// `permission` because there is nothing to grant, so `approve`/`deny` do not resolve it.
     pub const QUESTION: &'static str = "question";
     pub const ERROR: &'static str = "error";
     pub const RATE_LIMIT: &'static str = "rate_limit";
