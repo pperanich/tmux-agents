@@ -56,7 +56,11 @@ focus-change nudge.
 hook can read `✓`, or `✗` as `drifted` (it runs a different command than this
 build installs, usually a moved binary), `wiped` (recorded but gone server-wide,
 so the server restarted), or `missing`. Each non-present hook gets its own
-indented reason line.
+indented reason line. `wiped` is the one the daemon repairs itself: tmux hooks
+live in the server, so a restart drops them, and a daemon re-arms whatever the
+install record names when it starts. Seeing `wiped` therefore means no daemon has
+started since the restart, and `tma daemon --ensure` fixes it as surely as
+re-running `tma install-hooks`.
 
 **`agents:` and `actions:`** the manifest and action rosters, with one `-` line
 per file the loader skipped and per action naming an unknown agent. A
