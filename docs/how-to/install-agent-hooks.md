@@ -167,6 +167,15 @@ moving the wrapper, and also switching `[install] wrapper_ref` between `bare` an
 is a plain config value and is not trust-gated, so idle detection works
 immediately.
 
+Codex allows exactly one `notify` program, so a tool that wants the signal
+(Codex Computer Use, for one) takes the key and passes what was there before to
+itself, as a JSON array in its own `--previous-notify` argument. tma reads that:
+a chain carrying `tma-hook codex notify` is wired, and `--check` and `tma doctor`
+report `notify chained through <program>` instead of a missing entry. Install
+leaves a working chain untouched. If the chained command names a wrapper this
+build no longer writes, install refuses and names the edit rather than rewriting
+another program's argv; fix the reference in `config.toml` by hand.
+
 ## Gemini CLI
 
 Config: `~/.gemini/settings.json` (`hooks` object, same shape as Claude's).

@@ -69,7 +69,7 @@ enum HookClass {
 impl HookClass {
     fn from_wiring(w: &HookWiring) -> HookClass {
         match w {
-            HookWiring::Wired => HookClass::Wired,
+            HookWiring::Wired | HookWiring::WiredVia(_) => HookClass::Wired,
             HookWiring::Incomplete(_) => HookClass::Partial,
             HookWiring::NotInstalled => HookClass::NotInstalled,
             HookWiring::Hookless => HookClass::Hookless,

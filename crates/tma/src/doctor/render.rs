@@ -24,6 +24,7 @@ fn fmt_age(ms: u64) -> String {
 fn hook_summary(w: &HookWiring) -> String {
     match w {
         HookWiring::Wired => "wired".to_string(),
+        HookWiring::WiredVia(notes) => format!("wired ({})", notes.join("; ")),
         HookWiring::Incomplete(reasons) => format!("incomplete ({})", reasons.join("; ")),
         HookWiring::NotInstalled => "not installed".to_string(),
         HookWiring::Hookless => "hookless (screen-detection only)".to_string(),
@@ -34,7 +35,9 @@ fn hook_summary(w: &HookWiring) -> String {
 /// Stable token for the wiring category, for the `--json` `hook_status` field.
 fn hook_status_token(w: &HookWiring) -> &'static str {
     match w {
-        HookWiring::Wired => "wired",
+        // A chained entry is wired; whose config it lives in is a text-report note, not a category
+        // a `--json` consumer has to learn.
+        HookWiring::Wired | HookWiring::WiredVia(_) => "wired",
         HookWiring::Incomplete(_) => "incomplete",
         HookWiring::NotInstalled => "not_installed",
         HookWiring::Hookless => "hookless",
@@ -572,7 +575,10 @@ pub(super) fn render_json(r: &Report) -> String {
             None => j.null("evidence_age_ms"),
         }
         j.string("hook_status", hook_status_token(&a.wiring));
-        j.bool("hooks_wired", matches!(a.wiring, HookWiring::Wired));
+        j.bool(
+            "hooks_wired",
+            matches!(a.wiring, HookWiring::Wired | HookWiring::WiredVia(_)),
+        );
         match &a.model {
             Some(model) => j.string("model", model),
             None => j.null("model"),

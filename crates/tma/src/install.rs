@@ -293,7 +293,7 @@ fn run_all(
         .filter(|lm| {
             matches!(
                 classify_agent(lm, paths, wrapper.reference(), Statusline::Keep),
-                HookWiring::Wired | HookWiring::Incomplete(_)
+                HookWiring::Wired | HookWiring::WiredVia(_) | HookWiring::Incomplete(_)
             )
         })
         .collect();
@@ -505,7 +505,7 @@ fn any_agent_still_wired(
     manifests.iter().filter(|lm| lm.name != except).any(|lm| {
         matches!(
             classify_agent(lm, paths, wrapper, Statusline::Keep),
-            HookWiring::Wired | HookWiring::Incomplete(_)
+            HookWiring::Wired | HookWiring::WiredVia(_) | HookWiring::Incomplete(_)
         )
     })
 }
@@ -753,6 +753,10 @@ impl TmuxHookState {
 pub(crate) enum HookWiring {
     /// Hook-capable, an adapter exists, and every declared event is wired to the wrapper.
     Wired,
+    /// Wired, but reached through another program's config rather than tma's own entry (codex's
+    /// `notify` chained onward). The notes name the chain, so a config that does not look like what
+    /// install writes is not read as a broken one.
+    WiredVia(Vec<String>),
     /// Hook-capable and partly wired, but with drift (a missing event or a stale wrapper path);
     /// carries the human-readable reasons `--check` prints.
     Incomplete(Vec<String>),
@@ -942,13 +946,21 @@ fn run_check(
     // wiring, so an agent the user never installed is a clean skip. A NAMED agent scopes the report
     // (and the exit code) to itself: a sibling's drift must not fail its check. The shared wrapper +
     // tmux hooks below stay global — prerequisites the named agent depends on too.
+    let mut notes = Vec::new();
     for a in &diag.agents {
         if agent_filter.is_some_and(|want| a.agent != want) {
             continue;
         }
-        if let HookWiring::Incomplete(reasons) = &a.wiring {
-            missing.extend(reasons.iter().cloned());
+        match &a.wiring {
+            HookWiring::Incomplete(reasons) => missing.extend(reasons.iter().cloned()),
+            // Wiring that works but does not look like what install writes: reported, never a
+            // failure, so a chained config does not fail a CI check that is otherwise green.
+            HookWiring::WiredVia(chain) => notes.extend(chain.iter().cloned()),
+            _ => {}
         }
+    }
+    for note in &notes {
+        println!("tma: {note}");
     }
 
     // An unreadable server yields no hook states at all; reporting that is the only honest

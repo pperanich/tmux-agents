@@ -86,6 +86,11 @@ evidence source it came from (`hook`, `capture`, or `process`), and
 how long ago that evidence was taken. A pane with no decodable stamp reads
 `unstamped`.
 
+The `hooks:` line reads `wired` when every channel names tma's own entry, and
+`wired (agent codex: notify chained through <program>)` when another tool has
+taken codex's single `notify` key and passes tma's command on to it: the wiring
+fires, so it is reported rather than warned about.
+
 The tier is what the pane is actually getting, not what it could get:
 
 | tier | means |
