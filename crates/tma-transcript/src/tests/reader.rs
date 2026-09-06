@@ -38,7 +38,7 @@ fn index_of(event: &crate::Event) -> usize {
         .unwrap_or_else(|| panic!("unparsable preview {preview:?}"))
 }
 
-/// A-232: paging backwards from `older` reaches the head with no duplicated and no skipped event.
+/// Paging backwards from `older` reaches the head with no duplicated and no skipped event.
 #[test]
 fn paging_backwards_covers_the_file_exactly_once() {
     let scratch = Scratch::new("paging");
@@ -105,7 +105,7 @@ fn paging_is_exact_across_multi_event_records() {
     assert_eq!(labels, want);
 }
 
-/// A-229 and A-230: a 44 MiB-class file with 78 KiB records is served in bounded chunks. The read
+/// A 44 MiB-class file with 78 KiB records is served in bounded chunks. The read
 /// budget bites before 200 events do, so the page is short, flagged, and has a usable `older`.
 #[test]
 fn a_large_file_is_served_in_bounded_chunks() {
@@ -129,7 +129,7 @@ fn a_large_file_is_served_in_bounded_chunks() {
         reader.read_calls()
     );
 
-    // A-230: the headers of a full 200-event page stay inside the frame budget. The spike measured
+    // The headers of a full 200-event page stay inside the frame budget. The spike measured
     // 94 to 109 bytes per event across a 25x range of file sizes; 200 of those plus a preview each
     // is what the 32 KiB has to cover.
     let small = numbered(&scratch, "many.jsonl", 400, 20);
@@ -144,7 +144,7 @@ fn a_large_file_is_served_in_bounded_chunks() {
     );
 }
 
-/// A-231: a window carries no bodies and no string leaf past the header budget, and the body of one
+/// A window carries no bodies and no string leaf past the header budget, and the body of one
 /// cursor comes back in full on a second call.
 #[test]
 fn a_window_carries_headers_and_a_body_comes_back_by_cursor() {
@@ -208,7 +208,7 @@ fn the_header_budget_is_configurable() {
     }
 }
 
-/// A-233: a cursor whose file was rewritten, truncated, or replaced is refused by name. Never a
+/// A cursor whose file was rewritten, truncated, or replaced is refused by name. Never a
 /// parse of whatever now sits at that offset.
 #[test]
 fn a_stale_cursor_is_refused_rather_than_mis_parsed() {
@@ -326,7 +326,7 @@ fn a_record_caught_mid_write_is_left_alone() {
     assert_eq!(events.len(), 4);
 }
 
-/// A-239 and the OpenCode half: a store the reader will not serve is a typed refusal that names
+/// The cursor refusal and the OpenCode half: a store the reader will not serve is a typed refusal that names
 /// the reason, never an empty window that reads as "nothing happened".
 #[test]
 fn a_refused_store_names_its_reason() {

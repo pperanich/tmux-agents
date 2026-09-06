@@ -4,14 +4,14 @@
 //! The rule the whole module turns on is that **blocked-ness comes from detection and from nowhere
 //! else**. A dangling tool call in a transcript says a call is in flight, which a slow tool, a
 //! permission prompt and a crashed process all produce; it is read here only to say what the pane
-//! is blocked *on*, never that it is blocked (A-273). [`build_card`] returns [`Card::None`] for any
+//! is blocked *on*, never that it is blocked. [`build_card`] returns [`Card::None`] for any
 //! pane whose stamped state is not `blocked`, before it looks at anything else.
 //!
 //! Three lanes produce a permission card, and the card is tagged with the one it came from so a
 //! reviewer can tell a structured card from a scraped one. [`Lane::Hook`] is the only lane that
 //! carries the agent's own tool input as an object: the hook payload arrives unwrapped, which is
 //! the whole reason that lane exists. The other two synthesize their options from the bundled
-//! `approve`/`deny` labels and report [`Extraction::Failed`], because U9's dialog extractor does
+//! `approve`/`deny` labels and report [`Extraction::Failed`], because the dialog extractor does
 //! not exist in this release for any agent, so the app degrades to open-on-host rather than
 //! drawing a control over a label nobody read.
 
@@ -43,7 +43,7 @@ const QUESTION_PATH: &str = "/question";
 
 /// Everything the serve loop can gather for one pane, and nothing it would have to go to tmux or
 /// to a manifest file for. Assembled once per `card` request; [`build_card`] is pure over it, which
-/// is what keeps the card path free of the manifest load R30 forbids after the handshake.
+/// is what keeps the card path free of the manifest load the design forbids after the handshake.
 #[derive(Clone, Debug, Default)]
 pub struct CardInputs<'a> {
     pub pane: &'a str,
@@ -172,7 +172,7 @@ fn permission_card(facts: &CardInputs) -> Card {
 }
 
 /// The hook lane: everything comes from the parked request record, so nothing was extracted and
-/// [`Extraction::Exact`] is true by construction rather than by measurement (A-525).
+/// [`Extraction::Exact`] is true by construction rather than by measurement.
 ///
 /// The record is written by claude's `PermissionRequest` hook and by nothing else today, so the
 /// lane is claude's in practice; the gate here is the record, not the agent name, because a second
@@ -183,7 +183,7 @@ fn hook_card(facts: &CardInputs, record: &RequestRecord) -> PermissionCard {
         agent: facts.agent.to_string(),
         lane: Lane::Hook,
         // Exactly two, and no `AllowAlways`: the hook lane has no second-interaction surface for
-        // R25 to gate, so U8 does not reach it in v1 (ARCHITECTURE §1.9).
+        // the second-interaction rule to gate, so approve_always does not reach it in v1 (ARCHITECTURE §1.9).
         options: vec![
             option(OptionKind::AllowOnce, HOOK_ALLOW_LABEL, Some(&record.id)),
             option(OptionKind::RejectOnce, HOOK_REJECT_LABEL, Some(&record.id)),
@@ -224,7 +224,7 @@ fn screen_card(facts: &CardInputs) -> PermissionCard {
             Lane::Screen
         },
         options,
-        // Never anything else in this release: U9's extractor does not exist yet for any agent, so
+        // Never anything else in this release: dialog option extraction's extractor does not exist yet for any agent, so
         // no option label here is the dialog's own line and the app must open the pane on the host
         // rather than render a control over text nobody parsed.
         extraction: Extraction::Failed,
@@ -255,7 +255,7 @@ fn screen_pending_call(facts: &CardInputs) -> Option<PendingCall> {
 /// The newest tool call in `tail` (newest first) that no later result resolved.
 ///
 /// Only a call carrying a `call_id` can be reported: without one there is nothing to correlate a
-/// result against, and naming a call the host guessed at is worse than naming none (A-274).
+/// result against, and naming a call the host guessed at is worse than naming none.
 fn dangling_call(tail: &[Event]) -> Option<PendingCall> {
     let mut resolved: Vec<&str> = Vec::new();
     for event in tail {
@@ -296,7 +296,7 @@ fn question_card(facts: &CardInputs, question: &PendingQuestion) -> Card {
 }
 
 /// Something to read and nothing to fire. The variant has no field an approve control could be
-/// expressed in, which is the plan-dialog bug class made unrepresentable (A-207 to A-210).
+/// expressed in, which is the plan-dialog bug class made unrepresentable.
 fn informational(detail: Detail) -> Card {
     let headline = match &detail {
         Detail::Permission => "Permission",
@@ -328,7 +328,7 @@ mod tests {
     use super::*;
     use tma_transcript::{Cursor, FileId, ResultStatus};
 
-    /// The E4 leg-1 `PermissionRequest` payloads, redacted, as claude 2.1.261 delivered them
+    /// The live hook experiment's leg-1 `PermissionRequest` payloads, redacted, as claude 2.1.261 delivered them
     /// (`research/captures/claude/hooks/e4-leg1-*-PermissionRequest.json`). What is not here is the
     /// point: no rendered label anywhere, so a card built from one cannot be quoting a screen.
     const E4_BASH: &str = r#"{
@@ -340,7 +340,7 @@ mod tests {
   "hook_event_name": "PermissionRequest",
   "tool_name": "Bash",
   "tool_input": {
-    "command": "touch <E4>/marker-leg1 && echo leg1-done",
+    "command": "touch <SCRATCH>/marker-leg1 && echo leg1-done",
     "description": "Create marker file and print confirmation"
   },
   "permission_suggestions": [
@@ -440,7 +440,7 @@ mod tests {
         }
     }
 
-    /// A-273's card half: a pane detection does not call blocked has no card, whatever its
+    /// The card half of the never-infer rule: a pane detection does not call blocked has no card, whatever its
     /// transcript holds. The tail here is one unresolved call, the exact shape that would tempt a
     /// reader into inferring a prompt.
     #[test]
@@ -461,7 +461,7 @@ mod tests {
         }
     }
 
-    /// A-525: the hook lane's card is structured by construction. Both E4 legs, because a record
+    /// The hook lane's card is structured by construction. Both experiment legs, because a record
     /// written for one call must never read as the other.
     #[test]
     fn a_hook_record_yields_an_exact_two_option_card() {
@@ -552,7 +552,7 @@ mod tests {
         assert!(permission(build_card(&facts)).options.is_empty());
     }
 
-    /// A-274: the transcript's newest unresolved call fills `pending_call`, and a tail whose calls
+    /// The transcript's newest unresolved call fills `pending_call`, and a tail whose calls
     /// all settled fills nothing.
     #[test]
     fn the_tail_supplies_the_pending_call_when_nothing_else_does() {
@@ -622,9 +622,9 @@ mod tests {
         );
     }
 
-    /// A-207 to A-210: every other blocked detail is informational, and the variant has no field
+    /// Every other blocked detail is informational, and the variant has no field
     /// an approve control could be expressed in. `awaiting-text` is not a token this build knows,
-    /// which is the degradation R21 asks for rather than a special case.
+    /// which is the degradation the plan asks for rather than a special case.
     #[test]
     fn every_other_blocked_detail_is_informational() {
         for (detail, headline) in [

@@ -41,7 +41,7 @@ pub mod broker;
 // the pure builder over the facts it gathers, so a card is testable without a pipe.
 pub mod card;
 pub mod debug;
-// The U10 authorization record: which remote devices are paired and what each may ask for.
+// The authorization record: which remote devices are paired and what each may ask for.
 pub mod device;
 pub mod hook_lane;
 mod http;

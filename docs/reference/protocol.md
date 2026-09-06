@@ -193,7 +193,7 @@ distinguishable from a scraped one and a receipt's reader can tell what "approve
 - **`hook`**: a blocking agent hook parked the request as data. The tool name and the tool input
   arrive as the agent's own object, never as a rendered line, which is the whole reason the lane
   exists: a consent label wraps at a phone width and the wrap is not invertible. Exactly two
-  options, `allow-once` and `reject-once`; no always-grant is offered, because R25's second
+  options, `allow-once` and `reject-once`; no always-grant is offered, because the second
   deliberate interaction has no surface on this lane yet.
 - **`api`**: the reply travels over the agent's own HTTP surface (OpenCode). A fact about the
   transport, not a claim that a dialog was read.

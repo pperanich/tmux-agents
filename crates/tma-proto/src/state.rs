@@ -23,7 +23,7 @@ vocabulary! {
     /// The open detail dimension (`tma_core::Detail`): why the pane is in its state.
     ///
     /// An unrecognized token lands in `Other` and stays there, which is what stops an older device
-    /// reading a newer host's dialog as a permission prompt (R21). The card builder sends `Other` to
+    /// reading a newer host's dialog as a permission prompt. The card builder sends `Other` to
     /// an informational card, so the degradation is "I cannot type this dialog", never a wrong
     /// affordance.
     pub open enum Detail {

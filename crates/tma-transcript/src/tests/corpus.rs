@@ -95,7 +95,7 @@ fn read_events(store: Store, path: &Path) -> (Vec<crate::Event>, u64) {
     (events, page.unknown)
 }
 
-/// A-242: the inventory holds in both directions, and every fixture's in-file version stamp agrees
+/// The inventory holds in both directions, and every fixture's in-file version stamp agrees
 /// with the version its path and filename claim.
 #[test]
 fn the_version_inventory_agrees_with_the_corpus() {
@@ -200,7 +200,7 @@ fn check_stamp(path: &Path, decl: &Declared, version: &str) {
     );
 }
 
-/// A-242's mapping half plus A-241: every fixture's event sequence equals its committed
+/// The version-inventory mapping half: every fixture's event sequence equals its committed
 /// expectation, and no fixture under `stores/` produces an unknown.
 #[test]
 fn the_known_corpus_maps_cleanly_and_stays_pinned() {
@@ -221,7 +221,7 @@ fn the_known_corpus_maps_cleanly_and_stays_pinned() {
     }
 }
 
-/// A-240's other half: the drift corpus must raise the counter and must not error. The two rules
+/// The unknown-counter half: the drift corpus must raise the counter and must not error. The two rules
 /// only look contradictory; the split is what lets a fixture refresh catch drift on the day it
 /// lands while a released CLI update never breaks the reader.
 #[test]

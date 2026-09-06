@@ -237,7 +237,7 @@ struct Session {
     marker: PathBuf,
     /// One transcript reader for the life of the connection, so its stat memo and its held
     /// OpenCode database handle survive between requests. A reader per request would reconnect to
-    /// the database on every page, which is what makes the writing agent's own commits fail (E2).
+    /// the database on every page, which is what makes the writing agent's own commits fail.
     reader: tx::Reader,
     greeted: bool,
     streaming: bool,
@@ -256,7 +256,7 @@ impl Session {
             }
         };
 
-        // R48: the authorization record is re-read per request. Absence of the record ends the
+        // revocation: the authorization record is re-read per request. Absence of the record ends the
         // connection; a store that momentarily cannot be read refuses this one request instead,
         // because an I/O error is not a revocation and must not read as one.
         match self.cache.get(&self.store, &self.device_id) {
@@ -618,7 +618,7 @@ impl Session {
             let mut prev: Option<Vec<AgentRow>> = None;
             let mut last: Option<String> = None;
             let render = |report: &CycleReport, _tick: Tick| -> Vec<String> {
-                // R48's other half: a push has no request to gate, so the record is re-read here
+                // revocation's other half: a push has no request to gate, so the record is re-read here
                 // too. An unreadable store is logged and the stream continues, because the CLI's
                 // atomic rename never produces one and a transient I/O error is not a revocation.
                 match cache.get(&store, &device_id) {
@@ -680,7 +680,7 @@ impl Session {
         let Some(action) = actions::find(&self.action_set, &req.action) else {
             return error(ErrorCode::NotFound, "no action by that name on this host");
         };
-        // N10: an exec action puts no keystrokes into a pane, so it is the one class with no
+        // An exec action puts no keystrokes into a pane, so it is the one class with no
         // freshness guard at all. Unreachable from a device, by kind rather than by name.
         if !action.kind.sends_keystrokes() {
             return error(
@@ -702,7 +702,7 @@ impl Session {
             );
         }
 
-        // U10: the scope gate, ahead of the claim and ahead of every tmux call.
+        // The scope gate, ahead of the claim and ahead of every tmux call.
         let Some(needed) = required_scope(&action.name) else {
             return self.refused(
                 req,
@@ -716,7 +716,7 @@ impl Session {
             );
         }
 
-        // U13: claim BEFORE firing, so a replay returns the cached receipt and sends nothing.
+        // Claim BEFORE firing, so a replay returns the cached receipt and sends nothing.
         let now = tma_runtime::now_ms();
         let guard = match self.ledger.claim(
             &req.slot,
@@ -741,7 +741,7 @@ impl Session {
             action,
             &req.pane,
             broker::FireArgs {
-                // N8: a device never skips the `when` gate. Hardcoded here and nowhere settable.
+                // A device never skips the `when` gate. Hardcoded here and nowhere settable.
                 force: false,
                 args: &[],
                 text: req.text.as_deref(),
@@ -834,9 +834,9 @@ impl Session {
     }
 }
 
-/// Which U10 scope covers an action, or `None` for one the record does not name.
+/// Which the authorization decision scope covers an action, or `None` for one the record does not name.
 ///
-/// `None` is a refusal, not a pass: the closed vocabulary N8 promises is exactly this table, and an
+/// `None` is a refusal, not a pass: the closed vocabulary the force rule promises is exactly this table, and an
 /// action outside it (a user-authored one, or `compact`, which is a control-plane verb rather than
 /// an answer) must not become reachable from a phone by being added to the actions directory.
 fn required_scope(action: &str) -> Option<Scope> {
@@ -948,7 +948,7 @@ fn receipt_frame(
 mod tests {
     use super::*;
 
-    /// The U10 table, token for token. A new action name is not automatically dispatchable: it has
+    /// The the authorization decision table, token for token. A new action name is not automatically dispatchable: it has
     /// to be given a class here, which is what keeps the remote vocabulary closed.
     #[test]
     fn the_scope_map_is_the_u10_table() {

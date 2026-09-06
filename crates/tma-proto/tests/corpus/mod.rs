@@ -324,7 +324,7 @@ pub(crate) fn corpus() -> Vec<Vector> {
                         full_row("%6", State::Working, Some(Detail::Background)),
                         full_row("%7", State::Idle, Some(Detail::Error)),
                         full_row("%8", State::Idle, Some(Detail::RateLimit)),
-                        // A detail token minted after this build: kept, not collapsed (A-104).
+                        // A detail token minted after this build: kept, not collapsed.
                         full_row("%9", State::Blocked, Some(Detail::Other(X12.to_string()))),
                         bare_row("%10", State::Unknown),
                     ],
@@ -531,7 +531,7 @@ pub(crate) fn corpus() -> Vec<Vector> {
             ),
             &["Lane::Api", "Extraction::Wrapped"],
         ),
-        // A-115: cursor prints no index, so the wire carries none. A position the host invented
+        // Cursor prints no index, so the wire carries none. A position the host invented
         // must never reach the device as a keycap the user could type.
         Vector::new(
             "card-permission-cursor.json",
@@ -617,7 +617,7 @@ pub(crate) fn corpus() -> Vec<Vector> {
             ),
             &["Request::Dispatch", "Dispatch"],
         ),
-        // A-107's older writer: `device` postdates this frame, so it is simply absent.
+        // The older writer: `device` postdates this frame, so it is simply absent.
         Vector::new(
             "dispatch-text.json",
             &RequestFrame::new(

@@ -244,7 +244,7 @@ impl Tmux {
     /// active pane — the pane on its screen, not whichever pane tmux would call active server-wide.
     /// `#{client_activity}` is epoch seconds, and `#{client_control_mode}` marks the `tmux -C`
     /// clients whose activity clock freezes at attach — tma's OWN daemon first of all, which parks
-    /// one per monitored session; both formats exist at the tmux 3.2 floor (N10).
+    /// one per monitored session; both formats exist at the tmux 3.2 floor.
     ///
     /// Read as its own `list-clients` rather than appended to the cycle's `list-panes`, because the
     /// caller only asks once some pane actually carries `@agent_attention` — folding it into the

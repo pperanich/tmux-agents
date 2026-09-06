@@ -797,7 +797,7 @@ mod tests {
         );
     }
 
-    /// A-512. The pane title is the one payload field the pane's own program controls, and it
+    /// The pane title is the one payload field the pane's own program controls, and it
     /// routinely holds a branch name, a repo path or a prompt fragment. `notify.command` pipes this
     /// payload to whatever the user configured — ntfy, Pushover, an Apple Shortcut — so before this
     /// it reached that service's operator on every fire.
@@ -823,7 +823,7 @@ mod tests {
         );
     }
 
-    /// A-514. The payload's writer is also the log's writer, so the audit line redacts WITH the
+    /// The payload's writer is also the log's writer, so the audit line redacts WITH the
     /// payload rather than after it — and the log is the file most likely to be pasted into an issue.
     /// `TMA_TITLE` is the third carrier: it is the channel a shell one-liner actually interpolates,
     /// so redacting only the JSON would leave the title in the variable the hook reads.
@@ -857,7 +857,7 @@ mod tests {
             && v.is_some_and(|v| v.to_string_lossy().contains("ACME-1234"))));
     }
 
-    /// A-515. `episode_ms` is an ABSOLUTE epoch-ms stamp, not an age. `since_ms` is the age and it
+    /// `episode_ms` is an ABSOLUTE epoch-ms stamp, not an age. `since_ms` is the age and it
     /// survives; the two must not be confused, because only the absolute one can be compared for
     /// equality against a stored stamp — which is what a sink's collapse key needs.
     #[test]

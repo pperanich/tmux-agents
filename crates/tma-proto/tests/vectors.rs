@@ -39,7 +39,7 @@ fn bless() {
     }
 }
 
-/// A-100: each committed vector, emitted from a constructed value, is byte-identical to the file.
+/// Each committed vector, emitted from a constructed value, is byte-identical to the file.
 ///
 /// Byte equality includes key order, so under serde the declared field order is part of the wire
 /// contract and re-ordering a struct's fields fails here rather than shipping silently.
@@ -55,7 +55,7 @@ fn every_vector_is_byte_identical_to_its_constructed_value() {
     }
 }
 
-/// A-113: every vector parses and re-emits byte-identically.
+/// Every vector parses and re-emits byte-identically.
 #[test]
 fn every_vector_round_trips_byte_identically() {
     for vector in corpus() {
@@ -66,7 +66,7 @@ fn every_vector_round_trips_byte_identically() {
     }
 }
 
-/// A-102: no vector carries the key `title`, at any depth.
+/// No vector carries the key `title`, at any depth.
 ///
 /// A key scan, not a substring grep: a `title` inside a redacted string is not a violation and a
 /// grep would report it.
@@ -87,7 +87,7 @@ fn no_vector_carries_a_title_key() {
     }
 }
 
-/// A-103: no snapshot, edge, card, receipt or notification vector carries agent-supplied text.
+/// No snapshot, edge, card, receipt or notification vector carries agent-supplied text.
 ///
 /// Two halves. The banned keys are where a transcript body would be smuggled in wearing a field
 /// name; the leaf rule is what catches one wearing a label. Every string leaf must be a closed
@@ -100,7 +100,7 @@ fn the_acting_surfaces_carry_no_free_text() {
     /// them; the length bound still applies.
     const STRUCTURAL_KEYS: [&str; 3] = ["t", "card", "kind"];
     const LEAF_MAX: usize = 512;
-    /// The dialog's own option line is committed verbatim (R24): it is what the user reads, and a
+    /// The dialog's own option line is committed verbatim: it is what the user reads, and a
     /// generic label is the consent bug this field exists to prevent. Claude's command-prefix grant
     /// embeds a whole command string, so it gets 4 KiB where every other leaf gets 512.
     const OPTION_NAME_MAX: usize = 4096;
@@ -145,7 +145,7 @@ fn the_acting_surfaces_carry_no_free_text() {
     }
 }
 
-/// A-111: the pinned `MAXIMAL` notification payload fits the byte bound it was built to prove.
+/// The pinned `MAXIMAL` notification payload fits the byte bound it was built to prove.
 /// Measured on the wire form, which is what a sender would carry.
 #[test]
 fn the_maximal_notification_payload_fits_its_bound() {
@@ -160,7 +160,7 @@ fn the_maximal_notification_payload_fits_its_bound() {
     );
 }
 
-/// A-115: an option the dialog printed no index for carries none, and no vector anywhere invents a
+/// An option the dialog printed no index for carries none, and no vector anywhere invents a
 /// positional one. The card may order index-free options; a position the host made up must never
 /// reach the device as a keycap.
 #[test]
@@ -195,7 +195,7 @@ fn index_free_options_stay_index_free() {
     assert!(card.options.iter().all(|o| o.option_id.is_some()));
 }
 
-/// A-108: every type and every enum variant this crate declares appears in at least one vector.
+/// Every type and every enum variant this crate declares appears in at least one vector.
 ///
 /// The inventory is scanned out of the crate's own sources, so a variant added without a vector
 /// fails here rather than shipping untested. Four files are not the wire and are skipped by name:
@@ -255,7 +255,7 @@ fn parse(text: &str) -> Value {
     serde_json::from_str(text).expect("a committed vector is JSON")
 }
 
-/// Whether this vector rides one of the surfaces A-103 governs.
+/// Whether this vector rides one of the redacted surfaces.
 fn acting_surface(file: &str) -> bool {
     ["snapshot", "edge", "card", "receipt", "notify"]
         .iter()

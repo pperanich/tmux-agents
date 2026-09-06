@@ -1,7 +1,7 @@
 //! The paired-device store: which remote devices exist, and what each one is allowed to ask for.
 //!
 //! One `devices.toml` under tma's config dir, `0600`, written whole by atomic rename. It is the
-//! U10 authorization record and the only place a scope is granted: there is no in-app path to widen
+//! authorization record and the only place a scope is granted: there is no in-app path to widen
 //! one, no approval prompt a device can raise, and no protocol frame that asks for a scope.
 //!
 //! Three rules are load-bearing and easy to lose, so they are written down here.
@@ -43,7 +43,7 @@ pub struct Device {
     /// What this device may ask for. Always contains [`Scope::Read`].
     pub scopes: Vec<Scope>,
     pub paired_at_ms: u64,
-    /// R42's pairing encryption key, distinct from the SSH signing key. Reserved: nothing writes
+    /// the pairing encryption key, distinct from the SSH signing key. Reserved: nothing writes
     /// or reads it yet, and the field exists so a v2 forwarder has a key to encrypt to.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub notify_key: Option<String>,
@@ -232,7 +232,7 @@ impl Store {
         Ok(updated)
     }
 
-    /// Remove the device named `name` entirely. Removing the record, not a scope: U10's revocation
+    /// Remove the device named `name` entirely. Removing the record, not a scope: the revocation rule
     /// is "this device is not paired", and the serve loop reads absence as a terminated connection.
     pub fn revoke(&self, name: &str) -> Result<Device, DeviceError> {
         let mut devices = self.load()?;
@@ -445,7 +445,7 @@ mod tests {
     }
 
     /// Revocation removes the record, not a scope. The serve loop reads absence as "end the
-    /// connection", so a revoked device that degraded to `read` would be exactly the hole U10 names.
+    /// connection", so a revoked device that degraded to `read` would be exactly the hole the scope design names.
     #[test]
     fn revocation_removes_the_record() {
         let store = Store::open(&scratch("revoke"));

@@ -424,7 +424,7 @@ fn notify_log_appends_one_line_per_fire() {
     // No `command` is configured: the log is a standalone sink, not a side effect of a hook.
     assert!(lines[0].starts_with(r#"{"schema":2,"at":"#));
 
-    // A-512 / A-514, end to end through a real fire: the audit line must not carry the pane title.
+    // End to end through a real fire: the audit line must not carry the pane title.
     // The log is the file most likely to be pasted into an issue, and it shares one writer with the
     // payload that goes to a third-party carrier — so if the title is here, it went out too.
     assert!(
@@ -432,14 +432,14 @@ fn notify_log_appends_one_line_per_fire() {
         "the pane title reached the audit line: {}",
         lines[0]
     );
-    // A-515: the absolute episode stamp rides, and the age survives beside it.
+    // The absolute episode stamp rides, and the age survives beside it.
     assert!(
         lines[0].contains(r#""episode_ms":"#) && lines[0].contains(r#""since_ms":"#),
         "both episode fields present: {}",
         lines[0]
     );
 
-    // A-516: the log is created 0600. Without an explicit mode it lands at `0666 & ~umask` — 0664
+    // The log is created 0600. Without an explicit mode it lands at `0666 & ~umask` — 0664
     // under the common `umask 002`, and world-WRITABLE under `umask 000`.
     #[cfg(unix)]
     {
@@ -449,7 +449,7 @@ fn notify_log_appends_one_line_per_fire() {
     }
 }
 
-/// A-512 / A-514 for the two carriers a hook actually reads: the JSON on stdin and `TMA_TITLE`.
+/// Redaction for the two carriers a hook actually reads: the JSON on stdin and `TMA_TITLE`.
 /// Redacting the payload but not the env var would leave the title in the channel a shell one-liner
 /// interpolates, which is the one most `[notify] command` recipes use.
 #[test]

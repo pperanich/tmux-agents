@@ -1,7 +1,7 @@
 //! The OpenCode reader, against synthetic databases built here.
 //!
 //! Nothing in this file touches a real store. The schema is the committed one beside the
-//! expectation (`fixtures/stores/opencode/<version>/opencode-<version>-schema.sql`), measured by E2
+//! expectation (`fixtures/stores/opencode/<version>/opencode-<version>-schema.sql`), measured by the held-connection experiment
 //! and the owed-verifications sweep, and every row below is generated.
 
 use std::path::{Path, PathBuf};
@@ -241,7 +241,7 @@ fn tool_at(status: &str) -> String {
     )
 }
 
-/// A-234's opencode arm: the emitted sequence equals the committed expectation, the store maps with
+/// The opencode arm: the emitted sequence equals the committed expectation, the store maps with
 /// no unknowns, and the session header comes off the `session` row.
 #[test]
 fn the_synthetic_store_maps_to_the_committed_sequence() {
@@ -278,7 +278,7 @@ fn the_synthetic_store_maps_to_the_committed_sequence() {
     );
 }
 
-/// A-237: a part row observed at `pending`, then `running`, then `completed` is one tool call whose
+/// A part row observed at `pending`, then `running`, then `completed` is one tool call whose
 /// status advances, not three events. The status while a permission is pending is `running`, not
 /// `pending`, so the walk covers both.
 #[test]
@@ -327,7 +327,7 @@ fn a_part_updated_in_place_is_one_advancing_tool_call() {
     assert_eq!(body.as_str(), "tma-probe-ok");
 }
 
-/// A-243: the held-connection rule. A writer commits 400 appends with no busy timeout of its own,
+/// The held-connection rule. A writer commits 400 appends with no busy timeout of its own,
 /// exactly as opencode's own connections do, while a held read-only reader polls as fast as it can.
 /// The writer must not fail once, and the reader must see every row.
 #[test]
@@ -421,7 +421,7 @@ fn a_held_reader_never_makes_the_writer_fail() {
     }
     while !writer.is_finished() {
         poll(&mut reader, &source, &mut seen, &mut polls);
-        // The loop stays hot, which is the arm E2 measured, but it does not hold a core away from
+        // The loop stays hot, which is the arm the experiment measured, but it does not hold a core away from
         // the writer on a machine already running the rest of the suite.
         std::thread::yield_now();
     }
@@ -442,7 +442,7 @@ fn a_held_reader_never_makes_the_writer_fail() {
     );
 }
 
-/// A-246: a read-only open succeeds against a database whose `-wal` is stale and whose `-shm` is
+/// A read-only open succeeds against a database whose `-wal` is stale and whose `-shm` is
 /// gone, and again when neither the file nor its directory is writable. The rows that live only in
 /// the WAL come back both times.
 #[test]
@@ -517,10 +517,10 @@ fn a_read_only_open_recovers_a_stale_wal_without_an_shm() {
     );
 }
 
-/// A-246's other half, and A-245's. The connection string never asks SQLite to assume there is no
+/// The stale-WAL and no-binary halves. The connection string never asks SQLite to assume there is no
 /// writer (that would be `immutable=1`, and there *is* a writer), and nothing in the reader shells
 /// out: opencode transcripts need no external binary on `PATH`, which is what linking SQLite rather
-/// than driving a `sqlite3` child buys. A-244's co-process framing has nothing left to go wrong.
+/// than driving a `sqlite3` child buys. Co-process framing has nothing left to go wrong.
 #[test]
 fn the_reader_asks_for_no_binary_and_no_immutable_database() {
     for source in [

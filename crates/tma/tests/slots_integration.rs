@@ -134,7 +134,7 @@ fn slots_in(json: &str) -> Vec<String> {
         .collect()
 }
 
-/// A-216. Two identical dispatches: the pane receives the keystroke once and the second invocation
+/// Two identical dispatches: the pane receives the keystroke once and the second invocation
 /// replays the first one's receipt.
 ///
 /// `[MUT]` A ledger that claims AFTER firing fails here: both invocations would find the slot free,
@@ -182,7 +182,7 @@ fn a_repeat_dispatch_replays_the_receipt_and_sends_nothing() {
     assert_one_keystroke(&s, &pane);
 }
 
-/// A-283 (the read half). The outcome of a dispatch whose response was lost is answerable without
+/// The read half of the pocket disconnect. The outcome of a dispatch whose response was lost is answerable without
 /// dispatching anything to find it out.
 #[test]
 fn receipts_answer_a_lost_response_without_dispatching() {
@@ -231,7 +231,7 @@ fn receipts_answer_a_lost_response_without_dispatching() {
     assert_eq!(stdout(&receipts(&s, &["--slot", "never"])), "");
 }
 
-/// A-217. `locked` is the one refusal that leaves the slot claimable, so a retry fires.
+/// `locked` is the one refusal that leaves the slot claimable, so a retry fires.
 #[test]
 fn a_locked_refusal_leaves_the_slot_claimable() {
     if !have_tmux() {
@@ -285,7 +285,7 @@ fn a_locked_refusal_leaves_the_slot_claimable() {
     ));
 }
 
-/// A-218. Every refusal class writes a terminal receipt, and a retry replays it rather than trying
+/// Every refusal class writes a terminal receipt, and a retry replays it rather than trying
 /// again. `error` is covered by the module's own unit test, since a broker failure needs no tmux.
 #[test]
 fn every_refusal_class_writes_a_terminal_receipt() {
@@ -365,7 +365,7 @@ fn every_refusal_class_writes_a_terminal_receipt() {
     );
 }
 
-/// A-219. Fifty dispatches mixing successes with every refusal class reconcile against the ledger:
+/// Fifty dispatches mixing successes with every refusal class reconcile against the ledger:
 /// as many receipts as dispatches, every receipt names a dispatched slot, no slot twice.
 #[test]
 fn fifty_dispatches_reconcile_against_their_receipts() {
@@ -425,7 +425,7 @@ fn fifty_dispatches_reconcile_against_their_receipts() {
     assert_eq!(written.len(), before, "a slot cannot carry two receipts");
 }
 
-/// A-220. Two processes dispatching one slot at the same time: one fires, both get an answer, and
+/// Two processes dispatching one slot at the same time: one fires, both get an answer, and
 /// one of the answers is the other's receipt. The ledger is a shared file, so this is a
 /// cross-process claim and not a cross-thread one.
 #[test]
@@ -473,7 +473,7 @@ fn two_concurrent_dispatches_on_one_slot_fire_once() {
     assert_one_keystroke(&s, &pane);
 }
 
-/// A-286 (a). The TTL floor is 24 h: an entry 23 h old still answers for its slot, and one past the
+/// The TTL floor is 24 h: an entry 23 h old still answers for its slot, and one past the
 /// floor is claimable again. Nothing evicts on age alone.
 #[test]
 fn a_receipt_answers_for_a_day_and_not_beyond_it() {
@@ -523,7 +523,7 @@ fn a_receipt_answers_for_a_day_and_not_beyond_it() {
     ));
 }
 
-/// A-286 (b). A torn record refuses with the ledger's typed error and dispatches nothing. Reading a
+/// A torn record refuses with the ledger's typed error and dispatches nothing. Reading a
 /// truncated tail as "no such slot" is exactly the double-fire the ledger exists to prevent.
 #[test]
 fn a_torn_ledger_refuses_rather_than_dispatching() {
@@ -575,7 +575,7 @@ fn a_torn_ledger_refuses_rather_than_dispatching() {
     );
 }
 
-/// A-286 (d). The dispatching device is recorded and is not part of the key: another device's
+/// The dispatching device is recorded and is not part of the key: another device's
 /// dispatch inside the same slot replays the first device's receipt.
 #[test]
 fn the_device_is_recorded_but_is_not_part_of_the_key() {

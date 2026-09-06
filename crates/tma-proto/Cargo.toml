@@ -19,5 +19,5 @@ thiserror.workspace = true
 serde_json = "1"
 
 [dev-dependencies]
-# A-113's property leg: the round-trip holds for values nobody wrote a vector for.
+# The round-trip property leg: the round-trip holds for values nobody wrote a vector for.
 proptest.workspace = true

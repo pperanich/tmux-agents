@@ -327,7 +327,7 @@ fn api_404_is_request_gone_and_never_blames_the_pane() {
     assert_eq!(s.pane_option(&pane, "@agent_name"), "opencode");
 }
 
-/// A-257 over the CLI: an api-transport dispatch receipts `replied`, where a keys dispatch
+/// Over the CLI: an api-transport dispatch receipts `replied`, where a keys dispatch
 /// receipts `sent`. The question channel is its own: `question_reject` spends
 /// `@agent_question_request` and leaves the permission id, which answers a different endpoint,
 /// exactly where it was.
@@ -1020,7 +1020,7 @@ fn write_probe_action(s: &Scratch) {
     .unwrap();
 }
 
-/// A-212 through the CLI. A remote caller reads a row's `episode_ms`, hands it back on the
+/// Through the CLI. A remote caller reads a row's `episode_ms`, hands it back on the
 /// dispatch, and the broker refuses when the pane has moved on: the pane is still
 /// `blocked/permission` so the ordinary gate passes, and only the binder can tell it is a different
 /// prompt. Then the same fire with the episode the pane is actually in goes through, so the refusal
@@ -1087,7 +1087,7 @@ fn a_stale_expect_episode_ms_refuses_and_sends_nothing() {
     );
 }
 
-/// A-214 through the CLI: an OpenCode pane whose pending id has been replaced refuses
+/// Through the CLI: an OpenCode pane whose pending id has been replaced refuses
 /// `request-gone` before any HTTP call, which is why this needs no mock server. The endpoint is
 /// stamped so the API-lane `requires` is satisfied and the binder is what refuses.
 #[test]
@@ -1181,7 +1181,7 @@ fn spawn_fake_hook(s: &Scratch, id: &str, log: &std::path::Path) -> std::process
         .expect("spawn the fake hook")
 }
 
-/// A-524: the hook verdict is written under the held pane lock, once.
+/// The hook verdict is written under the held pane lock, once.
 ///
 /// Three assertions, exactly as ACCEPTANCE §7.1 words them: the fake hook observes one verdict, the
 /// stamp is absent after the first fire, and the second fire's refusal token is `request-gone`
@@ -1191,7 +1191,7 @@ fn spawn_fake_hook(s: &Scratch, id: &str, log: &std::path::Path) -> std::process
 /// `io.acquire` in `act_sequence` must fail this test: the second dispatch then writes before it
 /// can be refused, the fake hook observes two verdicts, and both devices believe they answered.
 #[test]
-fn a524_the_hook_verdict_is_written_once_under_the_lock() {
+fn the_hook_verdict_is_written_once_under_the_lock() {
     if !have_tmux() {
         return;
     }

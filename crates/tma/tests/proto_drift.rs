@@ -1,4 +1,4 @@
-//! A-114: the host's vocabularies against `tma-proto`'s.
+//! The host's vocabularies against `tma-proto`'s.
 //!
 //! The wire copies four token sets and one key set out of the host. Exhaustive tests inside
 //! `tma-proto` cannot notice a token the *host* grew, which is exactly the blind spot: a new
@@ -112,7 +112,7 @@ fn host_reason_tokens() -> BTreeSet<String> {
     tokens
 }
 
-/// A-114: the proto's `outcome` set equals the host's. Not a superset: a token the device can
+/// The proto's `outcome` set equals the host's. Not a superset: a token the device can
 /// receive but the host cannot send is a lie about what the wire carries.
 #[test]
 fn the_proto_outcome_vocabulary_equals_the_hosts() {
@@ -122,7 +122,7 @@ fn the_proto_outcome_vocabulary_equals_the_hosts() {
     );
 }
 
-/// A-114: the proto's `reason` set is a superset of the host's, and the excess is named.
+/// The proto's `reason` set is a superset of the host's, and the excess is named.
 ///
 /// The excess is deliberate and short: `scope-denied` is the remote-authorization refusal, which
 /// only a serve loop can produce and no host code path emits yet. Anything else appearing here is a
@@ -144,7 +144,7 @@ fn the_proto_reason_vocabulary_covers_the_hosts() {
     );
 }
 
-/// A-114 for the state pair: the closed vocabulary matches exactly.
+/// The drift guard for the state pair: the closed vocabulary matches exactly.
 #[test]
 fn the_proto_state_vocabulary_equals_the_hosts() {
     let every = [
@@ -164,7 +164,7 @@ fn the_proto_state_vocabulary_equals_the_hosts() {
     );
 }
 
-/// A-114 for the detail tokens, which are associated constants rather than variants, so an
+/// The drift guard for the detail tokens, which are associated constants rather than variants, so an
 /// exhaustive match cannot reach them. The host's own source is the inventory instead: a constant
 /// added to `tma_core::Detail` with no proto arm fails here.
 #[test]
