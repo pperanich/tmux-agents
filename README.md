@@ -3,13 +3,68 @@
 [![CI](https://github.com/pperanich/tmux-agents/actions/workflows/ci.yml/badge.svg)](https://github.com/pperanich/tmux-agents/actions/workflows/ci.yml)
 [![Release](https://img.shields.io/github/v/release/pperanich/tmux-agents)](https://github.com/pperanich/tmux-agents/releases/latest)
 
-`tma` is an agent state monitor for tmux. It detects coding agents running in
-your tmux panes, shows at a glance which are blocked, working, or idle, and
-jumps you to the one that needs you. State lives in tmux's own pane options, so
-any `tmux show-options` or `#{@agent_state}` format string reads it directly and
-`tma ls --json` gives a stable structured feed. There is no socket and no
-required background process. [Why tma](docs/explanation/why-tma.md) is the short
-case for that design.
+`tma` is a self-hosted companion for the coding agents you run in tmux. It finds
+them in your panes, shows which are blocked, working, or idle, takes you to the
+one that needs you, and answers the prompt it is stopped on. The same commands
+cover six agents, so a fleet split across Claude Code, Codex and OpenCode reads
+as one list rather than three. State lives in tmux's own pane options, so any
+`tmux show-options` or `#{@agent_state}` format string reads it directly and
+`tma ls --json` gives a stable structured feed. There is no socket, no required
+background process, and nothing between you and your agents but your own
+machine. [Why tma](docs/explanation/why-tma.md) is the short case for that
+design.
+
+## What it does
+
+**See the fleet.** `tma` opens a picker over every agent pane on the server,
+`tma ls` prints the same rows for a script, and `#(tma status)` renders a
+one-line summary in your status bar. `[daemon] window_names` renames each window
+after the agents in it, so a blocked agent shows up in the window list of a
+session you are not looking at. Notifications fire on `blocked` and on
+completions, and `[notify] stall` fires once when a pane has been working longer
+than you expected it to.
+
+**Know what stopped it.** [`tma transcript`](docs/reference/cli.md#tma-transcript)
+reads the agent's own transcript file and normalizes it, so a claude pane and a
+codex pane answer in the same vocabulary. Four of the six stores are served
+(claude, codex, gemini, pi), and none of those agents was asked to cooperate:
+the files were already on disk.
+
+**Get to it.** `tma jump --blocked` moves an attached client to the pane.
+[`tma attach --pane %5`](docs/reference/cli.md#tma-attach) is the way in from a
+terminal that is not a tmux client yet, a fresh ssh session or a phone; inside
+tmux it is exactly `tma jump`.
+
+**Answer it.** `tma act approve` and `deny` resolve a permission prompt, `tma act
+interrupt` stops a turn, and
+[`tma act steer --text "use the existing helper"`](docs/reference/cli.md#steering---text)
+sends the agent a line of your own. On a claude pane the answer goes back through
+the permission hook itself, which holds the call open for a decision (the [hook
+reply lane](docs/how-to/install-agent-hooks.md#answer-claudes-prompts-over-the-hook-lane),
+on by default), so the tool runs with no keystroke landing anywhere. `tma act
+--slot <id>` makes a dispatch run at most once and
+[`tma receipts`](docs/reference/cli.md#tma-receipts) reads the outcome back,
+which is how a caller whose connection dropped learns what happened instead of
+approving a second time to find out.
+
+**Build on it.** `tma wait` blocks a script until a pane changes, `tma subscribe`
+streams those changes, and [the `@agent_state`
+contract](docs/reference/agent-state-contract.md) is the spec a second tool needs
+to write the same options without clobbering tma.
+
+## What it will not do
+
+Every action is gated on what the pane actually shows, and the gate is
+re-asserted inside the pane's action lock rather than trusted from the read that
+prompted it. `approve` and `deny` fire only at `detail = permission`, so a dialog
+that asks you to pick an option instead of granting a request offers no approve
+key at all; a pane that moved on between the read and the dispatch refuses rather
+than landing your answer on the prompt that replaced it. Notifications take you
+to a pane. They never answer anything for you.
+
+`tma` also does not compete with a vendor's own remote control of that vendor's
+own agent. It covers the case none of those cover: the mixed fleet you actually
+run, on a machine you own, answered from wherever you are.
 
 ## Supported agents
 
@@ -134,13 +189,16 @@ mdBook site (`mdbook build` from the repo root renders `docs/` into `book/`):
 - **Reference**: [command-line interface](docs/reference/cli.md),
   [keybindings](docs/reference/keybindings.md),
   [configuration](docs/reference/configuration.md), [pane options and JSON
-  contracts](docs/reference/pane-options-and-json.md), [agent
+  contracts](docs/reference/pane-options-and-json.md), [the `@agent_state`
+  contract](docs/reference/agent-state-contract.md), [agent
   coverage](docs/reference/agent-coverage.md), [manifest
-  schema](docs/reference/manifest-schema.md).
+  schema](docs/reference/manifest-schema.md), [action manifest
+  schema](docs/reference/action-manifest-schema.md).
 - **Explanation**: [why tma](docs/explanation/why-tma.md),
   [architecture](docs/explanation/architecture.md), [the detection
   model](docs/explanation/detection-model.md), [the security
-  model](docs/explanation/security-model.md).
+  model](docs/explanation/security-model.md), [agent transcript
+  stores](docs/explanation/transcript-stores.md).
 
 ## Contributing
 
