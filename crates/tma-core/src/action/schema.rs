@@ -177,12 +177,26 @@ impl ActionManifest {
                 });
             }
         }
-        for agent in raw.api.keys() {
+        for (agent, transport) in &raw.api {
             if !is_safe_token(agent) {
                 return Err(ActionError::BadToken {
                     file: file.to_string(),
                     field: "[api] agent",
                     token: agent.clone(),
+                });
+            }
+            // The verdict belongs to exactly one op. Silently ignoring a stray one would let a
+            // manifest read as if it declared something the broker never sends.
+            if transport.op.takes_reply() != transport.reply.is_some() {
+                return Err(ActionError::ApiReplyMismatch {
+                    file: file.to_string(),
+                    agent: agent.clone(),
+                    op: transport.op.token(),
+                    reason: if transport.op.takes_reply() {
+                        "requires a `reply` verdict"
+                    } else {
+                        "takes no `reply` verdict"
+                    },
                 });
             }
         }
@@ -329,12 +343,15 @@ struct RawTextTransport {
 }
 
 /// The raw `[api]` per-agent transport. `op` and `reply` are closed serde enums, so an unknown
-/// operation or reply value (or a missing `reply`) surfaces as a parse error.
+/// operation or reply value surfaces as a parse error. `reply` is optional here because only one op
+/// takes one; which ops require it and which refuse it is checked in the loader, so a
+/// `question-reject` carrying a verdict is an error rather than a value nothing reads.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RawApiTransport {
     op: ApiOp,
-    reply: ApiReply,
+    #[serde(default)]
+    reply: Option<ApiReply>,
 }
 
 /// The raw `[hook]` per-agent transport. `verdict` is a closed serde enum, so an unknown or
@@ -812,7 +829,7 @@ opencode = { op = "permission-reply", reply = "once" }
             a.api_for("opencode"),
             Some(&ApiTransport {
                 op: ApiOp::PermissionReply,
-                reply: ApiReply::Once,
+                reply: Some(ApiReply::Once),
             })
         );
         // Applicability is the union of the two tables.
@@ -933,7 +950,7 @@ opencode = { op = "permission-reply", reply = "reject" }
         assert!(a.keys.is_empty());
         assert_eq!(
             a.api_for("opencode").map(|t| t.reply),
-            Some(ApiReply::Reject)
+            Some(Some(ApiReply::Reject))
         );
         assert!(a.applies_to("opencode"));
     }
@@ -1007,19 +1024,49 @@ opencode = { op = "permission-reply", reply = "maybe" }
             ActionManifest::parse(bad_reply, "x", "t.toml").unwrap_err(),
             ActionError::Parse { .. }
         ));
-        // A missing `reply` is a parse error too (the field is required for permission-reply).
-        let no_reply = r#"
-min_engine_version = "0.1"
-name = "x"
-label = "X"
-kind = "keys"
-[api]
-opencode = { op = "permission-reply" }
-"#;
-        assert!(matches!(
-            ActionManifest::parse(no_reply, "x", "t.toml").unwrap_err(),
-            ActionError::Parse { .. }
-        ));
+    }
+
+    /// The verdict belongs to exactly one op, both ways round: `permission-reply` without one and
+    /// any other op with one are both errors, so a manifest can never read as declaring something
+    /// the broker would not send.
+    #[test]
+    fn the_reply_verdict_is_required_by_one_op_and_refused_by_the_rest() {
+        let src = |entry: &str| {
+            format!(
+                "min_engine_version = \"0.1\"\nname = \"x\"\nlabel = \"X\"\nkind = \"keys\"\n[api]\nopencode = {entry}\n"
+            )
+        };
+        for (entry, needle) in [
+            (
+                "{ op = \"permission-reply\" }",
+                "requires a `reply` verdict",
+            ),
+            (
+                "{ op = \"question-reject\", reply = \"once\" }",
+                "takes no `reply` verdict",
+            ),
+            (
+                "{ op = \"interrupt\", reply = \"reject\" }",
+                "takes no `reply` verdict",
+            ),
+        ] {
+            let err = ActionManifest::parse(&src(entry), "x", "t.toml").unwrap_err();
+            assert!(
+                matches!(err, ActionError::ApiReplyMismatch { .. })
+                    && err.to_string().contains(needle),
+                "{entry}: {err}"
+            );
+        }
+        // The three verdict-less ops parse with no `reply` at all.
+        for entry in [
+            "{ op = \"question-reply\" }",
+            "{ op = \"question-reject\" }",
+            "{ op = \"interrupt\" }",
+        ] {
+            let a = ActionManifest::parse(&src(entry), "x", "t.toml")
+                .unwrap_or_else(|e| panic!("{entry}: {e}"));
+            assert_eq!(a.api_for("opencode").map(|t| t.reply), Some(None));
+        }
     }
 
     // ---- [text] transport --------------------------------------------------------

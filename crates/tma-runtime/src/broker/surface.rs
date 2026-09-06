@@ -41,11 +41,16 @@ pub enum DryGate {
 pub enum Effect {
     /// A `keys` sequence for the resolved agent.
     Keys(Vec<String>),
-    /// An API-channel call: the resolved endpoint, operation, and reply verdict.
+    /// An API-channel call: the resolved endpoint, the request target the op builds, the
+    /// operation, and its reply verdict where the op takes one.
     Api {
         endpoint: String,
+        /// The path after the endpoint, with the pane's own id in it, or `(unresolved)` when a
+        /// precondition the gate refuses is missing. The whole point of showing an op is showing
+        /// where it would land.
+        path: String,
         op: &'static str,
-        reply: &'static str,
+        reply: Option<&'static str>,
     },
     /// A hook-lane verdict written for the request a hook is currently holding on.
     Hook {
@@ -114,8 +119,14 @@ pub fn dry_run<T: BrokerIo>(io: &T, action: &ActionManifest, pane_id: &str) -> D
                         .api_endpoint
                         .clone()
                         .unwrap_or_else(|| "(unresolved)".to_string()),
+                    // A dry-run has no caller answers, so a `question-reply`'s path is shown from
+                    // a one-empty-answer stand-in: the path is the manifest half, and the labels
+                    // are the caller's.
+                    path: super::api_request(t, &facts, Some(&[Vec::new()]))
+                        .map(|(path, _)| path)
+                        .unwrap_or_else(|| "(unresolved)".to_string()),
                     op: t.op.token(),
-                    reply: t.reply.token(),
+                    reply: t.reply.map(|r| r.token()),
                 },
                 // The hook lane only when one is actually holding right now, which is the same
                 // question the fire asks: with no record parked this reports the keystroke instead.

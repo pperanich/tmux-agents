@@ -219,6 +219,57 @@ await bus("session.idle", {{ sessionID: ses }});
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// The question channel, driven the same way. The id rides `question_id`, a different key from the
+/// permission channel's `request_id`, so neither intake effect can read the other's edge, and the
+/// end of a question forwards a clear whichever of the three bus names the binary emits.
+#[test]
+fn plugin_forwards_the_question_channel_on_its_own_key() {
+    if !node_available() {
+        eprintln!("skipping: node not installed");
+        return;
+    }
+    let dir = workdir();
+    let plugin = render_plugin(&dir, &stub_wrapper(&dir));
+    let driver = format!(
+        r#"
+import {{ TmaBridge }} from "{plugin}";
+
+const hooks = await TmaBridge({{ serverUrl: "http://127.0.0.1:4096" }});
+const bus = (type, properties) => hooks.event({{ event: {{ type, properties }} }});
+const ses = "ses_test01";
+
+await bus("question.asked", {{ sessionID: ses, id: "que_7f3a" }});
+await bus("question.replied", {{ sessionID: ses }});
+await bus("question.answered", {{ sessionID: ses }});
+await bus("question.rejected", {{ sessionID: ses }});
+"#,
+        plugin = plugin.display()
+    );
+
+    // The load registration plus the four bus edges.
+    let fires = drive(&dir, &driver, Some("%9"), 5);
+    let asked = payload_of(&fires, "question-required");
+    assert!(
+        asked.contains(r#""question_id":"que_7f3a""#) && !asked.contains("request_id"),
+        "the question id must not ride the permission channel's key: {asked}"
+    );
+    assert!(
+        asked.contains(r#""session_id":"ses_test01""#),
+        "ownership is filtered against the session: {asked}"
+    );
+    assert_eq!(
+        fires
+            .iter()
+            .filter(|f| f.event == "question-replied")
+            .count(),
+        3,
+        "replied, answered and rejected all clear: {:?}",
+        tokens(&fires)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// Outside tmux the plugin registers nothing: `tma event` binds to `$TMUX_PANE`, so a fire there
 /// would spawn a process per event to no effect.
 #[test]

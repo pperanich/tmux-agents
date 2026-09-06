@@ -26,9 +26,9 @@ pub mod telemetry;
 pub mod verdict;
 
 pub use action::{
-    ActionError, ActionKind, ActionManifest, ApiOp, ApiReply, ContextKeys, GateInput, GateOutcome,
-    HookTransport, HookVerdict, RefusalReason, Requirement, TextRefusal, TextTransport, When,
-    DEFAULT_SIGILS, TEXT_MAX_BYTES,
+    ActionError, ActionKind, ActionManifest, ApiOp, ApiReply, ApiTransport, ContextKeys, GateInput,
+    GateOutcome, HookTransport, HookVerdict, RefusalReason, Requirement, TextRefusal,
+    TextTransport, When, DEFAULT_SIGILS, TEXT_MAX_BYTES,
 };
 pub use edge::{diff_rows, Edge};
 pub use engine::{EngineError, Evaluation, RuleEngine, RuleReport};

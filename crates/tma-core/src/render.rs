@@ -648,6 +648,7 @@ const REMOVABLE: &[&str] = &[
     opt::COST_USD,
     opt::MODEL,
     opt::PERMISSION_REQUEST,
+    opt::QUESTION_REQUEST,
     opt::PENDING_TOOL,
     opt::PENDING_CALL,
     opt::PENDING_SUMMARY,

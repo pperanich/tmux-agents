@@ -95,6 +95,12 @@ pub mod opt {
     /// it to answer an `api` `permission-reply` op; an empty value refuses that op `requires-unmet`.
     /// Pane scope.
     pub const PERMISSION_REQUEST: &str = "@agent_permission_request";
+    /// The id of the mid-turn question the pane is waiting on: OpenCode's `que_*`, published by its
+    /// plugin on a `question.asked` edge and cleared on the edges that end it. Its own option and
+    /// not [`PERMISSION_REQUEST`] because the two are different channels with different endpoints:
+    /// a permission reply fired at a question id would quote a request that is not pending.
+    /// Pane scope.
+    pub const QUESTION_REQUEST: &str = "@agent_question_request";
     /// The tool name of the call a permission prompt is asking about (Claude's `PermissionRequest`
     /// `tool_name`). Stamped with [`PENDING_CALL`] and [`PENDING_SUMMARY`] by the event intake and
     /// cleared with them on every edge that ends the prompt. Pane scope.
@@ -702,6 +708,7 @@ mod tests {
         opt::STALL_NOTIFIED_AT,
         opt::MODEL,
         opt::PERMISSION_REQUEST,
+        opt::QUESTION_REQUEST,
         opt::PENDING_TOOL,
         opt::PENDING_CALL,
         opt::PENDING_SUMMARY,

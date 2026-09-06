@@ -28,8 +28,8 @@
 //! without tmux.
 
 use tma_core::{
-    ActionKind, ActionManifest, AgentState, ApiOp, ApiReply, ContextKeys, FoldConfig, GateInput,
-    GateOutcome, HookVerdict, RefusalReason, Requirement, TextRefusal,
+    ActionKind, ActionManifest, AgentState, ApiOp, ApiTransport, ContextKeys, FoldConfig,
+    GateInput, GateOutcome, HookVerdict, RefusalReason, Requirement, TextRefusal,
 };
 
 use tma_tmux::lock::{Acquire, LockError, LockValue};
@@ -247,6 +247,9 @@ pub struct PaneFacts {
     /// `@agent_permission_request`: the pending OpenCode permission id, `None`/empty when no
     /// prompt is open. An `api` `permission-reply` op refuses `requires-unmet` when it is empty.
     pub permission_request: Option<String>,
+    /// `@agent_question_request`: the pending OpenCode question id. A separate channel from the
+    /// permission id above, so the two api ops cannot answer each other's request.
+    pub question_request: Option<String>,
     /// The resolved API endpoint: the pane-stamped `@agent_api_endpoint`, else the config
     /// `[api.<name>] api_base` fallback. `None` when neither is set (the op refuses `requires-unmet`).
     pub api_endpoint: Option<String>,
@@ -337,16 +340,11 @@ pub trait BrokerIo {
         text: &str,
         suffix: &[String],
     ) -> Result<(), TmuxError>;
-    /// Answer an OpenCode permission over HTTP: one POST to `{endpoint}/permission/{request}/
-    /// reply` with the reply verdict, bounded by `timeout_ms` (connect + total), no retry. The real
-    /// impl calls [`crate::http`]; the mock returns canned outcomes.
-    fn api_reply(
-        &self,
-        endpoint: &str,
-        request_id: &str,
-        reply: ApiReply,
-        timeout_ms: u64,
-    ) -> HttpOutcome;
+    /// One POST to `{endpoint}{path}` with `body`, bounded by `timeout_ms` (connect + total), no
+    /// retry. The path and body are built by [`api_request`], which is pure, so what an op puts on
+    /// the wire is asserted without a socket; this seam only carries it. The real impl calls
+    /// [`crate::http`]; the mock records the call and returns a canned outcome.
+    fn api_call(&self, endpoint: &str, path: &str, body: &str, timeout_ms: u64) -> HttpOutcome;
     /// Whether a hook-lane request record is parked for `request_id`. The test for "a hook is
     /// holding on this prompt": false means no lane to answer over, and the caller uses keystrokes.
     fn hook_request_pending(&self, request_id: &str) -> bool;
@@ -361,6 +359,8 @@ pub trait BrokerIo {
     /// infallible by construction: it runs after the answer is already delivered, so a failed
     /// option write must not turn a successful reply into a reported failure.
     fn clear_permission_request(&self, pane_id: &str);
+    /// The same, for `@agent_question_request` once a question has been answered or dismissed.
+    fn clear_question_request(&self, pane_id: &str);
     /// Acquire the single-flight lock; the implementation supplies the broker pid and nonce.
     fn acquire(
         &self,
@@ -404,6 +404,12 @@ pub struct FireArgs<'a> {
     /// The caller's `--text` string, for a `text` action and nothing else. It is checked against
     /// the host-side payload rules before any tmux command runs, then delivered literally.
     pub text: Option<&'a str>,
+    /// The caller's picked option labels, one list per question, for a `question-reply` op and
+    /// nothing else. A list of lists rather than one string because a question set can hold several
+    /// questions and a question can accept several answers, which is the shape the endpoint takes
+    /// and the shape `tma_proto::Dispatch` carries. Library-only for now: `tma act` has no flag
+    /// that could express it.
+    pub answers: Option<&'a [Vec<String>]>,
     /// Where the `[act] log` line goes and which surface asked for the fire. The default writes
     /// nothing, so a caller that is not the `tma act` CLI stays silent.
     pub audit: AuditCtx<'a>,
@@ -544,6 +550,11 @@ fn act_sequence<T: BrokerIo>(
         if let Err(r) = action.check_text(fire_args.text.unwrap_or_default()) {
             return Outcome::Refused(Refusal::Payload(r));
         }
+    }
+    // The api ops' own payload rule, same altitude and same vocabulary: a `question-reply` with no
+    // labels has nothing to answer with, which is `empty` exactly as an empty steer is.
+    if needs_answers(action, fire_args.answers) {
+        return Outcome::Refused(Refusal::Payload(TextRefusal::Empty));
     }
 
     // The gate half is read here; the values ride on to whichever under-lock arm assembles the env.
@@ -731,11 +742,13 @@ fn act_under_lock<T: BrokerIo>(
             // Three arms, tried in order. `api` and `hook` are structured and mutually exclusive
             // per agent; `keys` is the floor every fire lands on when neither one applies.
             if let Some(transport) = action.api_for(agent) {
-                // The endpoint + request id are guaranteed present (the API requires re-asserted
-                // under the lock). Empty defaults here would only surface as the server's own 404.
+                // The preconditions are guaranteed met (the API requires were re-asserted under the
+                // lock), so `None` here is unreachable rather than a case with a sensible fallback.
+                let Some((path, body)) = api_request(transport, &facts, fire_args.answers) else {
+                    return Outcome::Refused(Refusal::Gate(RefusalReason::RequiresUnmet));
+                };
                 let endpoint = facts.api_endpoint.as_deref().unwrap_or_default();
-                let request = facts.permission_request.as_deref().unwrap_or_default();
-                return match io.api_reply(endpoint, request, transport.reply, action.timeout_ms) {
+                return match io.api_call(endpoint, &path, &body, action.timeout_ms) {
                     HttpOutcome::Ok => {
                         // The id is spent: drop it here rather than waiting for the plugin's
                         // `permission.replied` event, which runs on its own schedule. Not a
@@ -743,8 +756,22 @@ fn act_under_lock<T: BrokerIo>(
                         // does not take this lock — so a request stamped in the gap is erased. That
                         // fails safe: a missing stamp refuses the next dispatch `requires-unmet`
                         // instead of firing at a stale id.
-                        io.clear_permission_request(pane_id);
-                        Outcome::Replied
+                        match transport.op {
+                            ApiOp::PermissionReply => io.clear_permission_request(pane_id),
+                            ApiOp::QuestionReply | ApiOp::QuestionReject => {
+                                io.clear_question_request(pane_id)
+                            }
+                            // A command answers no request, so there is no id to spend.
+                            ApiOp::Interrupt => {}
+                        }
+                        // A 2xx on a request the server was holding open is proof it was answered;
+                        // a 2xx on a command is proof of delivery and nothing more, so it earns the
+                        // same `sent` a keystroke does.
+                        if transport.op.answers_a_request() {
+                            Outcome::Replied
+                        } else {
+                            Outcome::Sent
+                        }
                     }
                     // The prompt was answered/withdrawn between gate and act: the act's
                     // target disappeared, so `vanished`, exit 3.
@@ -835,17 +862,89 @@ fn api_requires_refusal(
     agent: &str,
 ) -> Option<Refusal> {
     let transport = action.api_for(agent)?;
-    let unmet = match transport.op {
-        ApiOp::PermissionReply => {
-            let has_request = facts
-                .permission_request
-                .as_deref()
-                .is_some_and(|s| !s.is_empty());
-            let has_endpoint = facts.api_endpoint.as_deref().is_some_and(|s| !s.is_empty());
-            !(has_request && has_endpoint)
+    let has_endpoint = nonempty(facts.api_endpoint.as_deref()).is_some();
+    // Every op needs an endpoint; each one also needs the id its own path is built from, which is
+    // the whole difference between them here.
+    let has_target = match transport.op {
+        ApiOp::PermissionReply => nonempty(facts.permission_request.as_deref()).is_some(),
+        ApiOp::QuestionReply | ApiOp::QuestionReject => {
+            nonempty(facts.question_request.as_deref()).is_some()
         }
+        ApiOp::Interrupt => nonempty(facts.session.as_deref()).is_some(),
     };
-    unmet.then_some(Refusal::Gate(RefusalReason::RequiresUnmet))
+    (!(has_endpoint && has_target)).then_some(Refusal::Gate(RefusalReason::RequiresUnmet))
+}
+
+/// Whether this fire is a `question-reply` the caller supplied no labels for. Checked at payload
+/// altitude, before any tmux command, exactly as a `text` action's string is.
+fn needs_answers(action: &ActionManifest, answers: Option<&[Vec<String>]>) -> bool {
+    action
+        .api
+        .values()
+        .any(|t| t.op.takes_answers() && answers.is_none_or(<[Vec<String>]>::is_empty))
+}
+
+/// The request one api op puts on the wire: the path after the endpoint, and the JSON body.
+///
+/// `None` means a precondition the gate should already have refused is missing. Pure, so what each
+/// op sends is asserted against the driven shapes without a socket (17-owed §1.1, §1.5, §1.6).
+/// Every path here is a **v1** path; the `/api/**` twins address different objects and answer empty
+/// while a v1 request is pending, so a test written against one would pass vacuously.
+pub fn api_request(
+    transport: &ApiTransport,
+    facts: &PaneFacts,
+    answers: Option<&[Vec<String>]>,
+) -> Option<(String, String)> {
+    // The two bodyless ops send no bytes at all, which is what was driven: an empty body, not `{}`.
+    match transport.op {
+        ApiOp::PermissionReply => {
+            let id = nonempty(facts.permission_request.as_deref())?;
+            let reply = transport.reply?;
+            Some((
+                format!("/permission/{id}/reply"),
+                format!("{{\"reply\":\"{}\"}}", reply.token()),
+            ))
+        }
+        ApiOp::QuestionReply => {
+            let id = nonempty(facts.question_request.as_deref())?;
+            let answers = answers.filter(|a| !a.is_empty())?;
+            Some((format!("/question/{id}/reply"), answers_body(answers)))
+        }
+        ApiOp::QuestionReject => {
+            let id = nonempty(facts.question_request.as_deref())?;
+            Some((format!("/question/{id}/reject"), String::new()))
+        }
+        ApiOp::Interrupt => {
+            let session = nonempty(facts.session.as_deref())?;
+            Some((format!("/session/{session}/abort"), String::new()))
+        }
+    }
+}
+
+/// `{"answers":[["<label>"],…]}`, one list per question. The labels are the user's own picks,
+/// quoted back verbatim: opencode echoes the LABEL into the transcript, so a normalized or
+/// re-cased one would answer a different option (17-owed §1.5).
+fn answers_body(answers: &[Vec<String>]) -> String {
+    let mut j = crate::json::JsonWriter::new();
+    j.begin_object();
+    j.key("answers");
+    j.begin_array();
+    for picked in answers {
+        j.begin_array();
+        for label in picked {
+            j.raw_string(label);
+        }
+        j.end_array();
+    }
+    j.end_array();
+    j.end_object();
+    j.finish()
+}
+
+/// A stamped value that is actually there. Both the empty string and the absent option mean the
+/// same thing to every caller here.
+fn nonempty(value: Option<&str>) -> Option<&str> {
+    value.filter(|s| !s.is_empty())
 }
 
 /// A stamp is stale when never written, stamped in the future (a backward wall-clock step), or older
@@ -890,6 +989,9 @@ fn report_release_failure(pane_id: &str, result: Result<(), LockError>) {
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    // The verdict vocabulary is only named in tests now: the act path reads it through the
+    // transport, and `api_request` is what turns it into a body.
+    use tma_core::ApiReply;
     use tma_tmux::lock;
 
     fn keys_action(when: &str, keys: &str) -> ActionManifest {
@@ -920,6 +1022,7 @@ mod tests {
             context_pct: None,
             context_covered: false,
             permission_request: None,
+            question_request: None,
             api_endpoint: None,
             episode_ms: 900_000,
             pending_tool: None,
@@ -934,6 +1037,7 @@ mod tests {
         PaneFacts {
             agent: Some("opencode".to_string()),
             permission_request: Some("per_abc123".to_string()),
+            question_request: None,
             api_endpoint: Some("http://127.0.0.1:4096".to_string()),
             ..blocked_claude(stamped_at)
         }
@@ -943,6 +1047,26 @@ mod tests {
     fn api_action() -> ActionManifest {
         let src = "min_engine_version = \"0.1\"\nname = \"approve\"\nlabel = \"Approve\"\nkind = \"keys\"\nwhen = { state = [\"blocked\"], detail = [\"permission\"] }\n[api]\nopencode = { op = \"permission-reply\", reply = \"once\" }\n";
         ActionManifest::parse(src, "approve", "approve.toml").unwrap()
+    }
+
+    /// An api action carrying `op` for OpenCode, gated on whatever `when` says.
+    fn op_action(name: &str, op: &str, when: &str) -> ActionManifest {
+        let src = format!(
+            "min_engine_version = \"0.1\"\nname = \"{name}\"\nlabel = \"L\"\nkind = \"keys\"\n{when}\n[api]\nopencode = {{ op = \"{op}\" }}\n"
+        );
+        ActionManifest::parse(&src, name, &format!("{name}.toml")).unwrap()
+    }
+
+    /// A blocked/question OpenCode pane carrying a pending question id: the fireable state for the
+    /// two question ops.
+    fn blocked_question(stamped_at: u64) -> PaneFacts {
+        PaneFacts {
+            detail: Some("question".to_string()),
+            permission_request: None,
+            question_request: Some("que_7f3a".to_string()),
+            session: Some("ses_1122".to_string()),
+            ..blocked_opencode(stamped_at)
+        }
     }
 
     /// A scripted [`BrokerIo`]: a queue of `read_pane` results (each call pops the next, or reuses
@@ -960,11 +1084,13 @@ mod tests {
         lock_held: bool,
         spawn_result: Result<(), String>,
         spawned: RefCell<Option<SupervisorSpec>>,
-        /// Canned HTTP outcome for the API lane, and a record of the `(endpoint, request, reply)` call.
+        /// Canned HTTP outcome for the API lane, and a record of the `(endpoint, path, body)` call.
         api_result: HttpOutcome,
-        api_call: RefCell<Option<(String, String, ApiReply)>>,
+        api_call: RefCell<Option<(String, String, String)>>,
         /// The panes whose `@agent_permission_request` the broker asked to unset.
         request_cleared: RefCell<Vec<String>>,
+        /// The panes whose `@agent_question_request` it asked to unset.
+        question_cleared: RefCell<Vec<String>>,
         /// Every `@agent_act_repeat` value the broker wrote, in order.
         repeat_writes: RefCell<Vec<String>>,
         /// Whether a hook-lane request record is "parked" (default false: no lane, keys arm).
@@ -991,6 +1117,7 @@ mod tests {
                 api_result: HttpOutcome::Ok,
                 api_call: RefCell::new(None),
                 request_cleared: RefCell::new(Vec::new()),
+                question_cleared: RefCell::new(Vec::new()),
                 repeat_writes: RefCell::new(Vec::new()),
                 hook_pending: false,
                 hook_result: VerdictWrite::Written,
@@ -1078,15 +1205,15 @@ mod tests {
             *self.sent.borrow_mut() = Some(seq);
             Ok(())
         }
-        fn api_reply(
+        fn api_call(
             &self,
             endpoint: &str,
-            request_id: &str,
-            reply: ApiReply,
+            path: &str,
+            body: &str,
             _timeout_ms: u64,
         ) -> HttpOutcome {
             *self.api_call.borrow_mut() =
-                Some((endpoint.to_string(), request_id.to_string(), reply));
+                Some((endpoint.to_string(), path.to_string(), body.to_string()));
             self.api_result.clone()
         }
         fn hook_request_pending(&self, request_id: &str) -> bool {
@@ -1103,6 +1230,9 @@ mod tests {
         }
         fn clear_permission_request(&self, pane_id: &str) {
             self.request_cleared.borrow_mut().push(pane_id.to_string());
+        }
+        fn clear_question_request(&self, pane_id: &str) {
+            self.question_cleared.borrow_mut().push(pane_id.to_string());
         }
         fn acquire(
             &self,
@@ -1446,6 +1576,7 @@ mod tests {
     fn blocked_claude_with_request(stamped_at: u64) -> PaneFacts {
         PaneFacts {
             permission_request: Some("d41d8cd98f00b204".to_string()),
+            question_request: None,
             ..blocked_claude(stamped_at)
         }
     }
@@ -1558,16 +1689,291 @@ mod tests {
             io.sent.borrow().is_none(),
             "the API lane sends no keystrokes"
         );
-        let call = io.api_call.borrow().clone().expect("api_reply was called");
+        let call = io
+            .api_call
+            .borrow()
+            .clone()
+            .expect("the API lane was called");
         assert_eq!(call.0, "http://127.0.0.1:4096");
-        assert_eq!(call.1, "per_abc123");
-        assert_eq!(call.2, ApiReply::Once);
+        assert_eq!(call.1, "/permission/per_abc123/reply");
+        assert_eq!(call.2, "{\"reply\":\"once\"}");
         assert!(*io.cleared.borrow(), "the lock is released after the reply");
         assert_eq!(
             *io.request_cleared.borrow(),
             vec!["%1".to_string()],
             "a spent request id is unstamped under the same held lock"
         );
+    }
+
+    /// A-255. What each op puts on the wire, asserted against the driven shapes without a socket.
+    /// Every path is a v1 path: an `/api/**` twin answers empty while a v1 request is pending, so a
+    /// test written against one would assert an empty list against an empty list.
+    #[test]
+    fn each_api_op_builds_its_own_v1_path_and_body() {
+        let facts = blocked_question(1_000_000);
+        let picked = [vec!["A: hello".to_string()]];
+        let cases = [
+            (
+                ApiOp::PermissionReply,
+                Some(ApiReply::Once),
+                None,
+                "/permission/per_abc123/reply",
+                "{\"reply\":\"once\"}",
+            ),
+            (
+                ApiOp::QuestionReply,
+                None,
+                Some(&picked[..]),
+                "/question/que_7f3a/reply",
+                "{\"answers\":[[\"A: hello\"]]}",
+            ),
+            (
+                ApiOp::QuestionReject,
+                None,
+                None,
+                "/question/que_7f3a/reject",
+                "",
+            ),
+            (ApiOp::Interrupt, None, None, "/session/ses_1122/abort", ""),
+        ];
+        for (op, reply, answers, path, body) in cases {
+            let mut with_permission = facts.clone();
+            with_permission.permission_request = Some("per_abc123".to_string());
+            let got = api_request(&ApiTransport { op, reply }, &with_permission, answers)
+                .unwrap_or_else(|| panic!("{op:?} resolves"));
+            assert_eq!((got.0.as_str(), got.1.as_str()), (path, body), "{op:?}");
+            assert!(
+                !got.0.starts_with("/api/"),
+                "{op:?} must not use the v2 plane"
+            );
+        }
+    }
+
+    /// Several questions, several picks: the labels are quoted back verbatim, because opencode
+    /// echoes the LABEL into the transcript and a re-cased one would answer a different option.
+    #[test]
+    fn an_answer_body_carries_one_list_per_question() {
+        let picked = [
+            vec!["Red \"warm\"".to_string(), "Blue".to_string()],
+            vec!["Yes".to_string()],
+        ];
+        assert_eq!(
+            answers_body(&picked),
+            "{\"answers\":[[\"Red \\\"warm\\\"\",\"Blue\"],[\"Yes\"]]}"
+        );
+        assert_eq!(answers_body(&[]), "{\"answers\":[]}");
+    }
+
+    /// A-256, A-257. A 2xx on a request the server was holding is `replied`; a 2xx on a command is
+    /// `sent`, the same word a keystroke earns, because nothing was answered and nothing re-read.
+    #[test]
+    fn answering_a_request_replies_and_commanding_a_session_only_sends() {
+        let reject = op_action(
+            "question_reject",
+            "question-reject",
+            "when = { state = [\"blocked\"], detail = [\"question\"] }",
+        );
+        let io = MockIo::new(vec![Some(blocked_question(1_000_000))], acquired());
+        let r = act(&io, &reject, "%1", FireArgs::default());
+        assert_eq!(r.outcome, Outcome::Replied);
+        assert_eq!(r.exit_code(), 0);
+        let call = io
+            .api_call
+            .borrow()
+            .clone()
+            .expect("the API lane was called");
+        assert_eq!(call.1, "/question/que_7f3a/reject");
+        assert_eq!(call.2, "", "reject carries no body");
+        assert_eq!(
+            *io.question_cleared.borrow(),
+            vec!["%1".to_string()],
+            "the spent question id is unstamped under the same held lock"
+        );
+        assert!(
+            io.request_cleared.borrow().is_empty(),
+            "and the permission id, a different channel, is untouched"
+        );
+
+        let mut working = blocked_question(1_000_000);
+        working.state = AgentState::Working;
+        working.detail = None;
+        let interrupt = op_action("interrupt", "interrupt", "when = { state = [\"working\"] }");
+        let io = MockIo::new(vec![Some(working)], acquired());
+        let r = act(&io, &interrupt, "%1", FireArgs::default());
+        assert_eq!(
+            r.outcome,
+            Outcome::Sent,
+            "a 2xx on an abort is delivery, not an answer"
+        );
+        assert_eq!(
+            io.api_call.borrow().clone().unwrap().1,
+            "/session/ses_1122/abort"
+        );
+        assert!(
+            io.question_cleared.borrow().is_empty() && io.request_cleared.borrow().is_empty(),
+            "a command answers no request, so there is no id to spend"
+        );
+    }
+
+    /// The answers ride `FireArgs`, checked at payload altitude: a `question-reply` with none has
+    /// nothing to answer with and refuses before the first tmux command, exactly as an empty steer
+    /// does. There is no bundled action for this op; the library is the whole surface.
+    #[test]
+    fn a_question_reply_needs_its_labels_before_anything_is_read() {
+        let reply = op_action(
+            "question_reply",
+            "question-reply",
+            "when = { state = [\"blocked\"], detail = [\"question\"] }",
+        );
+        let io = MockIo::new(vec![Some(blocked_question(1_000_000))], acquired());
+        let r = act(&io, &reply, "%1", FireArgs::default());
+        assert_eq!(r.reason(), Some("empty"));
+        assert_eq!(r.exit_code(), 4);
+        assert_eq!(*io.read_calls.borrow(), 0, "the pane was never read");
+
+        let picked = [vec!["Red".to_string()]];
+        let io = MockIo::new(vec![Some(blocked_question(1_000_000))], acquired());
+        let r = act(
+            &io,
+            &reply,
+            "%1",
+            FireArgs {
+                answers: Some(&picked),
+                ..Default::default()
+            },
+        );
+        assert_eq!(r.outcome, Outcome::Replied);
+        let call = io.api_call.borrow().clone().unwrap();
+        assert_eq!(call.1, "/question/que_7f3a/reply");
+        assert_eq!(call.2, "{\"answers\":[[\"Red\"]]}");
+    }
+
+    /// Each op refuses `requires-unmet` for its own missing id, before the lock and before any
+    /// HTTP: the two request channels are separate, so a pane holding one does not satisfy the
+    /// other, and an interrupt needs a session rather than either.
+    #[test]
+    fn each_api_op_refuses_for_its_own_missing_target() {
+        let reject = op_action(
+            "question_reject",
+            "question-reject",
+            "when = { state = [\"blocked\"], detail = [\"question\"] }",
+        );
+        let mut no_question = blocked_question(1_000_000);
+        no_question.question_request = None;
+        no_question.permission_request = Some("per_abc123".to_string());
+        let io = MockIo::new(vec![Some(no_question)], acquired());
+        let r = act(&io, &reject, "%1", FireArgs::default());
+        assert_eq!(r.reason(), Some("requires-unmet"));
+        assert!(io.api_call.borrow().is_none(), "no HTTP call on a refusal");
+
+        let interrupt = op_action("interrupt", "interrupt", "when = { state = [\"working\"] }");
+        let mut no_session = blocked_question(1_000_000);
+        no_session.state = AgentState::Working;
+        no_session.detail = None;
+        no_session.session = None;
+        let io = MockIo::new(vec![Some(no_session)], acquired());
+        assert_eq!(
+            act(&io, &interrupt, "%1", FireArgs::default()).reason(),
+            Some("requires-unmet")
+        );
+        assert!(io.api_call.borrow().is_none());
+    }
+
+    /// A one-file python3 responder that appends `<path>\t<body>` per request and answers
+    /// `200 true`, exactly as opencode's own endpoints do. Independent of this crate's HTTP client,
+    /// which is the point: it records what actually crossed the socket.
+    const STUB_SERVER: &str = r#"
+import http.server, sys
+log = sys.argv[1]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(n).decode()
+        with open(log, "a") as f:
+            f.write(self.path + "\t" + body + "\n")
+        self.send_response(200)
+        self.send_header("Content-Length", "4")
+        self.end_headers()
+        self.wfile.write(b"true")
+    def log_message(self, *a):
+        pass
+srv = http.server.HTTPServer(("127.0.0.1", 0), H)
+print(srv.server_port, flush=True)
+srv.serve_forever()
+"#;
+
+    /// A-255. Every op against a real server: the v1 paths and the documented bodies, recorded by
+    /// something that is not this crate's own client.
+    ///
+    /// The negative leg is structural rather than a second drive. `/api/**` is a different producer
+    /// whose objects answer empty while a v1 request is pending, so a test that POSTed there would
+    /// be satisfied by a server that never saw a request at all; asserting that no op builds such a
+    /// path is the check that cannot pass vacuously.
+    #[test]
+    fn the_api_ops_hit_the_v1_paths_against_a_real_server() {
+        use std::io::{BufRead, BufReader};
+        use std::process::{Command, Stdio};
+
+        if !tma_test_support::python3_available() {
+            eprintln!("skipping: python3 unavailable for the stub server");
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("tma-api-stub-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let log = dir.join("requests.log");
+        let script = dir.join("stub.py");
+        std::fs::write(&script, STUB_SERVER).unwrap();
+
+        let mut child = Command::new("python3")
+            .arg(&script)
+            .arg(&log)
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn the stub server");
+        let mut port = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut port)
+            .expect("the stub prints its port");
+        let base = format!("http://127.0.0.1:{}", port.trim());
+
+        let facts = blocked_question(1_000_000);
+        let picked = [vec!["A: hello".to_string()]];
+        let ops = [
+            (ApiOp::PermissionReply, Some(ApiReply::Once), None),
+            (ApiOp::QuestionReply, None, Some(&picked[..])),
+            (ApiOp::QuestionReject, None, None),
+            (ApiOp::Interrupt, None, None),
+        ];
+        for (op, reply, answers) in ops {
+            let mut with_permission = facts.clone();
+            with_permission.permission_request = Some("per_abc123".to_string());
+            let (path, body) = api_request(&ApiTransport { op, reply }, &with_permission, answers)
+                .unwrap_or_else(|| panic!("{op:?} resolves"));
+            assert_eq!(
+                crate::http::post_json(&base, &path, &body, std::time::Duration::from_secs(5)),
+                HttpOutcome::Ok,
+                "{op:?}"
+            );
+        }
+        let _ = child.kill();
+        let _ = child.wait();
+
+        let recorded = std::fs::read_to_string(&log).expect("the stub recorded the requests");
+        let lines: Vec<&str> = recorded.lines().collect();
+        assert_eq!(
+            lines,
+            vec![
+                "/permission/per_abc123/reply\t{\"reply\":\"once\"}",
+                "/question/que_7f3a/reply\t{\"answers\":[[\"A: hello\"]]}",
+                "/question/que_7f3a/reject\t",
+                "/session/ses_1122/abort\t",
+            ]
+        );
+        assert!(
+            !recorded.contains("/api/"),
+            "no op may address the v2 plane, which answers empty while a v1 request is pending"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1656,8 +2062,9 @@ mod tests {
             d.effect,
             Effect::Api {
                 endpoint: "http://127.0.0.1:4096".to_string(),
+                path: "/permission/per_abc123/reply".to_string(),
                 op: "permission-reply",
-                reply: "once",
+                reply: Some("once"),
             }
         );
         assert!(
@@ -1852,8 +2259,12 @@ mod tests {
             },
         );
         assert_eq!(r.outcome, Outcome::Replied);
-        let call = io.api_call.borrow().clone().expect("api_reply was called");
-        assert_eq!(call.1, "per_abc123");
+        let call = io
+            .api_call
+            .borrow()
+            .clone()
+            .expect("the API lane was called");
+        assert_eq!(call.1, "/permission/per_abc123/reply");
     }
 
     /// A pane carrying no request id at all refuses the same way a mismatched one does: absent and

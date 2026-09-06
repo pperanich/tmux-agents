@@ -1273,15 +1273,17 @@ mod tests {
     fn drift_opencode_manifest_plugin_parser_docs_consistent() {
         let oc = opencode();
 
-        // Leg 1: the plugin emits exactly the tokens the manifest maps, plus the
-        // `permission-replied` clear signal, which is deliberately NOT a state map (the intake keys
-        // the `@agent_permission_request` clear on it directly), so it is excluded from the equality.
+        // Leg 1: the plugin emits exactly the tokens the manifest maps, plus the two clear signals,
+        // which are deliberately NOT state maps (the intake keys the `@agent_permission_request`
+        // and `@agent_question_request` clears on them directly), so they are excluded here.
         let mut plugin = opencode_plugin_tokens(OPENCODE_PLUGIN_SRC);
-        assert!(
-            plugin.iter().any(|t| t == event::PERMISSION_REPLIED),
-            "the plugin must emit the permission-replied clear signal"
-        );
-        plugin.retain(|t| t != event::PERMISSION_REPLIED);
+        for clear in [event::PERMISSION_REPLIED, event::QUESTION_REPLIED] {
+            assert!(
+                plugin.iter().any(|t| t == clear),
+                "the plugin must emit the {clear} clear signal"
+            );
+        }
+        plugin.retain(|t| t != event::PERMISSION_REPLIED && t != event::QUESTION_REPLIED);
         plugin.sort();
         let mapped = opencode_map_events(&oc);
         assert_eq!(
