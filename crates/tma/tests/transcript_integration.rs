@@ -26,8 +26,59 @@ fn transcript(s: &Scratch, args: &[&str]) -> Output {
         .arg("--manifest-dir")
         .arg(s.manifest_dir())
         .env("TMA_CONFIG", s.config_path())
+        // opencode's store is one database under the data home rather than a path on the pane, so
+        // the data home is pinned at the scratch tree: no case here can reach a real store.
+        .env("XDG_DATA_HOME", s.workdir.join(".local/share"))
         .output()
         .expect("spawn tma transcript")
+}
+
+/// A synthetic `opencode.db` in the scratch tree, built from the same committed schema the reader's
+/// own suite uses. One user turn and one settled tool call is enough to prove the wiring.
+fn opencode_store(path: &Path, session: &str) {
+    std::fs::create_dir_all(path.parent().expect("a parent")).expect("the store directory");
+    let conn = rusqlite::Connection::open(path).expect("create the store");
+    conn.pragma_update(None, "journal_mode", "wal")
+        .expect("wal journalling");
+    conn.execute_batch(include_str!(
+        "../../tma-transcript/fixtures/stores/opencode/1.18.18/opencode-1.18.18-schema.sql"
+    ))
+    .expect("the schema applies");
+    let rows: [(&str, &str); 3] = [
+        ("prt_0001", r#"{"type":"text","text":"integration prompt"}"#),
+        ("prt_0002", r#"{"type":"text","text":"integration answer"}"#),
+        (
+            "prt_0003",
+            r#"{"type":"tool","tool":"bash","callID":"call_int","state":{"status":"completed","input":{"command":"true"},"output":"done"}}"#,
+        ),
+    ];
+    conn.execute(
+        "insert into session values (?1, null, 1000, 1000, ?2)",
+        rusqlite::params![
+            session,
+            format!(r#"{{"id":"{session}","directory":"/synthetic","version":"1.18.18"}}"#)
+        ],
+    )
+    .expect("the session row");
+    for (i, (part, data)) in rows.iter().enumerate() {
+        let (message, ts) = (format!("msg_{i:04}"), 1_000 + i as i64);
+        let role = if i == 0 { "user" } else { "assistant" };
+        conn.execute(
+            "insert into message values (?1, ?2, ?3, ?3, ?4)",
+            rusqlite::params![
+                message,
+                session,
+                ts,
+                format!(r#"{{"id":"{message}","role":"{role}"}}"#)
+            ],
+        )
+        .expect("the message row");
+        conn.execute(
+            "insert into part values (?1, ?2, ?3, ?4, ?4, ?5)",
+            rusqlite::params![part, message, session, ts, data],
+        )
+        .expect("the part row");
+    }
 }
 
 /// The committed corpus, which the tests copy from and never write to.
@@ -262,11 +313,13 @@ fn a_refused_store_names_its_reason_with_exit_four() {
         stdout(&out)
     );
 
+    // OpenCode's store is a database, and there is none in the pinned data home: a named refusal
+    // rather than an empty window, the same as any other store with nothing behind it.
     s.set_opt(&pane, "@agent_name", "opencode");
     let out = transcript(&s, &["--pane", &pane, "--json"]);
     assert_eq!(out.status.code(), Some(4));
     assert!(
-        stdout(&out).contains(r#""code":"unsupported-store""#),
+        stdout(&out).contains(r#""code":"no-transcript""#),
         "{}",
         stdout(&out)
     );
@@ -287,6 +340,49 @@ fn a_refused_store_names_its_reason_with_exit_four() {
     // A pane that does not exist is exit 3, the shared "target gone" code.
     let out = transcript(&s, &["--pane", "%9999"]);
     assert_eq!(out.status.code(), Some(3));
+}
+
+/// The opencode case end to end: a pane stamped with a `ses_*` id and no transcript path at all,
+/// served out of the database under the pinned data home. The one store with no file to point at.
+#[test]
+fn an_opencode_pane_is_served_from_its_database() {
+    if !have_tmux() {
+        return;
+    }
+    let s = Scratch::new("transcript-opencode");
+    let session = "ses_integration01";
+    opencode_store(
+        &s.workdir.join(".local/share/opencode/opencode.db"),
+        session,
+    );
+    let pane = s.new_pane();
+    s.set_opt(&pane, "@agent_name", "opencode");
+    s.set_opt(&pane, "@agent_session", session);
+
+    let out = transcript(&s, &["--pane", &pane, "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let doc = stdout(&out);
+    assert!(doc.contains(r#""agent":"opencode""#), "{doc}");
+    assert!(doc.contains(r#""session_id":"ses_integration01""#), "{doc}");
+    // Newest first: the settled tool call, its result, then the prose behind it.
+    assert!(doc.contains(r#""kind":"tool_result""#), "{doc}");
+    assert!(doc.contains(r#""kind":"tool_call""#), "{doc}");
+    assert!(doc.contains(r#""kind":"user_message""#), "{doc}");
+    assert!(doc.contains(r#""unknown":0"#), "{doc}");
+
+    // And one of those cursors fetches that event's body, the same as any file store's.
+    let cursor = first_cursor(&doc);
+    let out = transcript(&s, &["--pane", &pane, "--event", &cursor]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(stdout(&out).trim(), "done");
 }
 
 /// `--subagent` serves a claude child transcript as its own session; the parent window holds the

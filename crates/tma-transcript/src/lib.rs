@@ -3,8 +3,9 @@
 //!
 //! tma already knows which pane an agent is in, what state it is in, and (since 0.5.12) where that
 //! agent writes its conversation. This crate is the reader on the end of that pointer: it maps four
-//! file-backed stores into one event vocabulary, serves a page at a time from the end of the file
-//! backwards, and refuses in a way that names the reason rather than returning an empty page.
+//! file-backed stores and one SQLite store into one event vocabulary, serves a page at a time from
+//! the end backwards, and refuses in a way that names the reason rather than returning an empty
+//! page.
 //!
 //! ```no_run
 //! use tma_transcript::{discovery, Reader, WindowRequest};
@@ -26,11 +27,11 @@
 //!
 //! ## What the readers can and cannot do
 //!
-//! Four stores are served: claude, codex, gemini and pi, all append-only JSONL. Two are refused,
-//! and both refusals are deliberate. cursor-agent's transcript records the prompt, the prose and a
-//! bare `tool_use`, with no tool results, no timestamps and no version stamp, so a window over it
-//! renders as holes; OpenCode keeps everything in SQLite, which is a different reader and a
-//! different dependency, tracked as its own workstream.
+//! Five stores are served. Four are append-only JSONL (claude, codex, gemini, pi) and one is a
+//! SQLite database (opencode), read through the default-off `opencode` feature. One is refused, and
+//! the refusal is deliberate: cursor-agent's transcript records the prompt, the prose and a bare
+//! `tool_use`, with no tool results, no timestamps and no version stamp, so a window over it renders
+//! as holes.
 //!
 //! Nothing here streams tokens. Every store writes settled records, so the finest grain available
 //! is a whole message, and "the assistant is writing" comes from tma's own detection rather than
@@ -42,6 +43,8 @@ mod adapters;
 pub mod discovery;
 mod json;
 mod model;
+#[cfg(feature = "opencode")]
+mod opencode;
 mod reader;
 #[cfg(test)]
 mod tests;
@@ -54,11 +57,15 @@ pub use model::{
 };
 pub use reader::{Reader, Tail, Window, WindowRequest};
 
-/// One transcript file and the store whose grammar it speaks.
+/// One transcript, the store whose grammar it speaks, and where to find it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Source {
     pub store: Store,
+    /// The transcript file, or for OpenCode the database holding every session.
     pub path: PathBuf,
+    /// Which session inside `path`. Only OpenCode needs it, because its database holds them all;
+    /// the file stores put one session per path and leave this `None`.
+    pub session: Option<String>,
 }
 
 /// Why a request was not served. Every variant is a fact about the pane or the file, never a
@@ -68,8 +75,11 @@ pub enum Refusal {
     /// Nothing on the pane pointed at a transcript, and no store layout held one for its session.
     #[error("no transcript file found for this pane")]
     NoTranscript,
-    /// OpenCode: the conversation is in SQLite, not a file this reader opens.
-    #[error("{store} keeps its transcript in SQLite; that reader is a separate workstream")]
+    /// OpenCode against a build with the `opencode` feature compiled out.
+    #[error(
+        "{store} keeps its transcript in SQLite, and this build was compiled without the \
+             SQLite reader (the `opencode` feature)"
+    )]
     UnsupportedStore { store: Store },
     /// cursor-agent: the file exists but does not hold enough of a conversation to render.
     #[error(
@@ -109,6 +119,16 @@ impl Refusal {
         match store {
             Store::OpenCode => Refusal::UnsupportedStore { store },
             _ => Refusal::StoreIncomplete { store },
+        }
+    }
+
+    /// A SQLite failure, reported as an I/O refusal: what a caller can act on is that the store did
+    /// not read, not which of SQLite's result codes came back.
+    #[cfg(feature = "opencode")]
+    pub(crate) fn db(path: &Path, source: rusqlite::Error) -> Refusal {
+        Refusal::Io {
+            path: path.display().to_string(),
+            source: std::io::Error::other(source),
         }
     }
 

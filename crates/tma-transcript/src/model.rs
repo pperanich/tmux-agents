@@ -10,7 +10,7 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Which store a source belongs to. The variant set is the agent set tma detects, including the
-/// two the reader refuses, because a refusal has to name which store it is refusing.
+/// one the reader refuses, because a refusal has to name which store it is refusing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Store {
     Claude,
@@ -20,7 +20,7 @@ pub enum Store {
     /// Served as a typed refusal: cursor-agent's transcript has no tool results, no timestamps and
     /// no version stamp, so a window over it renders as holes. See [`crate::Refusal`].
     Cursor,
-    /// Served as a typed refusal: OpenCode is SQLite, not a file store, and is its own workstream.
+    /// SQLite rather than a file, and served only when the `opencode` feature is compiled in.
     OpenCode,
 }
 
@@ -50,12 +50,20 @@ impl Store {
         }
     }
 
-    /// Whether the reader can serve this store's records today.
+    /// Whether the reader can serve this store's records today. OpenCode's answer is a build fact:
+    /// its reader is the `opencode` feature, and a build without it refuses rather than half-serves.
     pub fn is_readable(self) -> bool {
-        matches!(
-            self,
-            Store::Claude | Store::Codex | Store::Gemini | Store::Pi
-        )
+        match self {
+            Store::Claude | Store::Codex | Store::Gemini | Store::Pi => true,
+            Store::OpenCode => cfg!(feature = "opencode"),
+            Store::Cursor => false,
+        }
+    }
+
+    /// Whether this store's records are line-oriented JSON in a file. False for OpenCode alone,
+    /// which is a database and takes the other reader.
+    pub(crate) fn is_file_store(self) -> bool {
+        self != Store::OpenCode
     }
 }
 

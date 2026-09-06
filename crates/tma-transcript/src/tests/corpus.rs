@@ -79,6 +79,7 @@ fn read_events(store: Store, path: &Path) -> (Vec<crate::Event>, u64) {
     let source = Source {
         store,
         path: path.to_path_buf(),
+        session: None,
     };
     let page = Reader::new()
         .window(&source, &WindowRequest::new(10_000).with_bodies())
@@ -137,6 +138,14 @@ fn the_version_inventory_agrees_with_the_corpus() {
 
     for (agent, decl) in &declared {
         for version in &decl.versions {
+            if decl.stamp_scope == "generated" {
+                assert!(
+                    generated(agent, version),
+                    "{agent} {version} is declared as a generated store with no expectation \
+                     committed beside it"
+                );
+                continue;
+            }
             assert!(
                 covered
                     .get(agent)
@@ -145,6 +154,17 @@ fn the_version_inventory_agrees_with_the_corpus() {
             );
         }
     }
+}
+
+/// A store whose fixture is a database the suite builds rather than a file in the tree. What is
+/// committed is the expectation, so that is what the inventory can hold it to.
+fn generated(agent: &str, version: &str) -> bool {
+    let dir = fixtures().join("stores").join(agent).join(version);
+    std::fs::read_dir(dir).is_ok_and(|entries| {
+        entries
+            .flatten()
+            .any(|e| e.file_name().to_string_lossy().ends_with(".expected.txt"))
+    })
 }
 
 /// The in-file stamp, read the way that store writes it.

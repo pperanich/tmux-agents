@@ -4,6 +4,8 @@
 
 mod adapters;
 mod corpus;
+#[cfg(feature = "opencode")]
+mod opencode;
 mod reader;
 
 use std::path::{Path, PathBuf};

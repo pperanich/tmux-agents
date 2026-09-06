@@ -20,8 +20,9 @@ tma-core = { path = "../tma-core" }
 # bin's poll/daemon/picker/jump/install commands drive. The only crate that spawns tmux.
 tma-tmux = { path = "../tma-tmux" }
 # The transcript reader: agent transcript stores mapped to one normalized event vocabulary,
-# served a bounded page at a time. Consumed by `tma transcript` only.
-tma-transcript = { path = "../tma-transcript" }
+# served a bounded page at a time. Consumed by `tma transcript` only. `opencode` is on here and
+# nowhere else: the binary is what a user runs, so it is the build that carries the SQLite client.
+tma-transcript = { path = "../tma-transcript", features = ["opencode"] }
 # The tier-2 runtime crate: config, manifests + hook-event vocabulary, identity, the
 # poll cycle, on-demand capture, the `tma event` bridge, and the debug/explain surfaces the
 # bin's commands drive.
@@ -66,3 +67,6 @@ tma-test-support = { path = "../tma-test-support" }
 tma-proto = { path = "../tma-proto" }
 # Reading the drift guard's own JSON back as keys and tokens.
 serde_json = "1"
+# `tma transcript`'s opencode case needs a store to read, and that store is a database. The suite
+# builds one in its scratch tree from the committed schema; already in the build graph above.
+rusqlite.workspace = true

@@ -6,6 +6,9 @@
 //! id, which is the codex tail's `discover_rollout` generalized to four stores; it exists for a pane
 //! detected from the screen alone, for a session that predates the stamp, and for pi, which
 //! publishes no path.
+//!
+//! opencode takes neither: one database holds every session, so its "path" is a constant and the
+//! `ses_*` id in `@agent_session` is the whole of the lookup.
 
 use std::fs;
 use std::io::{BufRead, BufReader, Read};
@@ -36,22 +39,30 @@ pub struct StoreRoots {
     pub codex: PathBuf,
     pub gemini: PathBuf,
     pub pi: PathBuf,
+    /// The directory holding `opencode.db`, not the database itself.
+    pub opencode: PathBuf,
 }
 
 impl StoreRoots {
-    /// The roots as the agents themselves resolve them: `$CODEX_HOME` when set, `$HOME/.<agent>`
-    /// otherwise. `None` when `$HOME` is unset and nothing can be resolved.
+    /// The roots as the agents themselves resolve them: `$CODEX_HOME` when set, `$XDG_DATA_HOME`
+    /// for opencode, `$HOME/.<agent>` otherwise. `None` when `$HOME` is unset and nothing can be
+    /// resolved.
     pub fn from_env() -> Option<StoreRoots> {
         let home = PathBuf::from(std::env::var_os("HOME").filter(|h| !h.is_empty())?);
         let codex = std::env::var_os("CODEX_HOME")
             .filter(|h| !h.is_empty())
             .map(PathBuf::from)
             .unwrap_or_else(|| home.join(".codex"));
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join(".local").join("share"));
         Some(StoreRoots {
             claude: home.join(".claude"),
             codex,
             gemini: home.join(".gemini"),
             pi: home.join(".pi"),
+            opencode: data.join("opencode"),
         })
     }
 
@@ -62,23 +73,32 @@ impl StoreRoots {
             codex: root.join(".codex"),
             gemini: root.join(".gemini"),
             pi: root.join(".pi"),
+            opencode: root.join(".local").join("share").join("opencode"),
         }
     }
 }
 
-/// Resolve a pane to the file its conversation lives in.
+/// Resolve a pane to the transcript its conversation lives in.
 ///
 /// The refusals are as informative as the successes: a cursor-agent pane is refused because its
-/// store is too thin to render, and an OpenCode pane because its store is a database. Neither is a
-/// missing file, and reporting them as one would send someone looking for a path that never existed.
+/// store is too thin to render, and an OpenCode pane on a build without the SQLite reader because
+/// this binary cannot open it. Neither is a missing file, and reporting them as one would send
+/// someone looking for a path that never existed.
 pub fn discover(facts: &PaneFacts, roots: &StoreRoots) -> Result<Source, Refusal> {
     let store = Store::from_agent(&facts.agent).ok_or(Refusal::NoTranscript)?;
     if !store.is_readable() {
         return Err(Refusal::for_store(store));
     }
+    if store == Store::OpenCode {
+        return opencode_db(&roots.opencode, facts.session.as_deref());
+    }
     if let Some(path) = facts.transcript.as_ref().map(PathBuf::from) {
         if path.is_file() {
-            return Ok(Source { store, path });
+            return Ok(Source {
+                store,
+                path,
+                session: None,
+            });
         }
     }
     let session = facts.session.as_deref().ok_or(Refusal::NoTranscript)?;
@@ -90,8 +110,30 @@ pub fn discover(facts: &PaneFacts, roots: &StoreRoots) -> Result<Source, Refusal
         Store::Cursor | Store::OpenCode => None,
     };
     found
-        .map(|path| Source { store, path })
+        .map(|path| Source {
+            store,
+            path,
+            session: None,
+        })
         .ok_or(Refusal::NoTranscript)
+}
+
+/// `$XDG_DATA_HOME/opencode/opencode.db`, addressed by the `ses_*` id opencode's plugin stamps into
+/// `@agent_session`. There is no walk and no filename to match: one database holds every session,
+/// so without that id there is nothing to open, and the refusal says so rather than guessing.
+fn opencode_db(root: &Path, session: Option<&str>) -> Result<Source, Refusal> {
+    let session = session
+        .filter(|s| !s.is_empty())
+        .ok_or(Refusal::NoTranscript)?;
+    let path = root.join("opencode.db");
+    if !path.is_file() {
+        return Err(Refusal::NoTranscript);
+    }
+    Ok(Source {
+        store: Store::OpenCode,
+        path,
+        session: Some(session.to_string()),
+    })
 }
 
 /// The subagent transcripts beside a claude session, as `(child id, path)`. Claude 2.1.2xx writes
@@ -137,6 +179,7 @@ pub fn child_source(source: &Source, child_id: &str) -> Result<Source, Refusal> 
     Ok(Source {
         store: Store::Claude,
         path: hit.1.clone(),
+        session: None,
     })
 }
 

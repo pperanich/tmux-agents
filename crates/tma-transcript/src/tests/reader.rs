@@ -21,6 +21,7 @@ fn numbered(scratch: &Scratch, name: &str, n: usize, pad: usize) -> Source {
     Source {
         store: Store::Claude,
         path: scratch.write(name, &body),
+        session: None,
     }
 }
 
@@ -79,6 +80,7 @@ fn paging_is_exact_across_multi_event_records() {
     let source = Source {
         store: Store::Claude,
         path: scratch.write("multi.jsonl", &body),
+        session: None,
     };
     let mut reader = Reader::new();
 
@@ -154,6 +156,7 @@ fn a_window_carries_headers_and_a_body_comes_back_by_cursor() {
     let source = Source {
         store: Store::Claude,
         path: scratch.write("long.jsonl", &format!("{body}\n")),
+        session: None,
     };
     let mut reader = Reader::new();
     let page = reader
@@ -185,6 +188,7 @@ fn the_header_budget_is_configurable() {
     let source = Source {
         store: Store::Claude,
         path: scratch.write("tool.jsonl", &format!("{body}\n")),
+        session: None,
     };
     let mut reader = Reader::new();
     for cap in [16usize, 64, 256] {
@@ -327,25 +331,40 @@ fn a_record_caught_mid_write_is_left_alone() {
 #[test]
 fn a_refused_store_names_its_reason() {
     let scratch = Scratch::new("refused");
-    let path = scratch.write("chat.jsonl", "{}\n");
-    let mut reader = Reader::new();
-    for (store, code) in [
-        (Store::Cursor, "store-incomplete"),
-        (Store::OpenCode, "unsupported-store"),
-    ] {
-        let source = Source {
-            store,
-            path: path.clone(),
-        };
-        let err = reader
-            .window(&source, &WindowRequest::new(10))
-            .expect_err("a refusal");
-        assert_eq!(err.code(), code);
-        assert!(
-            err.to_string().contains(store.as_str()),
-            "the refusal must name the store: {err}"
-        );
-    }
+    let source = Source {
+        store: Store::Cursor,
+        path: scratch.write("chat.jsonl", "{}\n"),
+        session: None,
+    };
+    let err = Reader::new()
+        .window(&source, &WindowRequest::new(10))
+        .expect_err("a refusal");
+    assert_eq!(err.code(), "store-incomplete");
+    assert!(
+        err.to_string().contains(Store::Cursor.as_str()),
+        "the refusal must name the store: {err}"
+    );
+}
+
+/// The other half, on a build with the SQLite reader compiled out: an OpenCode pane is refused by
+/// name rather than served an empty window, the same as cursor-agent is.
+#[test]
+#[cfg(not(feature = "opencode"))]
+fn opencode_is_refused_by_name_without_its_reader() {
+    let scratch = Scratch::new("refused-opencode");
+    let source = Source {
+        store: Store::OpenCode,
+        path: scratch.write("opencode.db", ""),
+        session: Some("ses_x".into()),
+    };
+    let err = Reader::new()
+        .window(&source, &WindowRequest::new(10))
+        .expect_err("a refusal");
+    assert_eq!(err.code(), "unsupported-store");
+    assert!(
+        err.to_string().contains(Store::OpenCode.as_str()),
+        "the refusal must name the store: {err}"
+    );
 }
 
 /// Discovery prefers the stamped path, falls back to each store's layout, and refuses by name when

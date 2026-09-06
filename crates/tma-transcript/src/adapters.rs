@@ -13,6 +13,8 @@
 mod claude;
 mod codex;
 mod gemini;
+#[cfg(feature = "opencode")]
+pub(crate) mod opencode;
 mod pi;
 
 use crate::json::Value;
@@ -54,8 +56,8 @@ pub(crate) fn map_record(store: Store, v: &Value) -> (Option<String>, Vec<Mapped
         Store::Codex => (str_at(v, "timestamp"), codex::map(v)),
         Store::Gemini => (gemini::timestamp(v), gemini::map(v)),
         Store::Pi => (str_at(v, "timestamp"), pi::map(v)),
-        // The refused stores never reach an adapter; the reader turns them into a typed refusal
-        // before it opens anything.
+        // Neither store has a record to map here: cursor-agent is refused before anything is
+        // opened, and opencode's unit is a `part` row rather than a line ([`opencode::map_part`]).
         Store::Cursor | Store::OpenCode => (None, Vec::new()),
     }
 }
