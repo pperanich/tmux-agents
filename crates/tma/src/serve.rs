@@ -354,7 +354,14 @@ impl Session {
             &self.config.fold_config(),
             cycle::SeenClear::Deferred,
         )
-        .map_err(|err| err.to_string())?;
+        // A gone server is reported rather than answered with an empty fleet: "nothing is running"
+        // and "I cannot see" are different facts, and only one of them is worth retrying.
+        .map_err(|err| match err {
+            tma_tmux::tmux::TmuxError::ServerGone => {
+                "no tmux server is running on this host".to_string()
+            }
+            err => err.to_string(),
+        })?;
         let mut rows = report.rows;
         repo::annotate_rows(&mut rows);
         if !report.deferred_seen.is_empty() {
