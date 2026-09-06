@@ -35,6 +35,7 @@
 - [Agent coverage](reference/agent-coverage.md)
 - [Manifest schema](reference/manifest-schema.md)
 - [Action manifest schema](reference/action-manifest-schema.md)
+- [The remote wire protocol](reference/protocol.md)
 
 # Explanation
 

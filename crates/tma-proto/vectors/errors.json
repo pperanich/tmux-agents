@@ -1,0 +1,51 @@
+[
+  {
+    "schema": 1,
+    "id": "1",
+    "t": "error",
+    "code": "unsupported-schema",
+    "message": "this host speaks protocol schema 1; the client asked for 2"
+  },
+  {
+    "schema": 1,
+    "id": "2",
+    "t": "error",
+    "code": "bad-request",
+    "message": "a keys action takes no text payload"
+  },
+  {
+    "schema": 1,
+    "id": "3",
+    "t": "error",
+    "code": "not-found",
+    "message": "no such pane"
+  },
+  {
+    "schema": 1,
+    "id": "4",
+    "t": "error",
+    "code": "scope-denied",
+    "message": "this device is not granted act:steer"
+  },
+  {
+    "schema": 1,
+    "id": "5",
+    "t": "error",
+    "code": "unsupported",
+    "message": "opencode keeps its transcript in SQLite; that reader is a separate workstream"
+  },
+  {
+    "schema": 1,
+    "id": "6",
+    "t": "error",
+    "code": "internal",
+    "message": "the host failed"
+  },
+  {
+    "schema": 1,
+    "id": "7",
+    "t": "error",
+    "code": "xxxxxxxxxxxx",
+    "message": "a code this build has never heard of, kept verbatim"
+  }
+]

@@ -1,0 +1,23 @@
+[package]
+name = "tma-proto"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "The tma remote wire protocol: the frames a device and `tma serve` exchange, plus the golden corpus that pins them."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror.workspace = true
+# The one package this crate adds to the workspace. A wire protocol needs a real JSON codec: the
+# hand-rolled writer in tma-runtime emits fixed key sets and has no reader for nested request values.
+serde_json = "1"
+
+[dev-dependencies]
+# A-113's property leg: the round-trip holds for values nobody wrote a vector for.
+proptest.workspace = true

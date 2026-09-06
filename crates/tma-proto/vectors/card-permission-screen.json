@@ -1,0 +1,48 @@
+{
+  "schema": 1,
+  "id": "4",
+  "t": "card",
+  "card": "permission",
+  "pane": "%1",
+  "agent": "claude",
+  "lane": "screen",
+  "options": [
+    {
+      "kind": "allow-once",
+      "name": "1. Yes",
+      "option_id": "1"
+    },
+    {
+      "kind": "allow-always",
+      "name": "2. Yes, and don't ask again this session",
+      "option_id": "2"
+    },
+    {
+      "kind": "reject-once",
+      "name": "3. No, and tell Claude what to do differently",
+      "option_id": "3"
+    },
+    {
+      "kind": "reject-always",
+      "name": "4. No, and don't ask again",
+      "option_id": "4"
+    },
+    {
+      "kind": "xxxxxxxxxxxx",
+      "name": "5. Run Everything",
+      "option_id": "5"
+    }
+  ],
+  "extraction": "exact",
+  "pending_call": {
+    "tool": "xxxx",
+    "input": {
+      "xxxxxxx": "xxxxxxxxxxxxxxxx"
+    },
+    "call_id": "xxxxxxxxxxxx"
+  },
+  "binder": {
+    "expect_episode_ms": 1757030400000,
+    "expect_permission_request": "xxxxxxxxxxxx"
+  }
+}

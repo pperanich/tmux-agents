@@ -1,0 +1,44 @@
+[
+  {
+    "schema": 1,
+    "id": "3",
+    "t": "edge",
+    "at_ms": 1757030462000,
+    "pane": "%1",
+    "agent": "claude",
+    "from": "working",
+    "to": "blocked",
+    "detail": "permission",
+    "locator": "xxxx:1.0",
+    "repo": "xxxxxxxx",
+    "branch": "xxxxxxxxxxxx"
+  },
+  {
+    "schema": 1,
+    "id": "3",
+    "t": "edge",
+    "at_ms": 1757030463000,
+    "pane": "%2",
+    "agent": "codex",
+    "from": "",
+    "to": "idle",
+    "detail": null,
+    "locator": "xxxx:1.1",
+    "repo": null,
+    "branch": null
+  },
+  {
+    "schema": 1,
+    "id": "3",
+    "t": "edge",
+    "at_ms": 1757030464000,
+    "pane": "%3",
+    "agent": "codex",
+    "from": "idle",
+    "to": "",
+    "detail": null,
+    "locator": "xxxx:1.2",
+    "repo": null,
+    "branch": null
+  }
+]
