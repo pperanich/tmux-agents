@@ -567,6 +567,7 @@ impl Session {
                 force: false,
                 args: &[],
                 text: req.text.as_deref(),
+                answers: req.answers.as_deref(),
                 // The `[act] log`'s `source` vocabulary has no device token, and the slot ledger
                 // already records the dispatching device, which ARCHITECTURE §4.2.6 names as the
                 // only place "which device approved this" is answerable.

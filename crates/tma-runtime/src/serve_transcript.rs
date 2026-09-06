@@ -294,6 +294,7 @@ mod tests {
             tx::Source {
                 store: tx::Store::Claude,
                 path,
+                session: None,
             }
         }
     }
@@ -659,6 +660,7 @@ mod tests {
             let source = tx::Source {
                 store,
                 path: scratch.0.join("nothing.jsonl"),
+                session: None,
             };
             let err = window(&mut tx::Reader::new(), &facts(&source), &request(None))
                 .expect_err("this store is refused");
@@ -690,6 +692,7 @@ mod tests {
         let source = tx::Source {
             store: tx::Store::Claude,
             path: scratch.0.join("absent.jsonl"),
+            session: None,
         };
         let err = window(&mut tx::Reader::new(), &facts(&source), &request(None))
             .expect_err("no such file");
