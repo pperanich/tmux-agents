@@ -24,6 +24,32 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   grew can be noticed. And every type and enum variant must appear in a committed vector, so a
   change to the wire shows up as a diff in a JSON file that a reviewer reads, instead of as nothing
   at all. See [The remote wire protocol](docs/reference/protocol.md).
+- **The two builders a serving tma will answer with, as library functions with no loop above them
+  yet.** `tma_runtime::card::build_card` turns one pane's facts into a card, and
+  `tma_runtime::serve_transcript` turns the transcript reader's events, cursors and refusals into
+  the wire's. Both are pure over their inputs, so what a device would be told is testable without a
+  pipe. The rule the card builder turns on is worth stating because it is the one a later change
+  would be tempted to break: an unresolved tool call in a transcript says a call is in flight, which
+  a slow tool, an open prompt and a crashed process all produce, so it is read only to say what a
+  blocked pane is blocked **on**, and a pane the detection cycle calls `working` gets no card
+  whatever its transcript holds. A card built from a parked hook-lane request carries the agent's
+  own tool input as an object and is marked `exact`, because nothing was extracted; every other
+  permission card is marked `failed`, which tells the app to open the pane on the host rather than
+  draw a control over a label nobody parsed. See
+  [The remote wire protocol](docs/reference/protocol.md).
+- **`tma act question_reject`, and three more OpenCode API operations behind it.** OpenCode's
+  `question` tool asks you to pick an option mid-turn, and until now nothing but typing into the
+  pane could answer it: `approve` and `deny` gate on a permission prompt, and a question is not one.
+  The bundled `question_reject` dismisses it over OpenCode's own HTTP surface, and the plugin now
+  forwards `question.asked` so a pane whose screen tma cannot see reports the question too, with the
+  `que_*` id stamped to a new `@agent_question_request`. That id is deliberately its own option
+  rather than a second use of `@agent_permission_request`: the two are different channels with
+  different endpoints, and a permission reply fired at a question id would quote a request the
+  server is not holding. The `[api]` op vocabulary grows `question-reply`, `question-reject` and
+  `interrupt` beside `permission-reply`, all against OpenCode's v1 paths. **Answering** a question
+  is library-only for now: it means quoting the option labels the user picked, one list per
+  question, and `tma act` has no flag that could carry that yet. See
+  [Agent coverage](docs/reference/agent-coverage.md#opencode-api-lane).
 
 ## [0.5.13] - 2026-09-05
 

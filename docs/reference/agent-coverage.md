@@ -131,6 +131,39 @@ key. The bundled `approve`/`deny` actions carry an `[api]` transport for OpenCod
 (`op = "permission-reply"`, `reply = once` / `reject`); the keys path is untouched
 for every other agent. `interrupt` stays keys-everywhere.
 
+**The paths are the v1 plane, and that is the contract.** The `/api/**` family is a
+different set of objects, not a second spelling of these: a v2 permission is created
+by a caller rather than raised by the tool loop, and with a real v1 request pending,
+`/api/permission/request` and `/api/session/{id}/question` answer empty envelopes
+while `/api/session/{id}/permission/{id}` answers 404. So an op pointed at one would
+succeed against nothing, and a test written there would pass vacuously.
+
+### The op vocabulary
+
+| `op` | takes | endpoint | outcome on 2xx |
+|---|---|---|---|
+| `permission-reply` | `reply = once` / `always` / `reject` | `POST {base}/permission/{id}/reply`, `{"reply":"<verdict>"}` | `replied` |
+| `question-reply` | the caller's picked labels | `POST {base}/question/{id}/reply`, `{"answers":[["<label>"]]}` | `replied` |
+| `question-reject` | nothing | `POST {base}/question/{id}/reject`, no body | `replied` |
+| `interrupt` | nothing | `POST {base}/session/{id}/abort`, no body | `sent` |
+
+`replied` and `sent` are a real distinction, not a spelling. A 2xx on a request the
+server was holding open is proof it was answered; a 2xx on a command is proof of
+delivery and nothing more, so an abort earns the same word a keystroke does. A 404
+is `vanished` with reason `request-gone` on either.
+
+`question_reject` is the one bundled action using the question channel:
+`[api] opencode = { op = "question-reject" }`, gated on `blocked/question`. It ships
+with no `[keys]` arm even for OpenCode, because a keystroke fired at the wrong dialog
+row is exactly what the API lane exists to avoid.
+
+**There is deliberately no bundled `question_reply`.** Answering means quoting the
+option labels the user picked, one list per question, and `tma act` has no flag that
+could carry a list of lists of strings. The op exists and the broker sends it, so a
+library caller fires it through `broker::fire` with `FireArgs::answers`; a CLI surface
+for it awaits a flag design. That is the gap: from a terminal today, a question is
+either dismissed with `question_reject` or answered by typing into the pane.
+
 The captured request/response pair (verified against the `@opencode-ai/sdk` v2
 types shipped with OpenCode 1.18.0), the evidence a new operation needs:
 
@@ -327,7 +360,8 @@ to `tma-hook opencode <token>` with the payload on stdin.
 | plugin load / `session.created` | `session-start` | pane registered, state `idle` |
 | `session.status` = busy / `chat.message` / `tool.execute.before` | `user-prompt-submit` | `working` |
 | `session.idle` / `session.status` = idle | `stop` | `idle` |
-| `permission.asked` | `permission-required` | `blocked` |
+| `permission.asked` | `permission-required` | `blocked`, detail `permission` |
+| `question.asked` | `question-required` | `blocked`, detail `question` |
 
 `blocked` and `working` are visible on screen, so `[capture].visible = ["blocked",
 "working"]`. The working anchor is the in-flight status row's `esc interrupt` hint,
@@ -347,12 +381,18 @@ not matched; the tool's own `3. Type your own answer` line is corroboration rath
 required token, since it is appended only while the tool's `custom` flag is not false.
 
 **`tma act approve` does not answer a question.** `approve` and `deny` gate on `detail =
-permission`, so a question pane simply offers neither, which is the intended result: for
-OpenCode those two POST a `permission-reply` for a pending request id, and a question is
-not a pending permission. Answering one means typing into the pane, or a `question-reply`
-lane on the API that does not exist yet. It is also a screen read only: the bundled plugin
-forwards no question event, so a pane whose screen tma cannot see, a remote shell, reports
-nothing here even with hooks wired.
+permission`, so a question pane offers neither, which is the intended result: for OpenCode
+those two POST a `permission-reply` for a pending request id, and a question is not a
+pending permission. `question_reject` is what answers one, over the API lane above.
+
+It is no longer a screen read only. The plugin forwards `question.asked` as
+`question-required`, so a pane whose screen tma cannot see, a remote shell, reports the
+question too. The `que_*` id rides that edge as `question_id` and is stamped to
+`@agent_question_request` under the session-ownership filter, cleared on the working/idle
+edge or on `question.replied` / `question.answered` / `question.rejected`. It is a
+**separate option** from `@agent_permission_request` and carries a separate payload key,
+because the two are different channels: a permission reply fired at a question id would
+quote a request the server is not holding, and the reverse.
 
 The OSC title is not usable. The original audit found it static (`OpenCode`); on 1.18.18
 it is state-bearing (`OC | Running <command>`) but goes stale, still reading `Running`
@@ -366,7 +406,12 @@ sit at `?` until the first message. The load-time fire carries no session id —
 `permission.updated` is accepted as a synonym for `permission.asked`. The
 `@opencode-ai/sdk` typings shipped alongside 1.18.18 name only the former while the
 1.18.18 binary contains only the latter, so the plugin answers to both and a rename
-lands inert instead of silently dropping `blocked`.
+lands inert instead of silently dropping `blocked`. The question channel is wired the
+same way and for the same reason: `question.updated` is accepted beside
+`question.asked`, and all three of `question.replied`, `question.answered` and
+`question.rejected` clear the stamp. The published event schema spells the end
+`question.replied`; a second source spells it `question.answered`. Rather than pick,
+the plugin answers to both, and whichever the shipped binary does not emit is inert.
 
 Two further event-bus signals were captured live (driving `opencode serve`'s
 `/event` SSE stream through the HTTP API, 2026-07-29) and deliberately left both
