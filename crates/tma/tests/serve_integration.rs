@@ -287,7 +287,14 @@ impl ServeHarness {
 
     fn ask(&mut self, frame: &RequestFrame) -> Value {
         self.write_frame(frame);
-        self.next()
+        // Stream frames carry their subscribe's id and interleave with replies; the reply to this
+        // request is the frame that echoes its id. Skipped frames still land in the transcript.
+        loop {
+            let got = self.next();
+            if got["id"] == frame.id.as_str() {
+                return got;
+            }
+        }
     }
 
     /// The handshake, asserted successful, returning the `hello` frame.
@@ -616,7 +623,10 @@ fn no_frame_of_a_whole_session_carries_a_pane_title() {
     let s = scratch("serve_title");
     s.write_config("[serve]\nreconcile_interval_ms = 250\n");
     let pane = s.new_pane();
-    stamp_blocked_claude(&s, &pane);
+    // Held stamps and a manifest naming the panes' process, so the fixture rows survive cycles
+    // and the appearing pane is a real edge rather than a flip of a stamp nobody owns.
+    agent_manifest_for(&s, &process_names_of(&s, &pane));
+    stamp_blocked_claude_held(&s, &pane);
     stamp_transcript(&s, &pane, "session.jsonl", None);
     let nonce = "zqxjkvbnonce7713";
     let title = format!("\u{202e}{nonce}");
@@ -630,6 +640,8 @@ fn no_frame_of_a_whole_session_carries_a_pane_title() {
     h.hello("SHA256:phone");
     h.ask(&snapshot_request("1"));
     assert_eq!(h.ask(&subscribe_request("2"))["t"], "ack");
+    // Let the stream take its baseline before the second pane appears (three intervals).
+    std::thread::sleep(Duration::from_millis(750));
 
     // A second stamped pane, titled the same way, so an edge frame is built from a row whose title
     // is the thing under test.
@@ -649,7 +661,7 @@ fn no_frame_of_a_whole_session_carries_a_pane_title() {
         .tmux(&["select-pane", "-t", &second, "-T", &title])
         .status
         .success());
-    stamp_blocked_claude(&s, &second);
+    stamp_blocked_claude_held(&s, &second);
 
     h.ask(&dispatch_request("3", dispatch("t1", &pane, "approve")));
     h.ask(&RequestFrame::new(
