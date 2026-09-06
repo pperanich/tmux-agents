@@ -13,6 +13,14 @@
 // `/permission/{requestID}/reply` instead of sending a keystroke. `permission.replied` forwards a
 // clear so a spent id never reads as a pending request.
 //
+// Questions ride a second channel with the same shape: `question.asked` carries the `que_*` id as
+// `question_id` (a DIFFERENT key from `request_id`, so the intake's two effects cannot read each
+// other's edge, and a permission reply can never be fired at a question), and the end of a question
+// forwards `question-replied`. The bus name for that end is spelled differently by different
+// sources: the control audit read `question.replied` off the published event schema and the roadmap
+// wrote `question.answered`. Both are accepted, the same way `permission.updated` is accepted
+// beside `permission.asked`, so whichever the shipped binary emits lands and the other is inert.
+//
 // The `@@TMA_HOOK@@` path is substituted with the resolved wrapper at install time
 // (diff-before-write, so re-install is byte-identical).
 //
@@ -81,6 +89,15 @@ function onEvent(event) {
       break;
     case "permission.replied":
       fire("permission-replied");
+      break;
+    case "question.asked":
+    case "question.updated":
+      fire("question-required", { question_id: props.id || props.requestID });
+      break;
+    case "question.replied":
+    case "question.answered":
+    case "question.rejected":
+      fire("question-replied");
       break;
   }
 }

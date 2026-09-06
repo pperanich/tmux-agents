@@ -178,6 +178,8 @@ pub(crate) fn run(opts: ActOpts) -> ExitCode {
                 force: opts.force,
                 args: &opts.args,
                 text: opts.text.as_deref(),
+                // No CLI flag carries an answer set yet; a `question-reply` is library-only.
+                answers: None,
                 audit,
                 expect_episode_ms: opts.expect_episode_ms,
                 expect_permission_request: opts.expect_permission_request.as_deref(),
@@ -711,9 +713,13 @@ fn render_dry_run(d: &broker::DryRun) -> String {
         Effect::Keys(seq) => format!("keys: {}", seq.join(" ")),
         Effect::Api {
             endpoint,
+            path,
             op,
             reply,
-        } => format!("api: POST {endpoint}/permission/<id>/reply  op={op} reply={reply}"),
+        } => match reply {
+            Some(r) => format!("api: POST {endpoint}{path}  op={op} reply={r}"),
+            None => format!("api: POST {endpoint}{path}  op={op}"),
+        },
         Effect::Hook { request, verdict } => {
             format!("hook: verdict={verdict} for the held request {request}")
         }

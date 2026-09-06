@@ -9,6 +9,7 @@ use tma_core::{ActionManifest, AgentState, Manifest, TextRefusal};
 
 const APPROVE: &str = include_str!("../actions/approve.toml");
 const DENY: &str = include_str!("../actions/deny.toml");
+const QUESTION_REJECT: &str = include_str!("../actions/question_reject.toml");
 const INTERRUPT: &str = include_str!("../actions/interrupt.toml");
 const COMPACT: &str = include_str!("../actions/compact.toml");
 const STEER: &str = include_str!("../actions/steer.toml");
@@ -319,6 +320,45 @@ fn every_declared_dialog_has_an_answer_and_every_working_agent_an_interrupt() {
             interrupt.applies_to(name),
             claims_state(&m, AgentState::Working),
             "{name}: interrupt must cover exactly the agents that have a working state"
+        );
+    }
+}
+
+/// The one bundled answer to a question, and the shape of it: OpenCode only, over the API, gated
+/// on `blocked/question` and on nothing else. Its `[api]` entry carries no `reply` verdict, because
+/// a dismissal grants nothing and the endpoint takes no body.
+#[test]
+fn question_reject_answers_only_an_opencode_question() {
+    let a = action("question_reject", QUESTION_REJECT);
+    assert_eq!(a.kind, ActionKind::Keys);
+    assert!(
+        a.keys.is_empty(),
+        "no keystroke arm: a key fired at the wrong dialog row is what the API lane avoids"
+    );
+    let transport = a.api_for("opencode").expect("opencode answers over HTTP");
+    assert_eq!(transport.op.token(), "question-reject");
+    assert_eq!(transport.reply, None);
+
+    assert_eq!(
+        a.evaluate_gate(&GateInput {
+            detail: Some("question"),
+            ..row("opencode", AgentState::Blocked)
+        }),
+        GateOutcome::Fireable
+    );
+    // Not a permission, not another agent, not a settled pane.
+    for (agent, state, detail) in [
+        ("opencode", AgentState::Blocked, Some("permission")),
+        ("opencode", AgentState::Idle, None),
+        ("claude", AgentState::Blocked, Some("question")),
+    ] {
+        assert_ne!(
+            a.evaluate_gate(&GateInput {
+                detail,
+                ..row(agent, state)
+            }),
+            GateOutcome::Fireable,
+            "{agent}/{state:?}/{detail:?} must not resolve question_reject"
         );
     }
 }

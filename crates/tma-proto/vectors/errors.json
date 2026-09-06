@@ -24,26 +24,33 @@
     "schema": 1,
     "id": "4",
     "t": "error",
+    "code": "cursor-invalid",
+    "message": "this cursor no longer addresses the file (it was rewritten, truncated or replaced)"
+  },
+  {
+    "schema": 1,
+    "id": "5",
+    "t": "error",
     "code": "scope-denied",
     "message": "this device is not granted act:steer"
   },
   {
     "schema": 1,
-    "id": "5",
+    "id": "6",
     "t": "error",
     "code": "unsupported",
     "message": "opencode keeps its transcript in SQLite; that reader is a separate workstream"
   },
   {
     "schema": 1,
-    "id": "6",
+    "id": "7",
     "t": "error",
     "code": "internal",
     "message": "the host failed"
   },
   {
     "schema": 1,
-    "id": "7",
+    "id": "8",
     "t": "error",
     "code": "xxxxxxxxxxxx",
     "message": "a code this build has never heard of, kept verbatim"

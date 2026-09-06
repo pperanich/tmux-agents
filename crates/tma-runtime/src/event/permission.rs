@@ -4,7 +4,7 @@ use tma_core::{AgentState, StampedState};
 use tma_tmux::tmux::Tmux;
 
 use super::mapping::{json_object_field, json_string_field, EventPlan};
-use super::PERMISSION_REPLIED;
+use super::{PERMISSION_REPLIED, QUESTION_REPLIED};
 
 /// Byte cap on [`opt::PENDING_SUMMARY`]. A pane option other people's status lines interpolate, so
 /// it stays short enough to sit in one; the `…` that marks a truncation is inside the budget.
@@ -43,6 +43,40 @@ pub(crate) fn permission_request_effect(
     match plan {
         EventPlan::Stamp { state, .. } => match state {
             AgentState::Blocked => match json_string_field(payload, "request_id") {
+                Some(id) if !id.is_empty() => PermReq::Set(id),
+                _ => PermReq::None,
+            },
+            AgentState::Working | AgentState::Idle => PermReq::Clear,
+            AgentState::Unknown => PermReq::None,
+        },
+        _ => PermReq::None,
+    }
+}
+
+/// The pure question-request decision, the same shape as [`permission_request_effect`] over a
+/// different channel: a committed blocked stamp carrying a `question_id` sets, a committed
+/// working/idle transition or a `question.replied`/`question.rejected` edge clears.
+///
+/// The two ids never share an option. They address different endpoints, so a permission reply
+/// fired at a question id would quote a request the server is not holding, and the payload key is
+/// what keeps them apart: the plugin sends `request_id` for a permission and `question_id` for a
+/// question, so neither effect can read the other's edge.
+pub(crate) fn question_request_effect(
+    kind: &str,
+    plan: &EventPlan,
+    stored_owner: Option<&str>,
+    event_session: Option<&str>,
+    payload: &str,
+) -> PermReq {
+    if kind == QUESTION_REPLIED {
+        return match (stored_owner, event_session) {
+            (Some(owner), Some(ev)) if owner != ev => PermReq::None,
+            _ => PermReq::Clear,
+        };
+    }
+    match plan {
+        EventPlan::Stamp { state, .. } => match state {
+            AgentState::Blocked => match json_string_field(payload, "question_id") {
                 Some(id) if !id.is_empty() => PermReq::Set(id),
                 _ => PermReq::None,
             },
@@ -330,6 +364,27 @@ pub(super) fn apply_pending_call(
         PendingCall::None => return false,
     };
     let _ = tmux.apply(&cmds);
+    true
+}
+
+/// Apply the [`question_request_effect`] to the pane's `@agent_question_request` option. Returns
+/// whether a write was issued, on the same terms as [`apply_permission_request`].
+pub(super) fn apply_question_request(
+    tmux: &Tmux,
+    pane: &str,
+    kind: &str,
+    plan: &EventPlan,
+    stored: Option<&StampedState>,
+    event_session: Option<&str>,
+    payload: &str,
+) -> bool {
+    let owner = stored.and_then(|s| s.session.as_deref());
+    let cmd = match question_request_effect(kind, plan, owner, event_session, payload) {
+        PermReq::Set(id) => render::set_pane_option(pane, opt::QUESTION_REQUEST, &id),
+        PermReq::Clear => render::unset_pane_option(pane, opt::QUESTION_REQUEST),
+        PermReq::None => return false,
+    };
+    let _ = tmux.apply(&[cmd]);
     true
 }
 

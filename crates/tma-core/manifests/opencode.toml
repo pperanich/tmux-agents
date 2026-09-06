@@ -55,6 +55,15 @@ turn_end = true
 event = "permission-required"
 claim = { state = "blocked", detail = "permission" }
 
+# question.asked: the `question` tool is asking the human to pick an option mid-turn. The same
+# `blocked` the screen rule below reads off the dialog footer, arriving as an event instead, so a
+# pane whose screen tma cannot see (a remote shell) now reports it too. The detail stays `question`
+# rather than `permission`: nothing is being granted, and `approve`/`deny` must not resolve here.
+# The plugin also carries the `que_*` id on this edge, which is what `question_reject` answers.
+[[hooks.map]]
+event = "question-required"
+claim = { state = "blocked", detail = "question" }
+
 # Capture fallback: `blocked` and `working`. The blocked dialog is the state a hookless/quiet
 # pane most needs (a permission prompt stops output, so the daemon's quiet-edge capture lands
 # right on it); `working` was added 2026-08-19 (see the rule below).

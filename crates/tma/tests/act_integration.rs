@@ -44,14 +44,29 @@ fn stamp_blocked_opencode(s: &Scratch, pane: &str, request_id: &str, endpoint: &
 
 /// A one-shot HTTP/1.1 server on `127.0.0.1:0` that answers `status_line` to the first request;
 /// returns `(http_base_url, join_handle)`.
+///
+/// The accept is bounded. A fire that refuses before the HTTP call makes no connection at all, and
+/// an unbounded accept would turn that into a suite that hangs rather than a test that fails.
 fn mock_http(status_line: &'static str) -> (String, std::thread::JoinHandle<()>) {
     use std::io::{Read, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base = format!("http://{}", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
     let handle = std::thread::spawn(move || {
-        let Ok((mut stream, _)) = listener.accept() else {
-            return;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut stream = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    if std::time::Instant::now() > deadline {
+                        return; // nobody called: the test's own assertion says why
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(10));
+                }
+                Err(_) => return,
+            }
         };
+        stream.set_nonblocking(false).unwrap();
         let _ = stream.read(&mut [0u8; 1024]);
         let _ = stream.write_all(
             format!("{status_line}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").as_bytes(),
@@ -310,6 +325,82 @@ fn api_404_is_request_gone_and_never_blames_the_pane() {
     );
     // The pane really is still there, so the assertion above is not vacuously true.
     assert_eq!(s.pane_option(&pane, "@agent_name"), "opencode");
+}
+
+/// A-257 over the CLI: an api-transport dispatch receipts `replied`, where a keys dispatch
+/// receipts `sent`. The question channel is its own: `question_reject` spends
+/// `@agent_question_request` and leaves the permission id, which answers a different endpoint,
+/// exactly where it was.
+#[test]
+fn a_dismissed_question_replies_and_spends_only_the_question_id() {
+    if !have_tmux() {
+        return;
+    }
+    let (endpoint, server) = mock_http("HTTP/1.1 200 OK");
+    let s = Scratch::new("act_question_reject");
+    let pane = s.new_shell_pane();
+    stamp_blocked_opencode(&s, &pane, "per_untouched", &endpoint);
+    s.set_opt(&pane, "@agent_detail", "question");
+    s.set_opt(&pane, "@agent_question_request", "que_7f3a");
+
+    let out = act(&s, &["question_reject", "--pane", &pane, "--json"]);
+    let _ = server.join();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "the dismissal landed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains(r#""outcome":"replied""#),
+        "an api-transport dispatch is `replied`, not `sent`: {stdout}"
+    );
+    assert_eq!(
+        s.pane_option(&pane, "@agent_question_request"),
+        "",
+        "a spent question id must not outlive its dismissal"
+    );
+    assert_eq!(
+        s.pane_option(&pane, "@agent_permission_request"),
+        "per_untouched",
+        "the permission channel is a different request and is left alone"
+    );
+}
+
+/// `approve` and `deny` gate on `detail = permission`, so neither resolves at a question, and
+/// `question_reject` is the only bundled answer to one. The refusal is the ordinary gate, before
+/// any HTTP: a permission reply fired at a question would quote a request nothing is holding.
+#[test]
+fn approve_does_not_answer_a_question_and_question_reject_does_not_answer_a_permission() {
+    if !have_tmux() {
+        return;
+    }
+    let s = Scratch::new("act_question_gate");
+    let pane = s.new_shell_pane();
+    stamp_blocked_opencode(&s, &pane, "per_live", "http://127.0.0.1:1");
+    s.set_opt(&pane, "@agent_detail", "question");
+    s.set_opt(&pane, "@agent_question_request", "que_7f3a");
+    for name in ["approve", "deny"] {
+        let out = act(&s, &[name, "--pane", &pane, "--json"]);
+        assert_eq!(
+            out.status.code(),
+            Some(4),
+            "{name} must refuse at a question"
+        );
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains(r#""reason":"gated""#),
+            "{name} refuses on the gate, before any request id is read"
+        );
+    }
+
+    s.set_opt(&pane, "@agent_detail", "permission");
+    let out = act(&s, &["question_reject", "--pane", &pane, "--json"]);
+    assert_eq!(out.status.code(), Some(4));
+    assert!(
+        String::from_utf8_lossy(&out.stdout).contains(r#""reason":"gated""#),
+        "and the reverse: a question dismissal must not answer a permission prompt"
+    );
 }
 
 /// A 2xx reply spends the pending request, so tma clears `@agent_permission_request` itself rather

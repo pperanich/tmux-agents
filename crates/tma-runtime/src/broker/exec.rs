@@ -327,6 +327,7 @@ mod tests {
             context_pct: None,
             context_covered: false,
             permission_request: None,
+            question_request: None,
             api_endpoint: None,
             episode_ms: 0,
             pending_tool: None,

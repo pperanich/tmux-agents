@@ -1,6 +1,6 @@
 use tma_core::render;
 use tma_core::stamp::opt;
-use tma_core::{AgentState, ApiReply, FoldConfig, HookVerdict, ReadResult, StampedState};
+use tma_core::{AgentState, FoldConfig, HookVerdict, ReadResult, StampedState};
 
 use tma_tmux::lock::{self, Acquire, LockError};
 use tma_tmux::stamp;
@@ -98,19 +98,11 @@ impl BrokerIo for TmuxBroker<'_> {
         self.tmux.send_text(pane_id, prefix, text, suffix)
     }
 
-    fn api_reply(
-        &self,
-        endpoint: &str,
-        request_id: &str,
-        reply: ApiReply,
-        timeout_ms: u64,
-    ) -> HttpOutcome {
-        let path = format!("/permission/{request_id}/reply");
-        let body = format!("{{\"reply\":\"{}\"}}", reply.token());
+    fn api_call(&self, endpoint: &str, path: &str, body: &str, timeout_ms: u64) -> HttpOutcome {
         http::post_json(
             endpoint,
-            &path,
-            &body,
+            path,
+            body,
             std::time::Duration::from_millis(timeout_ms),
         )
     }
@@ -137,6 +129,12 @@ impl BrokerIo for TmuxBroker<'_> {
         let _ = self
             .tmux
             .apply(&[render::unset_pane_option(pane_id, opt::PERMISSION_REQUEST)]);
+    }
+
+    fn clear_question_request(&self, pane_id: &str) {
+        let _ = self
+            .tmux
+            .apply(&[render::unset_pane_option(pane_id, opt::QUESTION_REQUEST)]);
     }
 
     fn acquire(
@@ -210,6 +208,7 @@ fn build_facts(
         // request id lands in a raw HTTP request path and the endpoint in its start line, so a
         // hostile stamp with whitespace/control bytes must decode as absent, never as smuggled bytes.
         permission_request: opt(opt::PERMISSION_REQUEST).filter(|s| valid_session(s)),
+        question_request: opt(opt::QUESTION_REQUEST).filter(|s| valid_session(s)),
         api_endpoint: api_endpoint.filter(|e| valid_endpoint(e)),
         // The same instant `AgentRow::episode_at` reports: the turn end wins inside an unchanged
         // idle run, where `@agent_since` alone would pin the episode to the first completion.
