@@ -899,8 +899,9 @@ changes](../how-to/stream-state-changes.md#log-every-transition-to-jsonl).
 
 Read what the agent in a pane has been writing. Every state surface above tells
 you *that* a pane is blocked; this one tells you what it was doing when it
-stopped, out of the agent's own transcript file. The events are normalized
-across stores, so a claude pane and a codex pane answer in the same vocabulary.
+stopped, out of the agent's own transcript store. The events are normalized
+across stores, so a claude pane and an opencode pane answer in the same
+vocabulary.
 
 ```
 Usage: tma transcript --pane <ID> [OPTIONS]
@@ -933,15 +934,25 @@ The `older` line goes to stderr, so a pipe gets only the events.
 
 ### Which agents are served
 
-Four stores are read: **claude**, **codex**, **gemini** and **pi**.
-**cursor-agent** and **OpenCode** are refused by name rather than served empty;
-[Agent transcript stores](../explanation/transcript-stores.md) is the argument
-for why, and what else the reader cannot tell you.
+Five stores are read: **claude**, **codex**, **gemini**, **pi** and
+**OpenCode**. **cursor-agent** is refused by name rather than served empty
+(`store-incomplete`); [Agent transcript
+stores](../explanation/transcript-stores.md) is the argument for why, and what
+else the reader cannot tell you.
 
 Discovery prefers the pane's `@agent_transcript` stamp (the path the agent's own
 hook payload named) and falls back to walking the store's layout from
 `@agent_session`. A pane detected from the screen alone, with no session id, has
 neither, and is refused.
+
+OpenCode takes neither path: one SQLite database
+(`$XDG_DATA_HOME/opencode/opencode.db`, or `~/.local/share/opencode/opencode.db`)
+holds every session, so the `ses_*` id in `@agent_session` is the whole of the
+lookup and a pane without one is refused. The database is opened read-only and
+kept open, never written and never checkpointed, and reading it needs no
+`sqlite3` on your `PATH`: tma links SQLite rather than driving the command. A
+build of the crate without its `opencode` feature refuses those panes with
+`unsupported-store` instead; the released binary has it on.
 
 ### Paging
 
@@ -956,7 +967,10 @@ Cursors are opaque. They encode the file's identity and its size when the cursor
 was minted, so a cursor into a file that has since been compacted, truncated or
 replaced is refused (`cursor-invalid`) rather than silently reinterpreted
 against whatever now sits at that offset. Re-request without `--before` to get a
-fresh window.
+fresh window. An OpenCode cursor addresses a message timestamp and an index
+inside it rather than a byte offset, since a database shrinks on checkpoint
+without losing a row; it is refused the same way when it belongs to a different
+database.
 
 Three budgets bound one call: at most 1 MiB read from disk, at most 32 KiB of
 headers returned, and at most 256 bytes per string. When one of them bites

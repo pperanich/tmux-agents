@@ -10,6 +10,18 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **`tma transcript` now serves OpenCode panes, whose conversation is a SQLite database rather than
+  a file.** The `ses_*` id on the pane opens `~/.local/share/opencode/opencode.db` read-only, once,
+  and that connection is held for the life of the reader: a reader that reconnects on every poll
+  made 42 of 400 of the writing agent's own commits fail with `database is locked`, and a held one
+  made none fail. History comes from `message` and `part`, the newer `event` log is the live tail,
+  and a tool call watched from `running` to `completed` is one event whose status advanced rather
+  than three, because in this store a call and its result are the same row mutating in place.
+  SQLite is linked in rather than shelled out to, so an OpenCode transcript needs no `sqlite3` on
+  `PATH`. See [Agent transcript stores](docs/explanation/transcript-stores.md).
+
 ## [0.5.13] - 2026-09-05
 
 ### Added
