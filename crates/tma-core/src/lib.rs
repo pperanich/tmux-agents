@@ -26,9 +26,9 @@ pub mod telemetry;
 pub mod verdict;
 
 pub use action::{
-    ActionError, ActionKind, ActionManifest, ApiOp, ApiReply, ContextKeys, GateInput, GateOutcome,
-    HookTransport, HookVerdict, RefusalReason, Requirement, TextRefusal, TextTransport, When,
-    DEFAULT_SIGILS, TEXT_MAX_BYTES,
+    ActionError, ActionKind, ActionManifest, ApiOp, ApiReply, ApiTransport, ContextKeys, GateInput,
+    GateOutcome, HookTransport, HookVerdict, RefusalReason, Requirement, TextRefusal,
+    TextTransport, When, DEFAULT_SIGILS, TEXT_MAX_BYTES,
 };
 pub use edge::{diff_rows, Edge};
 pub use engine::{EngineError, Evaluation, RuleEngine, RuleReport};
@@ -49,8 +49,8 @@ pub use snapshot::{PaneSnapshot, ProcInfo};
 pub use stamp::{ReadResult, StampedState};
 pub use state::{AgentState, Detail, GrammarError};
 pub use telemetry::{
-    claude_statusline_model, codex_rollout_model, format_cost_usd, hook_payload_model,
-    parse_context, parse_usage, ContextReport, QuotaReport, QuotaWindow, QuotaWindowReading,
-    UsageReport,
+    claude_statusline_model, codex_rollout_model, context_format_carries_window, format_cost_usd,
+    hook_payload_model, parse_context, parse_usage, ContextReport, QuotaReport, QuotaWindow,
+    QuotaWindowReading, UsageReport,
 };
 pub use verdict::{Verdict, WinningEvidence, WriteAction, WritePlan};

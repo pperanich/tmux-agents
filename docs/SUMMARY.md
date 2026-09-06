@@ -14,6 +14,7 @@
 - [Add a custom agent](how-to/add-a-custom-agent.md)
 - [Run an agent in a container](how-to/agents-in-containers.md)
 - [Run tma over ssh](how-to/run-tma-over-ssh.md)
+- [Serve tma over ssh](how-to/serve-over-ssh.md)
 - [Set up notifications](how-to/notifications.md)
 - [Author a custom action](how-to/custom-actions.md)
 - [Block a script on agent state](how-to/block-a-script-on-agent-state.md)
@@ -35,6 +36,7 @@
 - [Agent coverage](reference/agent-coverage.md)
 - [Manifest schema](reference/manifest-schema.md)
 - [Action manifest schema](reference/action-manifest-schema.md)
+- [The remote wire protocol](reference/protocol.md)
 
 # Explanation
 

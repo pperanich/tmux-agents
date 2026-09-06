@@ -69,7 +69,7 @@ enum HookClass {
 impl HookClass {
     fn from_wiring(w: &HookWiring) -> HookClass {
         match w {
-            HookWiring::Wired => HookClass::Wired,
+            HookWiring::Wired | HookWiring::WiredVia(_) => HookClass::Wired,
             HookWiring::Incomplete(_) => HookClass::Partial,
             HookWiring::NotInstalled => HookClass::NotInstalled,
             HookWiring::Hookless => HookClass::Hookless,
@@ -150,7 +150,7 @@ fn tier_reason_str(tier: Tier, agent: &str, daemon_alive: bool) -> Option<String
             "hooks not installed for {agent} (run `tma install-hooks {agent}`)"
         ))),
         TierReason::Hookless => Some(note(format!(
-            "{agent} is hookless — screen-detection only, so no hook tier"
+            "{agent} is hookless: screen-detection only, so no hook tier"
         ))),
         TierReason::NoAdapter => Some(note(format!(
             "no install-hooks adapter for {agent}; wire it by hand"
@@ -167,6 +167,21 @@ fn expected_tier(hooks: HookClass) -> u8 {
         HookClass::Wired | HookClass::Partial | HookClass::NotInstalled => 2,
         HookClass::Hookless | HookClass::NoAdapter => 1,
     }
+}
+
+/// Whether an `@agent_model` no `[telemetry.windows]` entry names is worth reporting for this
+/// agent: only where its context channel would have to size a gauge from that table.
+///
+/// Every shipped channel computes its percent from a window its own payload carries (claude's
+/// statusline, codex's rollout, pi's and Cursor's pushes), so for those the table is never read and
+/// the line was pure noise on names like `claude-fable-5-1`. An agent with no context channel has no
+/// gauge to size either. The lint stays for a channel that would genuinely need the entry.
+fn window_lint_applies(manifest: &tma_core::Manifest) -> bool {
+    manifest
+        .telemetry
+        .as_ref()
+        .and_then(|t| t.context.as_ref())
+        .is_some_and(|c| !tma_core::context_format_carries_window(&c.format))
 }
 
 /// Whether a running daemon's recorded build version matches this CLI's. `None` when there is
@@ -223,9 +238,10 @@ struct AgentReport {
     /// The stamped `@agent_model`, `None` when the file-tail intake read no model. Best-effort
     /// label, never load-bearing.
     model: Option<String>,
-    /// Whether `[telemetry.windows]` names `model`, `None` when there is no model to check.
-    /// Bookkeeping, not a warning: no gauge reads that table (every context channel computes its
-    /// percent from a window its own payload carries), so an unrecognized model costs nothing.
+    /// Whether `[telemetry.windows]` names `model`. `None` when there is no model, and also when
+    /// this pane's context channel carries its own window, which every shipped one does: the table
+    /// is then never read, so naming the model would be a lint about nothing ([`window_lint_applies`]).
+    /// Where it IS `Some(false)` it is still bookkeeping rather than a warning.
     window_covered: Option<bool>,
     /// The API endpoint verdict for a pane with a pending `@agent_permission_request`:
     /// `Some(true)` request + resolvable endpoint, `Some(false)` request but no endpoint (the
@@ -639,13 +655,17 @@ fn gather(
             None => (None, None, None),
         };
 
-        // Best-effort model label, reported with whether `[telemetry.windows]` names it.
+        // Best-effort model label, checked against `[telemetry.windows]` only where a gauge would
+        // read that table (see `window_lint_applies`); elsewhere the name is reported bare.
         let model = rec
             .options
             .get(opt::MODEL)
             .filter(|v| !v.is_empty())
             .cloned();
-        let window_covered = model.as_deref().map(|m| windows.knows(m));
+        let window_covered = model
+            .as_deref()
+            .filter(|_| window_lint_applies(&id.manifest.manifest))
+            .map(|m| windows.knows(m));
 
         // A pending permission request needs a resolvable endpoint (pane stamp or config
         // fallback) for the broker's API lane; flag one that has none.
@@ -927,6 +947,44 @@ mod tests {
         assert!(
             unreachable_process_names(&names(&["my-long-agent-c", "my-long-agent-cli"])).is_empty()
         );
+    }
+
+    /// The `[telemetry.windows]` line is a lint about sizing a gauge, so it only belongs where a
+    /// gauge would read that table. Every shipped context channel carries its own window, which is
+    /// why a stamped `claude-fable-5-1` used to draw an "unrecognized" line with nothing behind it.
+    #[test]
+    fn an_unrecognized_model_is_reported_only_where_the_window_table_is_load_bearing() {
+        let bundled = |body: &str, file: &str| tma_core::Manifest::parse(body, file).unwrap();
+
+        // The shipped shape: a channel whose payload carries the window it divides by.
+        for (body, file) in [
+            (
+                include_str!("../../tma-core/manifests/claude.toml"),
+                "claude.toml",
+            ),
+            (
+                include_str!("../../tma-core/manifests/codex.toml"),
+                "codex.toml",
+            ),
+        ] {
+            let m = bundled(body, file);
+            assert!(
+                m.covers_context(),
+                "{file} declares a context channel, or this proves nothing"
+            );
+            assert!(!window_lint_applies(&m), "{file}: window from the payload");
+        }
+
+        // No context channel at all: no gauge, so no table could size one.
+        let base = "min_engine_version = \"0.1\"\n[identity]\nprocess_names = [\"x\"]\n\
+                    [capture]\nvisible = []\n";
+        assert!(!window_lint_applies(&bundled(base, "bare.toml")));
+
+        // A channel whose format carries no window of its own: the one shape the table is for.
+        let raw = format!(
+            "{base}[telemetry.context]\nchannel = \"screen\"\nformat = \"raw-token-count\"\n"
+        );
+        assert!(window_lint_applies(&bundled(&raw, "raw.toml")));
     }
 
     /// The mouse pairing is only a warning when both halves disagree: installed bindings on a server

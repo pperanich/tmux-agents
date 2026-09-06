@@ -279,9 +279,20 @@ whole tool for a single-user setup.
 - To cover more agents, or agents `tma` does not ship a mapping for, see
   [install-agent-hooks](../how-to/install-agent-hooks.md) and
   [add-a-custom-agent](../how-to/add-a-custom-agent.md).
+- To answer a blocked pane instead of only finding it, see [`tma
+  act`](../reference/cli.md#tma-act): `approve`, `deny`, `interrupt`, and
+  [`steer --text`](../reference/cli.md#steering---text) for a line of your own.
+  On a claude pane the answer rides [the hook reply
+  lane](../how-to/install-agent-hooks.md#answer-claudes-prompts-over-the-hook-lane),
+  on by default, so no keystroke lands in the pane at all.
+- To see what an agent was doing when it stopped, read its own transcript with
+  [`tma transcript`](../reference/cli.md#tma-transcript).
+- To reach a pane from a terminal that is not a tmux client yet, such as a fresh
+  ssh session, use [`tma attach --pane`](../reference/cli.md#tma-attach).
 - To get desktop notifications and blocked-agent alerts even when you are looking
   elsewhere, see [notifications](../how-to/notifications.md) and
-  [run-the-daemon](../how-to/run-the-daemon.md).
+  [run-the-daemon](../how-to/run-the-daemon.md). `[notify] stall` covers the other
+  failure, a pane that has been working far longer than it should be.
 - To understand *how* `tma` decides a pane is blocked, and why it trusts hooks
   over the screen, read [the detection model](../explanation/detection-model.md).
 - For the crate layout, the tier story, and where state actually lives, read

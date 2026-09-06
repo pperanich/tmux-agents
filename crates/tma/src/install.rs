@@ -15,8 +15,15 @@ use serde::{Deserialize, Serialize};
 
 use crate::cli_support;
 use crate::manifests::LoadedManifest;
-use crate::tmux::{DepartureKind, Tmux};
+use crate::tmux::Tmux;
 use json_value::Value;
+// The hook command, its ownership/drift predicates, and the per-server install record live in
+// runtime: the daemon re-arms a wiped hook at startup and has to write the identical command.
+pub(crate) use tma_runtime::tmux_hooks::HOOK_KIND_ENV;
+use tma_runtime::tmux_hooks::{
+    clear_attention_command, hook_command_current, hooks_state_path, is_ours, read_hooks_state,
+    write_hooks_state, HooksState, TmuxHookRecord, LEGACY_HOOKS_STATE,
+};
 
 mod adapters;
 mod claude_json;
@@ -136,19 +143,6 @@ pub(crate) struct InstallOpts {
     /// lands in front of a resident daemon of another build. `None` suppresses the offer, which is
     /// what `tma init` passes: it wires each agent in turn and makes the offer once itself.
     pub launch_daemon: Option<crate::cli_support::DaemonLauncher>,
-}
-
-/// Recorded tmux-hook install metadata, persisted to `hooks-state.toml`.
-#[derive(Debug, Default, Serialize, Deserialize)]
-struct HooksState {
-    #[serde(default)]
-    tmux_hooks: Vec<TmuxHookRecord>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct TmuxHookRecord {
-    hook: String,
-    index: usize,
 }
 
 pub(crate) fn run(opts: InstallOpts) -> ExitCode {
@@ -293,7 +287,7 @@ fn run_all(
         .filter(|lm| {
             matches!(
                 classify_agent(lm, paths, wrapper.reference(), Statusline::Keep),
-                HookWiring::Wired | HookWiring::Incomplete(_)
+                HookWiring::Wired | HookWiring::WiredVia(_) | HookWiring::Incomplete(_)
             )
         })
         .collect();
@@ -505,7 +499,7 @@ fn any_agent_still_wired(
     manifests.iter().filter(|lm| lm.name != except).any(|lm| {
         matches!(
             classify_agent(lm, paths, wrapper, Statusline::Keep),
-            HookWiring::Wired | HookWiring::Incomplete(_)
+            HookWiring::Wired | HookWiring::WiredVia(_) | HookWiring::Incomplete(_)
         )
     })
 }
@@ -530,68 +524,6 @@ fn sweep_pane_stamps(tmux: &Tmux) {
 }
 
 // --- tmux server hooks -----------------------------------------------------------
-
-/// The tmux-hook command clearing attention on focus change. `#{pane_id}` (never `$TMUX_PANE`, and
-/// never `#{hook_pane}` — see below) binds the pane at hook time. The binary is LATE-BOUND like the `tma-hook` wrapper: the install-time
-/// absolute path when it is still executable, else plain `tma` off `$PATH`, so a rebuilt, moved, or
-/// re-installed binary keeps the hook working instead of leaving a dead command behind. The
-/// middle-tier nudge lives inside the same `clear-attention` subcommand. `hook` is the tmux hook the
-/// command is being written for; it selects the seen-on-leave posture (see [`HOOK_KIND_ENV`]).
-fn clear_attention_command(bin: &Path, hook: &str) -> String {
-    // `#{pane_id}`, NOT `#{hook_pane}`. `hook_pane` is populated only on the notify_pane-style hooks
-    // (`pane-focus-in` and friends); on `after-select-pane` and on `session-window-changed`
-    // it expands EMPTY, which `clear-attention` treats as a no-op — so the always-on pair cleared
-    // nothing at all, for anyone, and the flag only ever came off via the picker, jump, or the
-    // opt-in focus hook. Verified on tmux 3.6a, attached and detached, key-driven and out-of-band:
-    // `after-select-pane` gives `hook_pane=[]` / `pane_id=[%0]`, `pane-focus-in` gives both. The man
-    // page hedges it under FORMATS ("ID of pane where hook was run, if any"). `#{pane_id}` resolves
-    // in all three hooks, so one shape serves them all; it stays quoted so an empty expansion still
-    // passes an argument rather than shifting the argv.
-    //
-    // Single quotes only: the whole string is a tmux double-quoted argument, where tmux expands
-    // `#{...}` (wanted) and `$name` (not wanted), so the shell side stays `$`-free. The PATH
-    // fallback swallows its own failure: with no `tma` anywhere, sh exits 127 and tmux would flash
-    // "returned 127" on every pane switch, so that branch stays silent like the tma-hook wrapper.
-    // The `-x` branch swallows its own failure for the same reason, and for a second one: a hook
-    // string written by a NEW install can still invoke an OLD binary (that is what late binding
-    // buys), and a mismatch must not turn into a message on every pane switch.
-    let kind = departure_kind_env(hook);
-    format!(
-        "run-shell \"if [ -x '{0}' ]; then {1}'{0}' clear-attention '#{{pane_id}}' 2>/dev/null \
-         || true; else {1}tma clear-attention '#{{pane_id}}' 2>/dev/null || true; fi\"",
-        bin.display(),
-        kind
-    )
-}
-
-/// The environment variable carrying WHICH focus hook fired, so `clear-attention` can also clear the
-/// pane the user just left (seen-on-leave). An environment variable, deliberately, not an argv flag:
-/// the command above is late-bound, so a hook string written by a new install routinely invokes an
-/// older binary. An unknown flag would make clap error on every single pane switch; an unknown
-/// environment variable is ignored in silence, which is the only acceptable failure mode for a hook
-/// that fires on every navigation. Read in `dispatch::run_clear_attention`.
-pub(crate) const HOOK_KIND_ENV: &str = "TMA_HOOK_KIND";
-
-/// The `VAR=value ` shell prefix for a hook, empty for a hook that carries no departure. Kept as a
-/// prefix rather than an exported variable so it scopes to the one command.
-fn departure_kind_env(hook: &str) -> String {
-    match DepartureKind::from_hook_name(hook) {
-        Some(_) => format!("{HOOK_KIND_ENV}={hook} "),
-        None => String::new(),
-    }
-}
-
-/// Whether an installed hook command is what install would write now. Compared modulo whitespace and
-/// quoting: tmux re-serializes the stored command when printing it back, so quote style is its
-/// choice, while a changed binary path or command shape (the drift this detects) survives normalization.
-fn hook_command_current(installed: &str, expected: &str) -> bool {
-    fn normalize(s: &str) -> String {
-        s.chars()
-            .filter(|c| !c.is_whitespace() && !matches!(c, '"' | '\'' | '\\'))
-            .collect()
-    }
-    normalize(installed) == normalize(expected)
-}
 
 /// Install the attention-clear hooks idempotently and return their recorded `(hook, index)` entries.
 /// An existing entry of ours is reused when it matches what we would write now and rewritten in
@@ -688,13 +620,6 @@ fn remove_our_hook_entries(tmux: &Tmux, hook: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// A hook command is ours iff it invokes `clear-attention` — the OWNERSHIP test (what uninstall may
-/// remove), deliberately path-blind. Whether an owned entry is still CURRENT is
-/// [`hook_command_current`]'s job; the two questions have different answers after a binary moves.
-fn is_ours(command: &str) -> bool {
-    command.contains("clear-attention")
-}
-
 /// One tmux server hook's state, as `--check` and `doctor` report it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TmuxHookState {
@@ -734,9 +659,11 @@ impl TmuxHookState {
             )),
             TmuxHookState::Wiped => Some(format!(
                 "tmux hook {hook} installed but not present on this server, likely restarted \
-                 (tmux hooks are runtime state); run `tma install-hooks <agent>`, or add the \
-                 `set-hook -ga` lines to whichever tmux config you use (~/.tmux.conf or \
-                 ~/.config/tmux/tmux.conf) to make them durable"
+                 (tmux hooks are runtime state). A daemon re-arms these when it starts, so seeing \
+                 this means none has started since: run `tma daemon --ensure`, or \
+                 `tma install-hooks <agent>` to set them now, or add the `set-hook -ga` lines to \
+                 whichever tmux config you use (~/.tmux.conf or ~/.config/tmux/tmux.conf) to make \
+                 them durable"
             )),
             TmuxHookState::Missing => Some(format!(
                 "tmux hook {hook} missing (a config reload, or an upgrade that renamed it)"
@@ -753,6 +680,10 @@ impl TmuxHookState {
 pub(crate) enum HookWiring {
     /// Hook-capable, an adapter exists, and every declared event is wired to the wrapper.
     Wired,
+    /// Wired, but reached through another program's config rather than tma's own entry (codex's
+    /// `notify` chained onward). The notes name the chain, so a config that does not look like what
+    /// install writes is not read as a broken one.
+    WiredVia(Vec<String>),
     /// Hook-capable and partly wired, but with drift (a missing event or a stale wrapper path);
     /// carries the human-readable reasons `--check` prints.
     Incomplete(Vec<String>),
@@ -942,13 +873,21 @@ fn run_check(
     // wiring, so an agent the user never installed is a clean skip. A NAMED agent scopes the report
     // (and the exit code) to itself: a sibling's drift must not fail its check. The shared wrapper +
     // tmux hooks below stay global — prerequisites the named agent depends on too.
+    let mut notes = Vec::new();
     for a in &diag.agents {
         if agent_filter.is_some_and(|want| a.agent != want) {
             continue;
         }
-        if let HookWiring::Incomplete(reasons) = &a.wiring {
-            missing.extend(reasons.iter().cloned());
+        match &a.wiring {
+            HookWiring::Incomplete(reasons) => missing.extend(reasons.iter().cloned()),
+            // Wiring that works but does not look like what install writes: reported, never a
+            // failure, so a chained config does not fail a CI check that is otherwise green.
+            HookWiring::WiredVia(chain) => notes.extend(chain.iter().cloned()),
+            _ => {}
         }
+    }
+    for note in &notes {
+        println!("tma: {note}");
     }
 
     // An unreadable server yields no hook states at all; reporting that is the only honest
@@ -1006,45 +945,6 @@ fn tmux_hook_states(
         out.push((hook.to_string(), state));
     }
     Ok(out)
-}
-
-/// The legacy, pre-per-server-keying state filename. Kept as the migration source (and the
-/// server-gone fallback) so a single-server install written before keying is still honored.
-const LEGACY_HOOKS_STATE: &str = "hooks-state.toml";
-
-/// The per-server hooks-state path `hooks-state-<key>.toml`, keyed by a hash of `#{socket_path}`
-/// ([`tma_runtime::ipc::socket_key`]) since tmux `set-hook -g` indexes are per-server. Falls back to
-/// the legacy unkeyed name when the server is unreachable.
-fn hooks_state_path(config_dir: &Path, tmux: &Tmux) -> PathBuf {
-    match tma_runtime::ipc::resolve_socket_path(tmux) {
-        Some(socket_path) => config_dir.join(format!(
-            "hooks-state-{}.toml",
-            tma_runtime::ipc::socket_key(&socket_path)
-        )),
-        None => config_dir.join(LEGACY_HOOKS_STATE),
-    }
-}
-
-/// Read the target server's tmux-hook metadata, `None` when absent/unparseable. Primary: the keyed
-/// file. Migration: when absent, fall back to the legacy unkeyed `hooks-state.toml` (this server's in
-/// the common single-server setup). The returned flag is `true` on the legacy source, so uninstall
-/// removes it only when consumed; `is_ours` content matching bounds the damage if it was another
-/// server's record.
-fn read_hooks_state(config_dir: &Path, tmux: &Tmux) -> Option<(HooksState, bool)> {
-    let keyed = hooks_state_path(config_dir, tmux);
-    let (text, from_legacy) = match std::fs::read_to_string(&keyed) {
-        Ok(text) => (text, false),
-        // Fall back to the legacy unkeyed record (single-server installs pre-dating keying).
-        // When `keyed` already IS the legacy path (server gone), that read already happened.
-        Err(_) => {
-            let legacy = config_dir.join(LEGACY_HOOKS_STATE);
-            if keyed == legacy {
-                return None;
-            }
-            (std::fs::read_to_string(legacy).ok()?, true)
-        }
-    };
-    Some((toml::from_str(&text).ok()?, from_legacy))
 }
 
 // --- file plumbing ---------------------------------------------------------------
@@ -1296,22 +1196,10 @@ fn effective_statusline(requested: Statusline, agent: &str, config_dir: &Path) -
     }
 }
 
-fn write_hooks_state(config_dir: &Path, tmux: &Tmux, state: &HooksState) -> io::Result<()> {
-    std::fs::create_dir_all(config_dir)?;
-    let toml = toml::to_string(state)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e.to_string()))?;
-    let header = "# tma tmux-hook install record, keyed per server (tmux -g hook indexes\n\
-                  # are per-server). Install metadata — exempt from the no-files rule. Do not\n\
-                  # hand-edit; `tma install-hooks --uninstall` clears it.\n";
-    std::fs::write(
-        hooks_state_path(config_dir, tmux),
-        format!("{header}{toml}"),
-    )
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tmux::DepartureKind;
 
     // ---- the statusline opt-in record -------------------------------------------
 

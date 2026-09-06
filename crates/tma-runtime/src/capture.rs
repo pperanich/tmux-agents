@@ -67,9 +67,10 @@ struct PaneHook {
 /// on-demand tier cannot wait for an activity edge to correct.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Landed {
-    /// `unknown` with [`Provenance::Process`]: the fold's foreground cap answered.
+    /// The cap answered: `unknown` with [`Provenance::Process`], or, over a live hook claim whose
+    /// agent process is still alive, that claim HELD. Both turn on the same process fact.
     ForegroundCapped,
-    /// Anything else: the screen, or a held hook claim, decided it.
+    /// The screen decided it.
     Settled,
 }
 
@@ -448,9 +449,9 @@ impl CaptureState {
     /// Record whether this pane's capture landed on the fold's foreground cap, and schedule the
     /// follow-up look that a capped verdict needs. The cap answers from `#{pane_current_command}`,
     /// not the screen, so it flips back with no output at all: no further activity edge would
-    /// arrive, and the pane would hold `unknown` until the reconciliation sweep (45 s). Retiring the
-    /// entry on the first uncapped verdict is what makes [`RECHECK_LIMIT`] per-episode rather than
-    /// per-pane-forever.
+    /// arrive, and the pane would hold the capped verdict (`unknown`, or the live hook claim the cap
+    /// held over it) until the reconciliation sweep (45 s). Retiring the entry on the first uncapped
+    /// verdict is what makes [`RECHECK_LIMIT`] per-episode rather than per-pane-forever.
     fn note_foreground_cap(&mut self, pane: &str, capped: bool) {
         if !capped {
             self.rechecks.remove(pane);
@@ -637,17 +638,13 @@ pub(crate) fn stamp_from_capture(
         now,
     );
     stamp::apply(tmux, all_panes, &rec.pane_id, &plan, guarded)?;
-    // `unknown` from `Provenance::Process` is the foreground cap's own verdict and nothing else
-    // writes it, so this reads the cap without re-deriving its precedence rule.
-    Ok(
-        if verdict.state == AgentState::Unknown
-            && verdict.winning_evidence.source == Provenance::Process
-        {
-            Landed::ForegroundCapped
-        } else {
-            Landed::Settled
-        },
-    )
+    // The cap turns on this fact, and it has two verdicts: `unknown`/process with no live hook
+    // claim, that claim HELD with one. Reading the fact owes a follow-up look to both.
+    Ok(if facts.foreground_is_agent {
+        Landed::Settled
+    } else {
+        Landed::ForegroundCapped
+    })
 }
 
 /// Whether a stored claim is hook-fresh: it came from a hook event no older than the decay window,

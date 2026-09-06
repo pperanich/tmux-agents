@@ -12,8 +12,15 @@ text is a liability nobody needs committed.
 stores/VERSIONS.toml                 the pinned versions, and where each store stamps its own
 stores/<agent>/<version>/<name>.jsonl        the fixture, named for the version it imitates
 stores/<agent>/<version>/<name>/subagents/   nested-agent transcripts, served as their own sessions
+stores/opencode/<version>/                   expectation only: the database is built by the suite
 drift/                                       deliberately unknown record types (see below)
 ```
+
+opencode is the one store with no fixture file. It keeps every session in one SQLite database, so
+`src/tests/opencode.rs` builds a synthetic one (the schema is a `const` there, copied from the
+measured columns) and only the expectation is committed. The version still has to agree in three
+places: the directory name, the `version` the builder writes into the session row, and the
+declaration in `VERSIONS.toml`.
 
 A fixture's filename carries the version, the directory above it repeats it, and the version stamp
 inside the file has to agree with both. `src/tests/corpus.rs` asserts all three, plus that the

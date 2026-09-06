@@ -29,9 +29,9 @@ claim = { state = "working" }
 # PermissionRequest, fires the moment a tool call needs a permission decision, which is what makes
 # it the primary blocked claim. The `Notification permission_prompt` entry below stays as the
 # fallback: the vendor docs gate that notification on the prompt having waited about six seconds, so
-# on its own it left a pane reading `working` for those six seconds. tma emits no decision from this
-# hook by default, so Claude draws its normal prompt; `[hooks] claude_reply_lane` in config.toml is
-# the opt-in that lets `tma act` answer it instead.
+# on its own it left a pane reading `working` for those six seconds. The hook also holds the call
+# open for a `tma act` verdict unless `[hooks] claude_reply_lane = false` in config.toml turns that
+# off; either way Claude draws its normal prompt and the keyboard answers it.
 [[hooks.map]]
 event = "PermissionRequest"
 claim = { state = "blocked", detail = "permission" }

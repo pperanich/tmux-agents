@@ -73,19 +73,21 @@ Claude loads the hooks on next start.
 Claude's `PermissionRequest` hook can hand back a decision, not just a stamp. With
 the lane on, `tma act approve` on a blocked claude pane returns a structured allow
 to the hook that is holding the call open, and the tool runs with no keystroke
-landing anywhere. It is off until you name the sub-table in `config.toml`:
+landing anywhere. Installing claude's hooks is all it takes: the lane is on by
+default, at a 25-second hold.
+
+Turn it off by setting the key to `false`:
 
 ```toml
 [hooks]
-claude_reply_lane = { hold_ms = 25000 }
+claude_reply_lane = false
 ```
 
-`hold_ms` is how long the hook waits for an answer: 25 seconds by default, and
-anything from 1000 to 590000 ms, since the ceiling has to stay under claude's own
-hook timeout (see
+Or set your own hold with the table form, `{ hold_ms = 12000 }`: anything from 1000
+to 590000 ms, since the ceiling has to stay under claude's own hook timeout (see
 [`[hooks]`](../reference/configuration.md#hooks-what-an-installed-hook-does-at-fire-time)).
-Nothing gets reinstalled. The hook reads this on every fire, so the next prompt is
-already on the lane.
+Nothing gets reinstalled either way. The hook reads this on every fire, so the next
+permission prompt is already on the setting you just wrote.
 
 What the hook does with it on: the same stamps as before (`blocked` / `permission`
 and the pending-call trio), then it mints the request's id, stamps it on
@@ -99,9 +101,14 @@ back to claude.
 the moment it asks and does not wait for the hook, so the hold changes nothing about
 what is on the screen. Screen detection still reads `blocked`, `tma act approve
 --pane` still sends `1` when no hook is holding, and typing at the pane answers it
-the way it always did. A pane nobody answers over the lane behaves exactly like a
-pane with the lane switched off. That is the guarantee, not a fallback: the lane can
-only add a way to answer, never take one away.
+the way it always did: on Claude Code 2.1.261 a `1` pressed half a second into a hold
+resolved the call in 50 ms with the hook still parked. A pane nobody answers over the
+lane behaves exactly like a pane with the lane switched off. That is the guarantee,
+not a fallback: the lane can only add a way to answer, never take one away.
+
+What being on by default costs is one sleeping `tma event` process per permission
+prompt you answer by hand, until its hold expires. If that is not a trade you want
+on a given machine, `claude_reply_lane = false` is the switch.
 
 ### Answering one
 
@@ -166,6 +173,15 @@ moving the wrapper, and also switching `[install] wrapper_ref` between `bare` an
 `bare` default, and it applies to codex's `hooks.json` only. The `notify` channel
 is a plain config value and is not trust-gated, so idle detection works
 immediately.
+
+Codex allows exactly one `notify` program, so a tool that wants the signal
+(Codex Computer Use, for one) takes the key and passes what was there before to
+itself, as a JSON array in its own `--previous-notify` argument. tma reads that:
+a chain carrying `tma-hook codex notify` is wired, and `--check` and `tma doctor`
+report `notify chained through <program>` instead of a missing entry. Install
+leaves a working chain untouched. If the chained command names a wrapper this
+build no longer writes, install refuses and names the edit rather than rewriting
+another program's argv; fix the reference in `config.toml` by hand.
 
 ## Gemini CLI
 

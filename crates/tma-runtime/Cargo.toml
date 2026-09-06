@@ -16,7 +16,19 @@ tma-core = { path = "../tma-core" }
 # The tmux I/O crate: the read path, control-mode pool, and guarded write adapter the
 # cycle/capture/debug pipeline drive. Runtime never spawns tmux itself; it goes through here.
 tma-tmux = { path = "../tma-tmux" }
+# The wire protocol's type crate, for exactly one thing: the `Scope` vocabulary the device store
+# records. A pure, I/O-free leaf, so the tier story is unchanged; duplicating the four scope tokens
+# here is the drift tma-proto exists to prevent.
+tma-proto = { path = "../tma-proto" }
+# The wire types `card` and `serve_transcript` build. Runtime holds no serve loop; it holds the
+# two pure builders that loop calls, so the frames have one definition and no second model.
+# The transcript reader those two builders read through.
+tma-transcript = { path = "../tma-transcript" }
 serde = { workspace = true }
+# Already in the graph via tma-proto. Declared directly because a card's `pending_call.input` is
+# the agent's own tool-input object, and re-serializing an object needs a real codec: the
+# hand-rolled writer in `json.rs` emits fixed key sets and has no reader.
+serde_json = "1"
 toml.workspace = true
 thiserror.workspace = true
 # `tma event` compiles a manifest hook `matcher` (a regex) to test against a hook payload.

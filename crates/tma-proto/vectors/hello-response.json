@@ -1,0 +1,14 @@
+{
+  "schema": 1,
+  "id": "1",
+  "t": "hello",
+  "host": "xxxxxxxx",
+  "tma_version": "0.5.13",
+  "reconcile_interval_ms": 5000,
+  "scopes": [
+    "read",
+    "act:answer",
+    "act:always",
+    "act:steer"
+  ]
+}

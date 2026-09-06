@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "id": "5",
+  "t": "dispatch",
+  "slot": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+  "host": "xxxxxxxx",
+  "pane": "%1",
+  "action": "steer",
+  "binder": {
+    "expect_episode_ms": 1757030400000
+  },
+  "text": "xxxxxxxxxxxxxxxx"
+}

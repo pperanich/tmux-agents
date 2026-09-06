@@ -77,27 +77,70 @@ pub struct ActionManifest {
 }
 
 /// One agent's API-channel transport: a closed built-in operation, extended only with
-/// captured evidence like key sequences. v1 ships exactly `permission-reply` (OpenCode).
+/// captured evidence like key sequences. Every op is OpenCode's today.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ApiTransport {
     pub op: ApiOp,
-    /// The reply verdict for a `permission-reply` op.
-    pub reply: ApiReply,
+    /// The reply verdict, for the one op that takes one. Required on `permission-reply` and
+    /// refused on every other op, checked at parse rather than defaulted.
+    pub reply: Option<ApiReply>,
 }
 
 /// The closed API operation vocabulary. Unknown values are a parse error.
+///
+/// Every variant names a **v1** path of the agent's own server, each driven live against opencode
+/// 1.18.18 (17-owed §1.1, §1.5, §1.6). The `/api/**` family is a different set of objects, not a
+/// second spelling of these: a v2 permission is created by a caller rather than raised by the tool
+/// loop, and those paths answer with empty envelopes while a v1 request is pending. So an op
+/// pointed at one would succeed against nothing, and none may be.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 pub enum ApiOp {
-    /// Answer a pending OpenCode permission prompt (`POST {base}/permission/{id}/reply`).
+    /// Answer a pending permission prompt (`POST {base}/permission/{id}/reply`,
+    /// `{"reply":"<verdict>"}`).
     #[serde(rename = "permission-reply")]
     PermissionReply,
+    /// Answer a pending question with the labels the user picked
+    /// (`POST {base}/question/{id}/reply`, `{"answers":[["<label>"]]}`).
+    #[serde(rename = "question-reply")]
+    QuestionReply,
+    /// Dismiss a pending question (`POST {base}/question/{id}/reject`, no body).
+    #[serde(rename = "question-reject")]
+    QuestionReject,
+    /// Stop the turn in flight (`POST {base}/session/{id}/abort`, no body).
+    #[serde(rename = "interrupt")]
+    Interrupt,
 }
 
 impl ApiOp {
     pub const fn token(self) -> &'static str {
         match self {
             ApiOp::PermissionReply => "permission-reply",
+            ApiOp::QuestionReply => "question-reply",
+            ApiOp::QuestionReject => "question-reject",
+            ApiOp::Interrupt => "interrupt",
         }
+    }
+
+    /// Whether the op carries a manifest-declared `reply` verdict. Only the permission op does: a
+    /// question is answered with labels the caller supplies, and the other two send no body at all.
+    pub const fn takes_reply(self) -> bool {
+        matches!(self, ApiOp::PermissionReply)
+    }
+
+    /// Whether the op answers a request the pane is holding, rather than commanding the session.
+    /// It is what decides `replied` from `sent`: a 2xx on a request the server was holding open is
+    /// proof it was answered, and a 2xx on a command is proof of delivery and nothing more.
+    pub const fn answers_a_request(self) -> bool {
+        matches!(
+            self,
+            ApiOp::PermissionReply | ApiOp::QuestionReply | ApiOp::QuestionReject
+        )
+    }
+
+    /// Whether the op quotes the caller's own picked labels. `question-reply` is the only one, and
+    /// it is library-only for now: the CLI has no flag that could carry an answer set.
+    pub const fn takes_answers(self) -> bool {
+        matches!(self, ApiOp::QuestionReply)
     }
 }
 
@@ -270,6 +313,13 @@ pub enum ActionError {
          [keys], never to [api]"
     )]
     AgentInApiAndHook { file: String, agent: String },
+    #[error("{file}: [api] agent {agent:?}: op {op:?} {reason}")]
+    ApiReplyMismatch {
+        file: String,
+        agent: String,
+        op: &'static str,
+        reason: &'static str,
+    },
 }
 
 #[cfg(test)]
@@ -279,9 +329,34 @@ mod tests {
     #[test]
     fn api_vocabulary_tokens_are_pinned() {
         assert_eq!(ApiOp::PermissionReply.token(), "permission-reply");
+        assert_eq!(ApiOp::QuestionReply.token(), "question-reply");
+        assert_eq!(ApiOp::QuestionReject.token(), "question-reject");
+        assert_eq!(ApiOp::Interrupt.token(), "interrupt");
         assert_eq!(ApiReply::Once.token(), "once");
         assert_eq!(ApiReply::Always.token(), "always");
         assert_eq!(ApiReply::Reject.token(), "reject");
+    }
+
+    /// The three predicates that decide how an op is handled, exhaustive so a fifth op has to rule
+    /// on itself rather than inherit an answer by omission.
+    #[test]
+    fn each_api_op_declares_its_own_shape() {
+        for op in [
+            ApiOp::PermissionReply,
+            ApiOp::QuestionReply,
+            ApiOp::QuestionReject,
+            ApiOp::Interrupt,
+        ] {
+            let (reply, request, answers) = match op {
+                ApiOp::PermissionReply => (true, true, false),
+                ApiOp::QuestionReply => (false, true, true),
+                ApiOp::QuestionReject => (false, true, false),
+                ApiOp::Interrupt => (false, false, false),
+            };
+            assert_eq!(op.takes_reply(), reply, "{op:?} reply");
+            assert_eq!(op.answers_a_request(), request, "{op:?} request");
+            assert_eq!(op.takes_answers(), answers, "{op:?} answers");
+        }
     }
 
     #[test]

@@ -33,6 +33,8 @@ pub struct Config {
     #[serde(default)]
     pub act: ActSection,
     #[serde(default)]
+    pub serve: ServeSection,
+    #[serde(default)]
     pub focus: FocusSection,
     #[serde(default)]
     pub install: InstallSection,
@@ -627,6 +629,50 @@ impl ActSection {
     }
 }
 
+// ---- [serve] -----------------------------------------------------------------------------
+
+/// `[serve]` posture: the two numbers `tma serve --stdio` needs and a device cannot set.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ServeSection {
+    /// How stale a row may get before a device should re-read rather than trust it. Answered in the
+    /// hello and used as the stream's poll cadence, so the number a device is told is the number the
+    /// host actually keeps to.
+    #[serde(default = "default_reconcile_interval_ms")]
+    pub reconcile_interval_ms: u64,
+    /// How many serve connections this host answers at once. Each one runs its OWN detection cycle,
+    /// so connections cost tmux query throughput and nothing else bounds them; the fifth is refused
+    /// with a typed error rather than accepted and starved.
+    #[serde(default = "default_max_connections")]
+    pub max_connections: usize,
+}
+
+fn default_reconcile_interval_ms() -> u64 {
+    2000
+}
+
+/// Four: a phone and a tablet, with room for a re-dial that has not hung up yet.
+fn default_max_connections() -> usize {
+    4
+}
+
+impl Default for ServeSection {
+    fn default() -> Self {
+        ServeSection {
+            reconcile_interval_ms: default_reconcile_interval_ms(),
+            max_connections: default_max_connections(),
+        }
+    }
+}
+
+impl ServeSection {
+    /// The stream's poll cadence, floored at 250 ms: a device that asked for a 0 ms interval asked
+    /// for a spin loop against tmux, which is never what it meant.
+    pub fn reconcile_interval(&self) -> Duration {
+        Duration::from_millis(self.reconcile_interval_ms.max(250))
+    }
+}
+
 // ---- [focus] -----------------------------------------------------------------------------
 
 /// `[focus]` posture. The `after-select-pane` / `session-window-changed` attention-clear hooks are
@@ -679,14 +725,25 @@ pub struct InstallSection {
 /// `[hooks]` posture: what an installed agent hook does beyond stamping the pane. Its own section
 /// rather than a key under `[install]`, which is about how agent configs NAME the wrapper and is
 /// read at install time; this is read by the hook itself, on every fire.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HooksSection {
-    /// `[hooks.claude_reply_lane]`: naming the sub-table opts a pane's claude hooks into holding a
-    /// `PermissionRequest` open for a structured answer. Absent means today's behaviour exactly:
-    /// the hook stamps and exits with no output, and claude's own prompt is untouched.
-    #[serde(default)]
+    /// `claude_reply_lane`: whether a pane's claude hooks hold a `PermissionRequest` open for a
+    /// structured answer. On by default at [`DEFAULT_HOLD_MS`]; `false` turns it off, and a table
+    /// sets the hold.
+    #[serde(
+        default = "default_claude_reply_lane",
+        deserialize_with = "claude_reply_lane"
+    )]
     pub claude_reply_lane: Option<ClaudeReplyLane>,
+}
+
+impl Default for HooksSection {
+    fn default() -> Self {
+        Self {
+            claude_reply_lane: default_claude_reply_lane(),
+        }
+    }
 }
 
 /// The hold bound, in milliseconds. Default 25 000.
@@ -707,6 +764,43 @@ pub struct ClaudeReplyLane {
 
 fn default_hold_ms() -> u64 {
     DEFAULT_HOLD_MS
+}
+
+/// The lane with no key present: on, at the default hold. A held hook costs the pane nothing, since
+/// claude draws its dialog without waiting for the hook and the keyboard answers it throughout.
+fn default_claude_reply_lane() -> Option<ClaudeReplyLane> {
+    Some(ClaudeReplyLane {
+        hold_ms: DEFAULT_HOLD_MS,
+    })
+}
+
+/// `claude_reply_lane = false` turns the lane off; a table turns it on and may set `hold_ms`. Hand
+/// written rather than `untagged`, which would swallow the `hold_ms` range error into "no variant".
+fn claude_reply_lane<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<ClaudeReplyLane>, D::Error> {
+    struct Lane;
+
+    impl<'de> serde::de::Visitor<'de> for Lane {
+        type Value = Option<ClaudeReplyLane>;
+
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("`false`, or a table such as `{ hold_ms = 25000 }`")
+        }
+
+        fn visit_bool<E: serde::de::Error>(self, on: bool) -> Result<Self::Value, E> {
+            Ok(on.then_some(ClaudeReplyLane {
+                hold_ms: DEFAULT_HOLD_MS,
+            }))
+        }
+
+        fn visit_map<A: serde::de::MapAccess<'de>>(self, map: A) -> Result<Self::Value, A::Error> {
+            ClaudeReplyLane::deserialize(serde::de::value::MapAccessDeserializer::new(map))
+                .map(Some)
+        }
+    }
+
+    d.deserialize_any(Lane)
 }
 
 /// Bound the hold at load: a value claude would kill mid-flight, or one too short to answer, is a
@@ -910,6 +1004,29 @@ pub fn reload_notice(
     }
 }
 
+/// Resolve the config DIRECTORY: an explicit override, then `TMA_CONFIG_DIR`, then
+/// `$XDG_CONFIG_HOME/tma`, else `~/.config/tma` (`.` with no `HOME`). Where the install records
+/// live, so the installer and the daemon's hook re-arm read one path. Distinct from
+/// [`resolve_path`], which resolves the config FILE and honors `TMA_CONFIG`.
+pub fn config_dir(explicit: Option<&Path>) -> PathBuf {
+    if let Some(p) = explicit {
+        return p.to_path_buf();
+    }
+    if let Some(p) = std::env::var_os("TMA_CONFIG_DIR").filter(|v| !v.is_empty()) {
+        return PathBuf::from(p);
+    }
+    if let Ok(xdg) = std::env::var("XDG_CONFIG_HOME") {
+        if !xdg.is_empty() {
+            return PathBuf::from(xdg).join("tma");
+        }
+    }
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".config/tma")
+}
+
 /// Resolve the config path: `--config`, then `TMA_CONFIG`, then `$XDG_CONFIG_HOME/tma/`, then
 /// `~/.config/tma/`. `None` only when none is set and there is no `HOME`. Mirrors the base-dir logic
 /// in `install.rs` and `manifests.rs`.
@@ -974,6 +1091,10 @@ mod tests {
         // The automatic upgrade restart is opt-OUT: an upgraded tma replaces the older daemon it
         // finds rather than leaving a stale build serving until the tmux server restarts.
         assert!(c.daemon.restart_on_upgrade);
+        // Serve defaults: the interval the hello quotes, and the connection cap ARCH §1.8 fixes.
+        assert_eq!(c.serve.reconcile_interval_ms, 2000);
+        assert_eq!(c.serve.reconcile_interval(), Duration::from_millis(2000));
+        assert_eq!(c.serve.max_connections, 4);
         // Notify + focus defaults: off / none. `on` defaults to blocked-only.
         assert!(!c.notify.from_event);
         assert!(c.notify.command.is_none());
@@ -999,9 +1120,9 @@ mod tests {
         assert!(c.api.api_base("opencode").is_none());
         // State-derived window names are opt-in: absent by default, so tma renames nothing.
         assert!(c.daemon.window_names.is_none());
-        // The claude hook reply lane is opt-in: absent by default, so a `PermissionRequest` hook
-        // stamps and exits without output exactly as it did before the lane existed.
-        assert!(c.hooks.claude_reply_lane.is_none());
+        // The claude hook reply lane is on by default: a `PermissionRequest` hook holds for the
+        // default 25 s, which the dialog on screen and the keyboard both survive.
+        assert_eq!(c.hooks.claude_reply_lane.unwrap().hold_ms, 25_000);
         // Telemetry windows: zero-config recognizes the shipped names and nothing else.
         assert!(c.telemetry.windows.knows("gemini-1.5-pro"));
         assert!(!c.telemetry.windows.knows("some-unknown-model"));
@@ -1046,16 +1167,26 @@ mod tests {
         );
     }
 
-    /// `[hooks.claude_reply_lane]`: naming the sub-table is the opt-in, `hold_ms` inside it
-    /// optional, and a hold outside the bound fails the load rather than parking a hook for longer
+    /// `claude_reply_lane`: on at the default hold when unnamed or named as a table, off at
+    /// `false`, and a hold outside the bound fails the load rather than parking a hook for longer
     /// than claude will wait for it.
     #[test]
-    fn claude_reply_lane_opts_in_by_name_and_bounds_the_hold() {
+    fn claude_reply_lane_defaults_on_and_bounds_the_hold() {
+        // Named `[hooks]`, no key: the same lane the whole-file default gives.
+        let c: Config = toml::from_str("[hooks]\n").unwrap();
+        assert_eq!(c.hooks.claude_reply_lane.unwrap().hold_ms, 25_000);
+
         let c: Config = toml::from_str("[hooks]\nclaude_reply_lane = {}\n").unwrap();
         assert_eq!(c.hooks.claude_reply_lane.unwrap().hold_ms, 25_000);
 
         let c: Config = toml::from_str("[hooks.claude_reply_lane]\nhold_ms = 8000\n").unwrap();
         assert_eq!(c.hooks.claude_reply_lane.unwrap().hold_ms, 8_000);
+
+        // `false` is the opt-out; `true` is the default lane spelled out.
+        let c: Config = toml::from_str("[hooks]\nclaude_reply_lane = false\n").unwrap();
+        assert!(c.hooks.claude_reply_lane.is_none());
+        let c: Config = toml::from_str("[hooks]\nclaude_reply_lane = true\n").unwrap();
+        assert_eq!(c.hooks.claude_reply_lane.unwrap().hold_ms, 25_000);
 
         for bad in ["0", "999", "600000"] {
             let err =
@@ -1066,6 +1197,14 @@ mod tests {
                 "the error names the range: {err}"
             );
         }
+
+        // Neither accepted shape: the error names both rather than reading as a missing field.
+        let err = toml::from_str::<Config>("[hooks]\nclaude_reply_lane = 25000\n")
+            .expect_err("a bare number is a config error");
+        assert!(
+            err.to_string().contains("hold_ms = 25000"),
+            "the error shows the table form: {err}"
+        );
     }
 
     /// A partial section fills only the named field; the rest stay at their per-field defaults.
@@ -1456,6 +1595,14 @@ mod tests {
                 toml::Value::Boolean(c.focus.events),
             ),
             (
+                "serve.reconcile_interval_ms".to_string(),
+                secs(c.serve.reconcile_interval_ms),
+            ),
+            (
+                "serve.max_connections".to_string(),
+                toml::Value::Integer(c.serve.max_connections as i64),
+            ),
+            (
                 "install.wrapper_ref".to_string(),
                 toml::Value::String(
                     match c.install.wrapper_ref {
@@ -1463,6 +1610,16 @@ mod tests {
                         WrapperRef::Bare => "bare",
                     }
                     .to_string(),
+                ),
+            ),
+            (
+                "hooks.claude_reply_lane.hold_ms".to_string(),
+                toml::Value::Integer(
+                    c.hooks
+                        .claude_reply_lane
+                        .as_ref()
+                        .expect("the lane is on by default")
+                        .hold_ms as i64,
                 ),
             ),
             (

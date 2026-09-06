@@ -10,6 +10,125 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- **`tma serve`, and the devices it will answer.** A remote client, a phone in the design this is
+  built for, opens an ssh connection whose forced command is
+  `tma serve --stdio --device <id>`. tma reads NDJSON requests on stdin and writes NDJSON responses
+  and events on stdout, one process per connection, with no listening socket, no TLS and no bearer
+  token, because sshd already authenticated the caller and passes its id. What that connection may
+  do comes from a new verb, `tma device`, which pairs a device, widens its grants and revokes it:
+  `read`, answering a prompt and steering are granted at pairing, `approve_always` never is, and
+  there is no in-app path to a wider scope because there is no protocol frame that asks for one.
+  Three properties are worth naming, because each is a thing it would be easy to do differently and
+  regret. A fleet row leaving the machine is the `tma ls --json` row minus `title`, built by the
+  shipped writer rather than a second one, so a pane's agent-supplied text cannot reach the wire by
+  anyone forgetting a redaction pass. A dispatch passes the scope, then the slot ledger, then the
+  binder, in that order, and none of the three stands in for another: the scope says this device may
+  approve, the slot says this approval was not already sent, and the binder says the thing you
+  approved is still on screen. And the device store is re-read on every request and every publish,
+  so revoking a device stops a connection that is already open rather than only its next dial.
+  `card`, `window` and `event` answer too: a card gathers what one blocked pane is asking (the
+  pane's own read, the parked hook record when the reply lane left one, the agent's pending question
+  fetched over a bounded 750 ms request, and a short transcript tail), and a window pages that
+  pane's transcript newest-first through one reader held for the life of the connection. Everything
+  behind a card is best-effort: a missing record or an unreachable endpoint subtracts detail rather
+  than refusing the frame, because a device with no card cannot even fall back to opening the pane
+  on the host. See [Serve tma over ssh](docs/how-to/serve-over-ssh.md).
+- **A wire protocol crate, `tma-proto`, the vocabulary `tma serve` speaks.** The
+  frames a remote device and a serving `tma` will exchange, defined once so the serve loop, when it
+  lands, has a single definition to build against rather than one on each side of the pipe. It is
+  types, a versioning discipline, and a corpus of golden JSON vectors; it does no I/O, spawns no
+  tmux, and no command exposes it today. Three things in it are worth naming now because they are
+  contracts a later change has to hold. A fleet row on the wire is the `tma ls --json` key set minus
+  `title`, and a test compares the two writers rather than trusting a comment, so a key added to one
+  and not the other fails. The `state`, `detail`, `outcome` and `reason` tokens are the host's own
+  published vocabularies, checked from the host side, which is the only place a token the *host*
+  grew can be noticed. And every type and enum variant must appear in a committed vector, so a
+  change to the wire shows up as a diff in a JSON file that a reviewer reads, instead of as nothing
+  at all. See [The remote wire protocol](docs/reference/protocol.md).
+- **The two builders a serving tma answers with, as library functions the loop only feeds.**
+  `tma_runtime::card::build_card` turns one pane's facts into a card, and
+  `tma_runtime::serve_transcript` turns the transcript reader's events, cursors and refusals into
+  the wire's. Both are pure over their inputs, so what a device is told is testable without a
+  pipe. The rule the card builder turns on is worth stating because it is the one a later change
+  would be tempted to break: an unresolved tool call in a transcript says a call is in flight, which
+  a slow tool, an open prompt and a crashed process all produce, so it is read only to say what a
+  blocked pane is blocked **on**, and a pane the detection cycle calls `working` gets no card
+  whatever its transcript holds. A card built from a parked hook-lane request carries the agent's
+  own tool input as an object and is marked `exact`, because nothing was extracted; every other
+  permission card is marked `failed`, which tells the app to open the pane on the host rather than
+  draw a control over a label nobody parsed. See
+  [The remote wire protocol](docs/reference/protocol.md).
+- **`tma act question_reject`, and three more OpenCode API operations behind it.** OpenCode's
+  `question` tool asks you to pick an option mid-turn, and until now nothing but typing into the
+  pane could answer it: `approve` and `deny` gate on a permission prompt, and a question is not one.
+  The bundled `question_reject` dismisses it over OpenCode's own HTTP surface, and the plugin now
+  forwards `question.asked` so a pane whose screen tma cannot see reports the question too, with the
+  `que_*` id stamped to a new `@agent_question_request`. That id is deliberately its own option
+  rather than a second use of `@agent_permission_request`: the two are different channels with
+  different endpoints, and a permission reply fired at a question id would quote a request the
+  server is not holding. The `[api]` op vocabulary grows `question-reply`, `question-reject` and
+  `interrupt` beside `permission-reply`, all against OpenCode's v1 paths. **Answering** a question
+  is library-only for now: it means quoting the option labels the user picked, one list per
+  question, and `tma act` has no flag that could carry that yet. See
+  [Agent coverage](docs/reference/agent-coverage.md#opencode-api-lane).
+- **`tma transcript` now serves OpenCode panes, whose conversation is a SQLite database rather than
+  a file.** The `ses_*` id on the pane opens `~/.local/share/opencode/opencode.db` read-only, once,
+  and that connection is held for the life of the reader: a reader that reconnects on every poll
+  made 42 of 400 of the writing agent's own commits fail with `database is locked`, and a held one
+  made none fail. History comes from `message` and `part`, the newer `event` log is the live tail,
+  and a tool call watched from `running` to `completed` is one event whose status advanced rather
+  than three, because in this store a call and its result are the same row mutating in place.
+  SQLite is linked in rather than shelled out to, so an OpenCode transcript needs no `sqlite3` on
+  `PATH`. See [Agent transcript stores](docs/explanation/transcript-stores.md).
+
+### Changed
+
+- **The claude hook reply lane is on by default.** `[hooks] claude_reply_lane` no longer has to be
+  named: a `PermissionRequest` hook now holds for 25 seconds unless you set the key to `false`, so
+  installing claude's hooks is the whole setup for answering a prompt without a keystroke. The hold
+  is free to the person at the keyboard, which is why it can default on: on Claude Code 2.1.261 a
+  `1` pressed half a second into a hold resolved the call in 50 ms with the hook still parked. What
+  it costs is one sleeping `tma event` per hand-answered prompt, for up to `hold_ms`.
+
+### Fixed
+
+- **The daemon re-arms the tmux attention hooks a server restart wiped.** `after-select-pane` and
+  `session-window-changed` live in the tmux server, not on disk, so a `kill-server` or a reboot
+  drops them while the per-server install record still says they are installed: the pane you
+  selected stopped clearing its attention flag, and `tma doctor` could only tell you to re-run
+  `tma install-hooks`. A daemon starting on that server now re-installs exactly the hooks its
+  record names, writing the same command the installer does, and logs the repair once. Guarded on
+  both sides: no record means nothing is set, and a hook that still carries an entry of tma's is
+  left alone (repairing a *drifted* entry is still the installer's job). Doctor's `wiped` line says
+  so, since seeing it now means no daemon has started since the restart.
+- **A codex `notify` entry chained through another program reads as wired.** Codex allows one
+  `notify` program, so a tool that wants the signal takes the key and passes the previous command
+  on to itself (Codex Computer Use writes it as a JSON array in its own `--previous-notify`
+  argument). tma's wrapper still fires, but `tma doctor` and `install-hooks --check` reported
+  `config ~/.codex/config.toml has no tma notify entry`. Both now read the chain and report
+  `notify chained through <program>`; `install-hooks codex` leaves a working chain byte-identical,
+  and refuses a stale one with the hand edit named rather than rewriting another program's argv.
+- **A pane whose foreground was briefly not the agent kept a stale hook `working` while the blocked
+  prompt sat on its screen.** 0.5.10 gave a foreground-capped capture its own follow-up look,
+  because the cap answers from `#{pane_current_command}` rather than the screen and so stops being
+  true with no output at all, and the on-demand tier only ever looks at a pane its output woke it
+  for. That look was scheduled off the cap's `unknown` verdict, and the cap has a second one: when
+  the pane already carries a hook claim and the agent's process is still alive, the fold holds that
+  claim instead of publishing `unknown`. So the case that needed the second look most, a stale hook
+  `working` over blocker chrome nobody had read yet, was the one case that got none, and the pane
+  waited out the reconciliation sweep (up to 45 seconds) reading `working`. The look is now
+  scheduled off `foreground_is_agent`, the process fact the cap turns on, so both of its verdicts
+  owe one; the budget is unchanged (three per episode, `recheck_looks` in the daemon's
+  `--status-file`). This is a product defect, not a test-harness timing assumption: it is also what
+  made `contradiction_capture_flips_stale_hook_working` fail on the macOS release run while passing
+  on the pull request minutes earlier, and the acceptance now counts a recovering look the way the
+  hookless one already did.
+- **`tma doctor` no longer flags a model name where the context window table is never read.**
+  Claude's statusline and Codex's rollout carry their own window, so `[telemetry.windows]` is consulted
+  only for the sources that need it, and the model line stays quiet for the rest.
+
 ## [0.5.13] - 2026-09-05
 
 ### Added

@@ -31,7 +31,7 @@ use context::run_context;
 use mapping::{decide, parse_session_id, transcript_stamp, EventPlan};
 pub(crate) use mapping::{json_object_field, json_string_field};
 pub use mapping::{map_event, Mapped};
-use permission::{apply_pending_call, apply_permission_request};
+use permission::{apply_pending_call, apply_permission_request, apply_question_request};
 
 /// Parsed `tma event` arguments (internal, unstable — the wrapper builds this).
 pub struct EventArgs {
@@ -66,8 +66,8 @@ pub struct EventArgs {
     pub notify_context_high: Option<u8>,
     /// `[[agent]]` config: enable/disable + custom process-name maps.
     pub agents: Vec<crate::config::AgentConfig>,
-    /// `[hooks] claude_reply_lane`: the hold bound for the claude hook reply lane, `None` when the
-    /// sub-table is unnamed (the lane is off and this event behaves exactly as it did before it).
+    /// `[hooks] claude_reply_lane`: the hold bound for the claude hook reply lane, `None` when
+    /// config set it to `false` (the lane is off and this event behaves exactly as it did before it).
     pub claude_reply_hold_ms: Option<u64>,
 }
 
@@ -81,6 +81,11 @@ pub const CONTEXT_KIND: &str = "context";
 /// `@agent_permission_request`. It carries no state (maps to `Unmapped`), so the intake keys the
 /// request-option clear on this name directly.
 pub const PERMISSION_REPLIED: &str = "permission-replied";
+
+/// The OpenCode question-ended edge (`question.replied` / `question.answered` / `question.rejected`
+/// on the bus), forwarded by the plugin as the clear signal for `@agent_question_request`. Like
+/// [`PERMISSION_REPLIED`] it carries no state claim, so the intake keys the clear on this name.
+pub const QUESTION_REPLIED: &str = "question-replied";
 
 /// The agent and event the hook reply lane covers. claude only in v1: it is the one agent whose
 /// hook can return a permission decision, and the one whose prompt label does not survive a phone
@@ -163,7 +168,7 @@ pub fn run(args: EventArgs) -> ExitCode {
 }
 
 /// The hold bound when this event is one the lane covers, `None` otherwise. Three conditions, all
-/// of them cheap: the sub-table is named, the agent is claude, the event is `PermissionRequest`.
+/// of them cheap: the lane is not turned off, the agent is claude, the event is `PermissionRequest`.
 fn hook_lane_hold(args: &EventArgs) -> Option<u64> {
     (args.agent == HOOK_LANE_AGENT && args.kind == HOOK_LANE_EVENT)
         .then_some(args.claude_reply_hold_ms)
@@ -331,6 +336,17 @@ pub fn apply_event(
         event_session.as_deref(),
         payload,
     );
+    // The question channel, the same shape over `@agent_question_request`: OpenCode's `que_*` id,
+    // kept apart from the permission id because they answer different endpoints.
+    let question_wrote = apply_question_request(
+        tmux,
+        pane,
+        kind,
+        &plan,
+        stored.as_ref(),
+        event_session.as_deref(),
+        payload,
+    );
     // The pending-call trio (`@agent_pending_tool`/`_call`/`_summary`): stamped from Claude's
     // `PermissionRequest` payload on the same edges, cleared on the same ones.
     let pending_wrote = apply_pending_call(
@@ -342,7 +358,7 @@ pub fn apply_event(
         event_session.as_deref(),
         payload,
     );
-    if plan.is_verdict() || permission_wrote || pending_wrote {
+    if plan.is_verdict() || permission_wrote || question_wrote || pending_wrote {
         EventOutcome::Applied
     } else {
         EventOutcome::Declined
@@ -556,7 +572,10 @@ pub fn episode_already_notified(notified_at: Option<u64>, episode_at: u64) -> bo
 
 #[cfg(test)]
 mod tests {
-    use super::permission::{pending_call_effect, permission_request_effect, PendingCall, PermReq};
+    use super::permission::{
+        pending_call_effect, permission_request_effect, question_request_effect, PendingCall,
+        PermReq,
+    };
     use super::*;
     use tma_core::manifest::Manifest;
     use tma_core::{AgentState, Detail};
@@ -1484,6 +1503,82 @@ mod tests {
         assert_eq!(
             permission_request_effect(PERMISSION_REPLIED, &EventPlan::Unmapped, None, None, "{}"),
             PermReq::Clear
+        );
+    }
+
+    /// The `que_*` id rides its own payload key and its own option, so a question edge cannot
+    /// stamp a permission id and a permission edge cannot stamp a question one. That separation is
+    /// the whole point: the two answer different endpoints.
+    #[test]
+    fn the_question_channel_is_separate_from_the_permission_one() {
+        const OC_QUESTION: &str = r#"{"session_id":"ses_1122","question_id":"que_7f3a"}"#;
+        let blocked = |detail: &str| EventPlan::Stamp {
+            state: AgentState::Blocked,
+            detail: Some(Detail::new(detail)),
+            set_attention: true,
+            register_session: None,
+            notify: false,
+            record_turn: false,
+        };
+        assert_eq!(
+            question_request_effect(
+                "question-required",
+                &blocked("question"),
+                None,
+                None,
+                OC_QUESTION
+            ),
+            PermReq::Set("que_7f3a".to_string())
+        );
+        // The permission effect reads `request_id`, which this payload does not carry.
+        assert_eq!(
+            permission_request_effect(
+                "question-required",
+                &blocked("question"),
+                None,
+                None,
+                OC_QUESTION
+            ),
+            PermReq::None
+        );
+        // And the reverse: a permission payload carries no `question_id`.
+        assert_eq!(
+            question_request_effect(
+                "permission-required",
+                &blocked("permission"),
+                None,
+                None,
+                OC_PERMISSION_API
+            ),
+            PermReq::None
+        );
+
+        let idle = EventPlan::Stamp {
+            state: AgentState::Idle,
+            detail: None,
+            set_attention: false,
+            register_session: None,
+            notify: false,
+            record_turn: true,
+        };
+        assert_eq!(
+            question_request_effect("stop", &idle, None, None, "{}"),
+            PermReq::Clear
+        );
+        assert_eq!(
+            question_request_effect(QUESTION_REPLIED, &EventPlan::Unmapped, None, None, "{}"),
+            PermReq::Clear
+        );
+        // A foreign session's end must not clear this pane's question, exactly as for a permission.
+        assert_eq!(
+            question_request_effect(
+                QUESTION_REPLIED,
+                &EventPlan::Unmapped,
+                Some("ses_mine"),
+                Some("ses_theirs"),
+                "{}"
+            ),
+            PermReq::None
         );
     }
 

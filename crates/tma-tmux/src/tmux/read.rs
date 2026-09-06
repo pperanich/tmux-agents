@@ -41,8 +41,9 @@ const AGENT_OPTIONS: &[&str] = &[
 /// pair and the quota/cost lane (both parallel lanes, not part of the state tuple; surfaces read
 /// them for the JSON rows),
 /// the model label (`@agent_model`, read by `tma doctor`'s recognized-model check), and the OpenCode
-/// API-channel pair (`@agent_permission_request` / `@agent_api_endpoint`, read by the action
-/// broker and `tma doctor`). Appended after [`AGENT_OPTIONS`] (order fixed by [`parse_pane_line`]).
+/// API-channel trio (`@agent_permission_request` / `@agent_question_request` / `@agent_api_endpoint`,
+/// read by the action broker and `tma doctor`). Appended after [`AGENT_OPTIONS`] (order fixed by
+/// [`parse_pane_line`]).
 const EXTRA_PANE_OPTIONS: &[&str] = &[
     opt::TITLE_MATCH_PID,
     opt::REG_DEAD_SINCE,
@@ -61,6 +62,9 @@ const EXTRA_PANE_OPTIONS: &[&str] = &[
     opt::COST_USD,
     opt::MODEL,
     opt::PERMISSION_REQUEST,
+    // Its own channel beside the permission id: the two answer different endpoints, so a reader
+    // that saw only one of them would fire a reply at a request nothing is holding.
+    opt::QUESTION_REQUEST,
     opt::API_ENDPOINT,
     // The pending-call trio. Every consumer already read these off `options` (`cycle`'s
     // `RowCompanions`, so the `ls --json` `pending_*` keys, and the act audit line); nothing put

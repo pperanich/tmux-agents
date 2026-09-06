@@ -23,6 +23,10 @@ const BUNDLED: &[(&str, &str)] = &[
     ),
     ("deny", include_str!("../../tma-core/actions/deny.toml")),
     (
+        "question_reject",
+        include_str!("../../tma-core/actions/question_reject.toml"),
+    ),
+    (
         "interrupt",
         include_str!("../../tma-core/actions/interrupt.toml"),
     ),
@@ -206,6 +210,7 @@ mod tests {
         for want in [
             "approve",
             "deny",
+            "question_reject",
             "interrupt",
             "compact",
             "steer",

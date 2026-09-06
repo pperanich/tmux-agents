@@ -1,0 +1,192 @@
+{
+  "schema": 1,
+  "id": "7",
+  "t": "window",
+  "pane": "%1",
+  "agent": "claude",
+  "session": {
+    "agent": "claude",
+    "session_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+    "cwd": "/xxxxx/xxxxxxxx",
+    "version": "2.1.236",
+    "model": "xxxxxxxxxxxx"
+  },
+  "older": "t1.1234.beef.1000.100.0",
+  "budget_truncated": true,
+  "unknown": 0,
+  "events": [
+    {
+      "cursor": "t1.1234.beef.1000.100.0",
+      "kind": "session_meta",
+      "agent": "claude",
+      "session_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      "cwd": "/xxxxx/xxxxxxxx",
+      "version": "2.1.236",
+      "model": "xxxxxxxxxxxx",
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.110.0",
+      "kind": "user_message",
+      "bytes": 128,
+      "attachments": 1,
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": "xxxxxxxxxxxxxxxx",
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.120.0",
+      "kind": "assistant_text",
+      "bytes": 512,
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": "xxxxxxxxxxxxxxxx",
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.130.0",
+      "kind": "thinking",
+      "bytes": 64,
+      "redacted": true,
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.140.0",
+      "kind": "tool_call",
+      "name": "xxxx",
+      "call_id": "xxxxxxxxxxxx",
+      "arg_keys": [
+        "xxxxxxxx",
+        "xxxxxxxxxxxx"
+      ],
+      "bytes": 96,
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": "xxxxxxxxxxxxxxxx",
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.150.0",
+      "kind": "tool_result",
+      "call_id": "xxxxxxxxxxxx",
+      "status": "ok",
+      "bytes": 2048,
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": "xxxxxxxxxxxxxxxx",
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.160.0",
+      "kind": "tool_result",
+      "call_id": "xxxxxxxxxxxx",
+      "status": "error",
+      "bytes": 64,
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.170.0",
+      "kind": "tool_result",
+      "call_id": null,
+      "status": "pending",
+      "bytes": 0,
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.180.0",
+      "kind": "tool_result",
+      "call_id": null,
+      "status": "unknown",
+      "bytes": 0,
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.190.0",
+      "kind": "permission_request",
+      "tool": "xxxx",
+      "call_id": "xxxxxxxxxxxx",
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.200.0",
+      "kind": "turn_boundary",
+      "boundary": "start",
+      "reason": null,
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.210.0",
+      "kind": "turn_boundary",
+      "boundary": "end",
+      "reason": "xxxxxxxx",
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.220.0",
+      "kind": "usage",
+      "input": 96000,
+      "output": 1200,
+      "total": 97200,
+      "context_window": 200000,
+      "cost_usd": 0.25,
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.230.0",
+      "kind": "subagent_ref",
+      "child_id": "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx",
+      "external_file": true,
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.240.0",
+      "kind": "compaction",
+      "compaction": "xxxxxxxx",
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.250.0",
+      "kind": "attachment",
+      "attachment": "xxxxxxxx",
+      "bytes": 4096,
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.260.0",
+      "kind": "bookkeeping",
+      "type_name": "xxxxxxxx",
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    },
+    {
+      "cursor": "t1.1234.beef.1000.270.0",
+      "kind": "unknown",
+      "type_name": "xxxxxxxx",
+      "ts": "2026-09-05T00:00:00.000Z",
+      "preview": null,
+      "body": null
+    }
+  ]
+}

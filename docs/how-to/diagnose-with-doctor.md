@@ -6,17 +6,17 @@ reports each one's effective tier and why, and never stamps anything.
 
 ```
 $ tma doctor
-daemon:  not running (/tmp/tma/7f665a9304f7e8ed.sock) — tier 3 needs a running daemon (`tma daemon --ensure`)
-ambient: polling — `tma status` last ran 0.1s ago
-clients: none attached — `#()` status jobs only run while a client draws the status line, so nothing polls this server (run the daemon or attach a client)
+daemon:  not running (/tmp/tma/7f665a9304f7e8ed.sock): tier 3 needs a running daemon (`tma daemon --ensure`)
+ambient: polling: `tma status` last ran 0.1s ago
+clients: none attached: `#()` status jobs only run while a client draws the status line, so nothing polls this server (run the daemon or attach a client)
 watch:   no watcher running (`tma watch` advertises for SIGUSR1 nudges)
 hooks:   after-select-pane ✓  session-window-changed ✓
 wrapper: /home/you/.local/bin/tma-hook ✓
 agents:  6 loaded, no issues
 actions: 4 loaded, no issues
-remote:  1 pane(s) behind a remote shell — an agent there reports only if it can reach this tmux socket (see docs/how-to/agents-in-containers.md)
+remote:  1 pane(s) behind a remote shell: an agent there reports only if it can reach this tmux socket (see docs/how-to/agents-in-containers.md)
   - %10 work:4.0 (ssh)
-ignored: 1 pane(s) excluded from detection — unset the option to bring one back (`tmux set-option -pu -t <pane> @agent_ignore`)
+ignored: 1 pane(s) excluded from detection: unset the option to bring one back (`tmux set-option -pu -t <pane> @agent_ignore`)
   - %1 work:1.0 (ignored via @agent_ignore = manual)
 
 panes (2):
@@ -38,7 +38,7 @@ looked at. A daemon running a different build than the CLI adds a second line:
 `tma reload` only re-reads config and manifests, so picking up a new build means
 stopping the daemon and running `tma daemon --ensure` again.
 
-**`ambient:`** whether anything is calling `tma status`. `polling — last ran Ns
+**`ambient:`** whether anything is calling `tma status`. `polling: last ran Ns
 ago` means a driver is alive, whether that is `#(tma status)` in `status-right`,
 an external bar, or a cron job. `NOT polling` means nothing is, and with no daemon
 that leaves pane state as stale as your last explicit command. See [Show agents in
@@ -56,7 +56,11 @@ focus-change nudge.
 hook can read `✓`, or `✗` as `drifted` (it runs a different command than this
 build installs, usually a moved binary), `wiped` (recorded but gone server-wide,
 so the server restarted), or `missing`. Each non-present hook gets its own
-indented reason line.
+indented reason line. `wiped` is the one the daemon repairs itself: tmux hooks
+live in the server, so a restart drops them, and a daemon re-arms whatever the
+install record names when it starts. Seeing `wiped` therefore means no daemon has
+started since the restart, and `tma daemon --ensure` fixes it as surely as
+re-running `tma install-hooks`.
 
 **`agents:` and `actions:`** the manifest and action rosters, with one `-` line
 per file the loader skipped and per action naming an unknown agent. A
@@ -86,6 +90,11 @@ evidence source it came from (`hook`, `capture`, or `process`), and
 how long ago that evidence was taken. A pane with no decodable stamp reads
 `unstamped`.
 
+The `hooks:` line reads `wired` when every channel names tma's own entry, and
+`wired (agent codex: notify chained through <program>)` when another tool has
+taken codex's single `notify` key and passes tma's command on to it: the wiring
+fires, so it is reported rather than warned about.
+
 The tier is what the pane is actually getting, not what it could get:
 
 | tier | means |
@@ -108,8 +117,11 @@ That is a suspect-wiring signal, not a proof: the usual cause is an agent
 restarted without the wiring or a missing wrapper, so run
 `tma install-hooks --check`. A hook claiming `working` accounts for the pane's
 output until capture contradicts it, so a long tool call does not demote a
-healthy pane. `model:` names an unrecognized model string. `api:` flags a pending
-permission request with no reachable endpoint.
+healthy pane. `model:` names the model the pane stamped, and adds
+`unrecognized: no [telemetry.windows] entry names it` only for a pane whose
+context channel would have to size its gauge from that table. No shipped channel
+does, so on a normal install that line is the model name and nothing else.
+`api:` flags a pending permission request with no reachable endpoint.
 
 ## A pane that is not listed at all
 
@@ -147,7 +159,7 @@ tool for "detected, but as the wrong state" as opposed to "not detected". See
 Both are reported, and neither is a warning.
 
 ```
-remote:  1 pane(s) behind a remote shell — an agent there reports only if it can reach this tmux socket (see docs/how-to/agents-in-containers.md)
+remote:  1 pane(s) behind a remote shell: an agent there reports only if it can reach this tmux socket (see docs/how-to/agents-in-containers.md)
   - %10 work:4.0 (ssh)
 ```
 
@@ -161,7 +173,7 @@ agent behind one of those actually report, give its hooks a route back to this
 socket, which is [Run an agent in a container](agents-in-containers.md).
 
 ```
-ignored: 1 pane(s) excluded from detection — unset the option to bring one back (`tmux set-option -pu -t <pane> @agent_ignore`)
+ignored: 1 pane(s) excluded from detection: unset the option to bring one back (`tmux set-option -pu -t <pane> @agent_ignore`)
   - %1 work:1.0 (ignored via @agent_ignore = manual)
 ```
 

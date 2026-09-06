@@ -1,0 +1,33 @@
+{
+  "schema": 1,
+  "id": "4",
+  "t": "card",
+  "card": "permission",
+  "pane": "%1",
+  "agent": "claude",
+  "lane": "hook",
+  "options": [
+    {
+      "kind": "allow-once",
+      "name": "Yes",
+      "option_id": "xxxxxxxxxxxx"
+    },
+    {
+      "kind": "reject-once",
+      "name": "No",
+      "option_id": "xxxxxxxxxxxx"
+    }
+  ],
+  "extraction": "exact",
+  "pending_call": {
+    "tool": "xxxx",
+    "input": {
+      "xxxxxxx": "xxxxxxxxxxxxxxxx"
+    },
+    "call_id": "xxxxxxxxxxxx"
+  },
+  "binder": {
+    "expect_episode_ms": 1757030400000,
+    "expect_permission_request": "xxxxxxxxxxxx"
+  }
+}

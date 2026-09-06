@@ -344,6 +344,8 @@ pub(super) fn run_foreground(tmux: &Tmux, paths: &Paths, opts: DaemonOpts) -> Ex
         return ExitCode::FAILURE;
     }
 
+    rearm_tmux_hooks(tmux);
+
     serve(
         tmux,
         &listener,
@@ -368,6 +370,24 @@ pub(super) fn run_foreground(tmux: &Tmux, paths: &Paths, opts: DaemonOpts) -> Ex
     }
     drop(lock);
     ExitCode::SUCCESS
+}
+
+/// Re-install the recorded attention-clear hooks this server no longer carries, and say so once.
+///
+/// tmux hooks are runtime server state: a `kill-server` or a reboot wipes the array while the
+/// install record still says they are installed, so the pane you select stops clearing its
+/// attention flag until someone re-runs `tma install-hooks`. The daemon starts on the new server
+/// anyway (the old one exits on its `#{pid}` recheck), which makes this the one place that already
+/// knows a restart happened. Runs under the single-instance lock, so two daemons cannot both append.
+fn rearm_tmux_hooks(tmux: &Tmux) {
+    let config_dir = tma_runtime::config::config_dir(None);
+    let rearmed = tma_runtime::tmux_hooks::rearm_installed_hooks(tmux, &config_dir);
+    if !rearmed.is_empty() {
+        eprintln!(
+            "tma: re-armed the tmux attention hooks this server had lost (a restart wipes them): {}",
+            rearmed.join(", ")
+        );
+    }
 }
 
 /// Open the per-server lock and take the single-instance flock, emptying the file the instant it is

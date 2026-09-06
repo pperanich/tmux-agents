@@ -1,0 +1,14 @@
+user_message	bytes=16 attachments=0
+turn_boundary	kind=start reason=-
+thinking	bytes=19 redacted=false
+assistant_text	bytes=16
+tool_call	name=bash call_id=call_ok args=[command,description] bytes=59
+tool_result	call_id=call_ok status=ok bytes=12
+tool_call	name=write call_id=call_denied args=[filePath] bytes=33
+tool_result	call_id=call_denied status=error bytes=106
+turn_boundary	kind=end reason=stop
+usage	input=1200 output=340 total=- window=- cost=0.01230
+subagent_ref	child=ses_synthetic02 external=false
+attachment	kind=file bytes=92
+compaction	kind=compaction
+bookkeeping	type=part/agent

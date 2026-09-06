@@ -37,15 +37,26 @@ pub mod transitions;
 // and the shared primitives (`http` is internal to the broker).
 pub mod actions;
 pub mod broker;
+// What a serving tma answers a `card` request with. The serve loop itself is the binary's; this is
+// the pure builder over the facts it gathers, so a card is testable without a pipe.
+pub mod card;
 pub mod debug;
+// The U10 authorization record: which remote devices are paired and what each may ask for.
+pub mod device;
 pub mod hook_lane;
 mod http;
 pub mod json;
 pub mod notify;
 pub mod nudge;
 pub mod seen;
+// The other half of what a serving tma answers: the transcript reader's events and refusals as the
+// wire's own, under the budgets a remote caller makes necessary.
+pub mod serve_transcript;
 // The per-host dispatch ledger: `broker::fire` decides, this decides whether it runs at all.
 pub mod slots;
+// The attention-clear tmux hooks: shared because the installer writes them and the daemon re-arms
+// what a server restart wiped, and the two must produce the same command.
+pub mod tmux_hooks;
 pub mod ui;
 pub mod window_name;
 

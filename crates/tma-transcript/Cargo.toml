@@ -10,10 +10,19 @@ description = "Host-side reader for agent transcript stores: normalized events, 
 [lints]
 workspace = true
 
+[features]
+# OpenCode's store is SQLite, so its reader needs a SQLite client and the four JSONL readers do not.
+# Off here and on in the `tma` binary: a crate that only wants the file stores stays C-free, and a
+# build without it serves opencode the `unsupported-store` refusal rather than a broken window.
+default = []
+opencode = ["dep:rusqlite"]
+
 [dependencies]
-# The typed refusal set. That is the whole dependency list: the workspace has no serde_json and
-# hand-rolls its JSON writer, so `src/json.rs` is the matching reader, in about 200 lines.
+# The typed refusal set. That, and the optional SQLite client below, is the whole dependency list:
+# the workspace has no serde_json and hand-rolls its JSON writer, so `src/json.rs` is the matching
+# reader, in about 200 lines.
 thiserror.workspace = true
+rusqlite = { workspace = true, optional = true }
 
 [dev-dependencies]
 # The fixture corpus declares its pinned store versions in `fixtures/stores/VERSIONS.toml`, which

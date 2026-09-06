@@ -1,9 +1,12 @@
-//! A minimal, dependency-free HTTP/1.1 POST over `std::net::TcpStream`. The action broker's
+//! A minimal, dependency-free HTTP/1.1 client over `std::net::TcpStream`. The action broker's
 //! API lane answers an OpenCode permission prompt with one small JSON POST to a localhost server, so
 //! the whole client is: resolve `host:port` from the base URL, connect with a deadline, write one
-//! request, read the status line. No TLS (localhost), no retry, no keep-alive, no body parsing beyond
-//! the status code — the repo's dependency discipline (AD: a small static binary) rules out a
-//! heavyweight HTTP crate for this.
+//! request, read the status line. No TLS (localhost), no retry and no keep-alive, because the
+//! repo's dependency discipline (AD: a small static binary) rules out a real HTTP crate for this.
+//!
+//! [`get_text`] is the one call that reads a body, because a card's pending question is the body
+//! rather than the status. It is bounded twice over: the same wall-clock deadline, and a byte cap,
+//! since nothing here trusts a length header a server sent.
 //!
 //! `timeout` bounds connect and the whole round trip: it is split across DNS/connect and the
 //! read/write via a wall-clock deadline, so a hung server cannot wedge the broker (which holds the
@@ -74,6 +77,103 @@ pub(crate) fn post_json(base: &str, path: &str, body: &str, timeout: Duration) -
         }
     }
     classify_status(&buf)
+}
+
+/// The most body one GET will keep. A pending question set is a few kilobytes; this bounds a
+/// server that answers with a stream rather than a document.
+const MAX_BODY_BYTES: usize = 256 * 1024;
+
+/// GET `base` + `path` and return the response body, bounded by `timeout` (connect + total).
+///
+/// A non-2xx status is an `Err`, so an error page's bytes are never handed back as a document. The
+/// caller parses what comes out and treats anything it cannot read as "no answer", which is why a
+/// truncated or oddly framed body degrades rather than raising.
+pub(crate) fn get_text(base: &str, path: &str, timeout: Duration) -> Result<String, String> {
+    let deadline = Instant::now() + timeout;
+    let target = Target::parse(base, path)?;
+    let mut stream = connect(&target, deadline)?;
+    let request = format!(
+        "GET {p} HTTP/1.1\r\nHost: {h}\r\nAccept: application/json\r\nConnection: close\r\n\r\n",
+        p = target.request_target,
+        h = target.host_header,
+    );
+    apply_remaining(&stream, deadline)?;
+    stream
+        .write_all(request.as_bytes())
+        .map_err(|e| format!("write failed: {e}"))?;
+    apply_remaining(&stream, deadline)?;
+
+    let mut raw: Vec<u8> = Vec::with_capacity(4096);
+    let mut chunk = [0u8; 4096];
+    loop {
+        if Instant::now() >= deadline {
+            return Err("request timed out".to_string());
+        }
+        match stream.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => {
+                raw.extend_from_slice(&chunk[..n]);
+                if raw.len() >= MAX_BODY_BYTES {
+                    break;
+                }
+            }
+            Err(e) => return Err(format!("read failed: {e}")),
+        }
+    }
+    match classify_status(&raw) {
+        HttpOutcome::Ok => body_of(&raw),
+        HttpOutcome::NotFound => Err("server returned HTTP 404".to_string()),
+        HttpOutcome::Error(e) => Err(e),
+    }
+}
+
+/// The body of a response, de-chunked when the server framed it that way. Chunked is worth handling
+/// rather than refusing: it is what an HTTP/1.1 server sends for a document it did not measure, and
+/// the caller would otherwise see the chunk headers as malformed JSON.
+fn body_of(raw: &[u8]) -> Result<String, String> {
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .ok_or_else(|| "response carries no header break".to_string())?;
+    let head = String::from_utf8_lossy(&raw[..split]).to_ascii_lowercase();
+    let body = &raw[split + 4..];
+    let bytes = if head.contains("transfer-encoding:") && head.contains("chunked") {
+        dechunk(body)
+    } else {
+        body.to_vec()
+    };
+    String::from_utf8(bytes).map_err(|_| "response body is not UTF-8".to_string())
+}
+
+/// Join a chunked body's chunks. The terminating zero chunk, a length this cannot read and a chunk
+/// the read stopped short of all end the join the same way: what arrived intact is returned, and the
+/// caller reads half a document as no document.
+fn dechunk(body: &[u8]) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut rest = body;
+    loop {
+        let Some(at) = rest.windows(2).position(|w| w == b"\r\n") else {
+            return out;
+        };
+        let size = std::str::from_utf8(&rest[..at])
+            .ok()
+            .map(|line| line.split(';').next().unwrap_or("").trim())
+            .and_then(|hex| usize::from_str_radix(hex, 16).ok());
+        let Some(size) = size.filter(|n| *n > 0) else {
+            return out;
+        };
+        // Checked, because the length is a hex string a server sent: `ffffffffffffffff` would
+        // otherwise overflow the slice bound rather than ending the join.
+        let from = at + 2;
+        let Some(chunk) = from.checked_add(size).and_then(|to| rest.get(from..to)) else {
+            return out;
+        };
+        out.extend_from_slice(chunk);
+        rest = from
+            .checked_add(size + 2)
+            .and_then(|next| rest.get(next..))
+            .unwrap_or_default();
+    }
 }
 
 /// Parse the status code from the first line (`HTTP/1.1 <code> <reason>`) into an outcome.
@@ -243,6 +343,61 @@ mod tests {
             ),
             HttpOutcome::Error(_)
         ));
+    }
+
+    /// Spawn a one-shot server that replies with `response` verbatim, so a test states the exact
+    /// framing on the wire rather than a library's rendering of it.
+    fn one_shot_raw(response: &'static str) -> String {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut buf = [0u8; 1024];
+                let _ = stream.read(&mut buf);
+                let _ = stream.write_all(response.as_bytes());
+            }
+        });
+        base
+    }
+
+    /// The two framings a small JSON reply actually arrives in. Both yield the same document: a
+    /// caller that could read only the measured one would lose the question set on a real server.
+    #[test]
+    fn a_get_reads_the_body_under_both_framings() {
+        let measured = one_shot_raw(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 14\r\n\
+             Connection: close\r\n\r\n[{\"id\":\"que\"}]",
+        );
+        assert_eq!(
+            get_text(&measured, "/question", Duration::from_secs(2)).unwrap(),
+            "[{\"id\":\"que\"}]"
+        );
+
+        let chunked = one_shot_raw(
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n\
+             8\r\n[{\"id\":\"\r\n6\r\nque\"}]\r\n0\r\n\r\n",
+        );
+        assert_eq!(
+            get_text(&chunked, "/question", Duration::from_secs(2)).unwrap(),
+            "[{\"id\":\"que\"}]"
+        );
+    }
+
+    /// A non-2xx is an error rather than a body: an error page parsed as a document would read as
+    /// "the server has no question", which is a different fact.
+    #[test]
+    fn a_get_reports_a_failed_status_rather_than_its_page() {
+        for status in ["HTTP/1.1 404 Not Found", "HTTP/1.1 500 Oops"] {
+            let base = one_shot(status);
+            assert!(
+                get_text(&base, "/question", Duration::from_secs(2)).is_err(),
+                "{status}"
+            );
+        }
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        drop(listener);
+        assert!(get_text(&base, "/question", Duration::from_millis(500)).is_err());
     }
 
     #[test]

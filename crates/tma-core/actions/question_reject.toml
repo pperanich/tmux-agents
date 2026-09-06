@@ -1,0 +1,22 @@
+min_engine_version = "0.5.14"
+name = "question_reject"
+label = "Dismiss question"
+kind = "keys"
+when = { state = ["blocked"], detail = ["question"] }
+
+# Dismiss a mid-turn question. A question is not a permission: nothing is granted, so `approve` and
+# `deny` gate it out (`detail = ["permission"]`) and this is the only bundled answer to one.
+#
+# OpenCode only, over its own HTTP surface: `POST {base}/question/{id}/reject`, no body, driven live
+# against 1.18.18 (17-owed §1.5). The part settles to `status = "error"` with `The user dismissed
+# this question`, so the model is told rather than left waiting. No other agent is listed because no
+# other agent declares a `question` dialog, and no `[keys]` arm is offered even for OpenCode: the
+# dialog's `esc dismiss` footer is captured chrome, but a keystroke fired at the wrong pane row is
+# exactly what the API lane exists to avoid.
+#
+# There is deliberately no bundled `question_reply`. Answering means quoting the option labels the
+# user picked, and `tma act` has no flag that could carry a list of lists of strings. The op exists
+# (`op = "question-reply"`) and the broker sends it, so a library caller can fire it through
+# `broker::fire` with `FireArgs::answers`; a CLI surface for it awaits a flag design.
+[api]
+opencode = { op = "question-reject" }

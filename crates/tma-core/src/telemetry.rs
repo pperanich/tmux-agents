@@ -23,18 +23,58 @@ pub struct ContextReport {
     pub tokens: Option<u64>,
 }
 
+/// The compiled-in context formats, keyed by the `format` id a manifest's `[telemetry.context]`
+/// names. One vocabulary, so a new channel cannot be given a parser without also answering
+/// [`ContextFormat::carries_own_window`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum ContextFormat {
+    ClaudeStatusline,
+    CodexRollout,
+    PiContext,
+    CursorStatusline,
+}
+
+impl ContextFormat {
+    fn from_id(id: &str) -> Option<ContextFormat> {
+        match id {
+            "claude-statusline-json" => Some(ContextFormat::ClaudeStatusline),
+            "codex-rollout-jsonl" => Some(ContextFormat::CodexRollout),
+            "pi-context-json" => Some(ContextFormat::PiContext),
+            "cursor-statusline-json" => Some(ContextFormat::CursorStatusline),
+            // Future formats land with their own parser; an unknown id is a silent ignore.
+            _ => None,
+        }
+    }
+
+    /// Whether the payload carries the context window its percent is divided by. Every shipped
+    /// channel does, which is why no gauge reads `[telemetry.windows]`.
+    fn carries_own_window(self) -> bool {
+        match self {
+            ContextFormat::ClaudeStatusline => true, // `used_percentage`, precomputed
+            ContextFormat::CodexRollout => true,     // `model_context_window` in the record
+            ContextFormat::PiContext => true,        // pi's own `percent` / `contextWindow`
+            ContextFormat::CursorStatusline => true, // `context_window_size` in the payload
+        }
+    }
+}
+
+/// Whether `format`'s payload carries its own context window, so no `[telemetry.windows]` lookup
+/// could ever size its gauge. `tma doctor` reads this to decide whether an `@agent_model` that table
+/// does not name is worth reporting; an unknown id answers `false`, keeping the report where a new
+/// channel would actually need the entry.
+pub fn context_format_carries_window(format: &str) -> bool {
+    ContextFormat::from_id(format).is_some_and(ContextFormat::carries_own_window)
+}
+
 /// Parse a context payload for `format`. `Some(report)` stamps (`pct = None` clears); `None` is a
 /// deliberate ignore — a payload with no compiled-in parser, or one this parser rejects as garbage
 /// (see [`parse_claude_statusline`]). There is no error path: the fire-and-forget push must never fail.
 pub fn parse_context(format: &str, payload: &str) -> Option<ContextReport> {
-    match format {
-        "claude-statusline-json" => parse_claude_statusline(payload),
-        "codex-rollout-jsonl" => parse_codex_rollout(payload),
-        "pi-context-json" => parse_pi_context(payload),
-        "cursor-statusline-json" => parse_cursor_statusline(payload),
-        // Future formats land with their own parser; an unknown format is a silent ignore here (the
-        // intake stamps nothing) rather than a stamp of the wrong shape.
-        _ => None,
+    match ContextFormat::from_id(format)? {
+        ContextFormat::ClaudeStatusline => parse_claude_statusline(payload),
+        ContextFormat::CodexRollout => parse_codex_rollout(payload),
+        ContextFormat::PiContext => parse_pi_context(payload),
+        ContextFormat::CursorStatusline => parse_cursor_statusline(payload),
     }
 }
 

@@ -1,0 +1,238 @@
+{
+  "schema": 1,
+  "id": "6",
+  "t": "receipts",
+  "receipts": [
+    {
+      "slot": "xxxx-0001",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "sent",
+      "reason": null,
+      "exit_code": 0,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0002",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "replied",
+      "reason": null,
+      "exit_code": 0,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0003",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "exited",
+      "reason": null,
+      "exit_code": 2,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0004",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "spawned",
+      "reason": null,
+      "exit_code": 0,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0005",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "timeout",
+      "reason": null,
+      "exit_code": 124,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0006",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "xxxxxxxxxxxx",
+      "reason": null,
+      "exit_code": 1,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0007",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "wrong-agent",
+      "exit_code": 4,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0008",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "no-coverage",
+      "exit_code": 4,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0009",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "requires-unmet",
+      "exit_code": 4,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0010",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "gated",
+      "exit_code": 4,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0011",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "locked",
+      "exit_code": 5,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0012",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "episode-changed",
+      "exit_code": 4,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0013",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "request-gone",
+      "exit_code": 4,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0014",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "sigil",
+      "exit_code": 4,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0015",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "control-bytes",
+      "exit_code": 4,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0016",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "too-long",
+      "exit_code": 4,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0017",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "empty",
+      "exit_code": 4,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0018",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "scope-denied",
+      "exit_code": 4,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0019",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "vanished",
+      "reason": "pane-gone",
+      "exit_code": 3,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0020",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "error",
+      "reason": "fired-unknown",
+      "exit_code": 1,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    },
+    {
+      "slot": "xxxx-0021",
+      "pane": "%1",
+      "action": "approve",
+      "outcome": "refused",
+      "reason": "xxxxxxxxxxxx",
+      "exit_code": 4,
+      "cached": false,
+      "device": "xxxxxxxxxxxxxxxx",
+      "at_ms": 1757030462000
+    }
+  ]
+}

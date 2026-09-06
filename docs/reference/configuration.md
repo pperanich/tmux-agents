@@ -62,6 +62,10 @@ osc_progress = false         # show OSC 9;4 taskbar progress while a window has 
 [act]                        # the action broker's audit record
 # log = "~/.local/state/tma/acts.jsonl"  # append one JSON line per fired action
 
+[serve]                      # `tma serve`: what one remote connection costs and how fresh it is
+reconcile_interval_ms = 2000 # stream cadence, and the freshness number the handshake quotes
+max_connections = 4          # concurrent serve connections; the next one is refused, not starved
+
 [focus]                      # attention-clear posture
 events = false               # set true to also install a pane-focus-in hook (needs `focus-events on`)
 
@@ -69,7 +73,7 @@ events = false               # set true to also install a pane-focus-in hook (ne
 wrapper_ref = "bare"         # writes just `tma-hook`, resolved off $PATH; "absolute" writes the path
 
 [hooks]                      # what an installed hook does at fire time, beyond stamping the pane
-# claude_reply_lane = { hold_ms = 25000 }  # let `tma act` answer claude's permission prompt
+claude_reply_lane = { hold_ms = 25000 }  # let `tma act` answer claude's permission prompt; false is off
 
 [tmux]                       # which tmux-compatible binary tma spawns
 # bin = "tmate"              # default: plain `tmux` off PATH; env TMA_TMUX_BIN overrides this
@@ -185,6 +189,22 @@ exists so a test or CI run can flip the fire path without writing a config file.
 |---|---|---|
 | `log` | unset | Path to a JSONL file; every `tma act` fire appends one line, refusals included, naming the surface that asked. `~` is expanded and parent directories are created; the file is created `0600`. Errors are silent, never failing an action. Key set and rationale: [The act audit log](cli.md#the-act-audit-log). |
 
+## `[serve]`: remote connections
+
+| key | default | meaning |
+|---|---|---|
+| `reconcile_interval_ms` | `2000` | How often a subscription publishes, and the freshness threshold the handshake quotes to the device. Floored at 250 ms: a device that asked for zero asked for a spin loop against tmux. |
+| `max_connections` | `4` | How many `tma serve` connections this host answers at once. The next one is refused with a typed `too-many-connections` error rather than accepted and starved. |
+
+The cap exists because **every serve connection runs its own detection cycle**: a
+`capture-pane` per agent pane and its guarded stamp writes, per connection, per
+interval. Two devices plus the daemon is three concurrent detection loops, so
+connections cost tmux query throughput and nothing else bounds them. Four is
+chosen for a phone and a tablet with room for a re-dial that has not hung up yet.
+
+Pairing and scopes are not config: they live in `devices.toml` beside this file
+and are written only by [`tma device`](cli.md#tma-device).
+
 ## `[focus]`: attention-clear posture
 
 | key | default | meaning |
@@ -254,18 +274,22 @@ other agent are unaffected.
 
 | key | default | meaning |
 |---|---|---|
-| `claude_reply_lane` | unset | A sub-table `{ hold_ms = <milliseconds> }`. When present, claude's `PermissionRequest` hook parks the pending call and waits up to `hold_ms` for a decision from `tma act` instead of returning immediately. Naming the sub-table is the opt-in; `hold_ms` is optional and defaults to `25000`. |
+| `claude_reply_lane` | `{ hold_ms = 25000 }` | Claude's `PermissionRequest` hook parks the pending call and waits up to `hold_ms` for a decision from `tma act` instead of returning immediately. Absent means the default hold; `false` turns the lane off; a sub-table `{ hold_ms = <milliseconds> }` sets the hold. |
 
 ```toml
 [hooks]
-claude_reply_lane = { hold_ms = 25000 }
+claude_reply_lane = false    # off: the hook stamps and returns, with nothing on stdout
 ```
 
-Unset is not a reduced mode, it is the behaviour every release before this one had:
-the hook writes its stamps (`blocked` / `permission`, the pending-call trio), exits
-0 with nothing on stdout, and claude draws the prompt it always drew. Naming the
-sub-table adds a hold on top of those same stamps. The dialog is on screen for the
-whole of it either way, and the keyboard still answers it.
+The hold is on by default because it costs the pane nothing. Claude draws its dialog
+the moment it asks and does not wait for the hook, and a keyboard answer during the
+hold is honoured in about 50 ms with the hook still parked (measured on Claude Code
+2.1.261). What the hold adds is a second way to answer; it takes none away. The
+residual is one sleeping `tma event` per hand-answered prompt, for up to `hold_ms`.
+
+Turning it off with `false` is the behaviour every release before the lane had: the
+hook writes its stamps (`blocked` / `permission`, the pending-call trio), exits 0
+with nothing on stdout, and claude draws the prompt it always drew.
 
 `hold_ms` is bounded at load into `1000..=590000`; a value outside that fails the
 config with an error naming the range, rather than loading a lane that quietly never
@@ -424,9 +448,14 @@ does: Claude precomputes its context percent, Codex carries
 their payload's own numbers are divided by. A channel with no usable window
 stamps nothing rather than guessing one, so no gauge has ever been sized here.
 
-What is left is name recognition. `tma doctor` reports a stamped `@agent_model`
-that no entry names as unrecognized; that is a label, not a warning, and it does
-not affect `doctor --exit-code`. Adding an entry only quiets that line.
+What is left is name recognition, and only where it could matter. `tma doctor`
+consults this table for a pane whose `[telemetry.context]` channel does NOT carry
+a window of its own; for the four that do (`claude-statusline-json`,
+`codex-rollout-jsonl`, `pi-context-json`, `cursor-statusline-json`, so every agent
+tma ships), it reports the stamped `@agent_model` and says nothing about the
+table. Where the lookup does apply, a model no entry names is reported as
+unrecognized: a label, not a warning, and it does not affect
+`doctor --exit-code`. Adding an entry only quiets that line.
 
 Three `gemini-*` names ship as recognized, left over from the sizing era; your
 entries add to them. The TOML shape is unchanged and the sizes still have to
