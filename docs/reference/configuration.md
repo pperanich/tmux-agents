@@ -424,9 +424,14 @@ does: Claude precomputes its context percent, Codex carries
 their payload's own numbers are divided by. A channel with no usable window
 stamps nothing rather than guessing one, so no gauge has ever been sized here.
 
-What is left is name recognition. `tma doctor` reports a stamped `@agent_model`
-that no entry names as unrecognized; that is a label, not a warning, and it does
-not affect `doctor --exit-code`. Adding an entry only quiets that line.
+What is left is name recognition, and only where it could matter. `tma doctor`
+consults this table for a pane whose `[telemetry.context]` channel does NOT carry
+a window of its own; for the four that do (`claude-statusline-json`,
+`codex-rollout-jsonl`, `pi-context-json`, `cursor-statusline-json`, so every agent
+tma ships), it reports the stamped `@agent_model` and says nothing about the
+table. Where the lookup does apply, a model no entry names is reported as
+unrecognized: a label, not a warning, and it does not affect
+`doctor --exit-code`. Adding an entry only quiets that line.
 
 Three `gemini-*` names ship as recognized, left over from the sizing era; your
 entries add to them. The TOML shape is unchanged and the sizes still have to

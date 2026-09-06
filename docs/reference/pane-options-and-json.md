@@ -405,10 +405,10 @@ Each `agents` element carries this exact key set:
 | `state` | string or null | the stamped state token, `null` when the pane has none |
 | `source` | string or null | provenance of that state (`hook` / `capture` / `process`; `activity` is legacy, read-only) |
 | `evidence_age_ms` | number or null | age of the evidence behind it |
-| `hook_status` | string | `wired`, `incomplete`, `not_installed`, `hookless`, or `no_adapter` |
+| `hook_status` | string | `wired`, `incomplete`, `not_installed`, `hookless`, or `no_adapter`. Wiring reached through another program's config (codex's `notify` chained onward) reports `wired`; the chain is named in the text report |
 | `hooks_wired` | boolean | `true` only for `wired`, so a consumer needs no token table for the common question |
 | `model` | string or null | the best-effort `@agent_model` label |
-| `window_covered` | boolean or null | whether `[telemetry.windows]` names that model; `null` when there is no model to check |
+| `window_covered` | boolean or null | whether `[telemetry.windows]` names that model; `null` when there is no model, and also when the pane's context channel carries its own window (every shipped one does), where that table is never read |
 | `endpoint_ok` | boolean or null | whether the pane's API endpoint answered; `null` when the agent has no API lane |
 | `hook_demoted` | boolean | registered through a hook but currently running on capture evidence: output kept arriving that its hooks did not account for. A `working` hook claim accounts for output until capture contradicts it, so a long tool call does not set this |
 | `tier` | number | the effective tier (`3` / `2` / `1`) |

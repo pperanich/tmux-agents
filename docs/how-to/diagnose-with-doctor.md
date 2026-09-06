@@ -6,17 +6,17 @@ reports each one's effective tier and why, and never stamps anything.
 
 ```
 $ tma doctor
-daemon:  not running (/tmp/tma/7f665a9304f7e8ed.sock) — tier 3 needs a running daemon (`tma daemon --ensure`)
-ambient: polling — `tma status` last ran 0.1s ago
-clients: none attached — `#()` status jobs only run while a client draws the status line, so nothing polls this server (run the daemon or attach a client)
+daemon:  not running (/tmp/tma/7f665a9304f7e8ed.sock): tier 3 needs a running daemon (`tma daemon --ensure`)
+ambient: polling: `tma status` last ran 0.1s ago
+clients: none attached: `#()` status jobs only run while a client draws the status line, so nothing polls this server (run the daemon or attach a client)
 watch:   no watcher running (`tma watch` advertises for SIGUSR1 nudges)
 hooks:   after-select-pane ✓  session-window-changed ✓
 wrapper: /home/you/.local/bin/tma-hook ✓
 agents:  6 loaded, no issues
 actions: 4 loaded, no issues
-remote:  1 pane(s) behind a remote shell — an agent there reports only if it can reach this tmux socket (see docs/how-to/agents-in-containers.md)
+remote:  1 pane(s) behind a remote shell: an agent there reports only if it can reach this tmux socket (see docs/how-to/agents-in-containers.md)
   - %10 work:4.0 (ssh)
-ignored: 1 pane(s) excluded from detection — unset the option to bring one back (`tmux set-option -pu -t <pane> @agent_ignore`)
+ignored: 1 pane(s) excluded from detection: unset the option to bring one back (`tmux set-option -pu -t <pane> @agent_ignore`)
   - %1 work:1.0 (ignored via @agent_ignore = manual)
 
 panes (2):
@@ -38,7 +38,7 @@ looked at. A daemon running a different build than the CLI adds a second line:
 `tma reload` only re-reads config and manifests, so picking up a new build means
 stopping the daemon and running `tma daemon --ensure` again.
 
-**`ambient:`** whether anything is calling `tma status`. `polling — last ran Ns
+**`ambient:`** whether anything is calling `tma status`. `polling: last ran Ns
 ago` means a driver is alive, whether that is `#(tma status)` in `status-right`,
 an external bar, or a cron job. `NOT polling` means nothing is, and with no daemon
 that leaves pane state as stale as your last explicit command. See [Show agents in
@@ -117,8 +117,11 @@ That is a suspect-wiring signal, not a proof: the usual cause is an agent
 restarted without the wiring or a missing wrapper, so run
 `tma install-hooks --check`. A hook claiming `working` accounts for the pane's
 output until capture contradicts it, so a long tool call does not demote a
-healthy pane. `model:` names an unrecognized model string. `api:` flags a pending
-permission request with no reachable endpoint.
+healthy pane. `model:` names the model the pane stamped, and adds
+`unrecognized: no [telemetry.windows] entry names it` only for a pane whose
+context channel would have to size its gauge from that table. No shipped channel
+does, so on a normal install that line is the model name and nothing else.
+`api:` flags a pending permission request with no reachable endpoint.
 
 ## A pane that is not listed at all
 
@@ -156,7 +159,7 @@ tool for "detected, but as the wrong state" as opposed to "not detected". See
 Both are reported, and neither is a warning.
 
 ```
-remote:  1 pane(s) behind a remote shell — an agent there reports only if it can reach this tmux socket (see docs/how-to/agents-in-containers.md)
+remote:  1 pane(s) behind a remote shell: an agent there reports only if it can reach this tmux socket (see docs/how-to/agents-in-containers.md)
   - %10 work:4.0 (ssh)
 ```
 
@@ -170,7 +173,7 @@ agent behind one of those actually report, give its hooks a route back to this
 socket, which is [Run an agent in a container](agents-in-containers.md).
 
 ```
-ignored: 1 pane(s) excluded from detection — unset the option to bring one back (`tmux set-option -pu -t <pane> @agent_ignore`)
+ignored: 1 pane(s) excluded from detection: unset the option to bring one back (`tmux set-option -pu -t <pane> @agent_ignore`)
   - %1 work:1.0 (ignored via @agent_ignore = manual)
 ```
 

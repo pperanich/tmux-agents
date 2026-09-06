@@ -442,30 +442,35 @@ fn doctor_lists_a_skipped_manifest_and_still_loads_the_rest() {
     );
 }
 
-/// A model stamped through the hook intake (SessionStart's `model` field) that no
-/// `[telemetry.windows]` entry names is reported as unrecognized (`window_covered:false`) without
-/// gating red: nothing reads that table, so it is bookkeeping, not misconfiguration. Faithful to the
-/// acceptance: the model reaches the pane via the real `tma event` hook path, not a bare option write.
+/// A model stamped through the hook intake (SessionStart's `model` field) is reported bare while
+/// the pane's context channel carries its own window (every shipped one does), and named as
+/// unrecognized only where a gauge would have to be sized from `[telemetry.windows]`. Neither gates
+/// red. Faithful to the acceptance: the model reaches the pane via the real `tma event` hook path.
 #[test]
-fn doctor_reports_an_unrecognized_hook_stamped_model_without_gating() {
+fn doctor_names_an_unrecognized_model_only_where_the_window_table_is_read() {
     if !tma_test_support::tmux_available() {
         eprintln!("skipping: tmux not installed");
         return;
     }
     let s = Scratch::new("model");
     let (pane, names) = spawn_agent(&s);
-    // A claude manifest matching the pane, wired for SessionStart so the hook registers + stamps model.
-    std::fs::write(
-        s.workdir.join("claude.toml"),
-        format!(
-            "min_engine_version = \"0.1\"\n\
-             [identity]\nprocess_names = [{names}]\n\
-             [hooks]\ncovers = [\"lifecycle\"]\n\
-             [[hooks.map]]\nevent = \"SessionStart\"\nclaim = {{ lifecycle = \"start\" }}\n\
-             [capture]\nvisible = []\n"
-        ),
-    )
-    .unwrap();
+    // A claude manifest matching the pane, wired for SessionStart so the hook registers + stamps
+    // model. `context` is the channel under test and is rewritten below.
+    let manifest = |context: &str| {
+        std::fs::write(
+            s.workdir.join("claude.toml"),
+            format!(
+                "min_engine_version = \"0.1\"\n\
+                 [identity]\nprocess_names = [{names}]\n\
+                 [hooks]\ncovers = [\"lifecycle\"]\n\
+                 [[hooks.map]]\nevent = \"SessionStart\"\nclaim = {{ lifecycle = \"start\" }}\n\
+                 [capture]\nvisible = []\n{context}"
+            ),
+        )
+        .unwrap();
+    };
+    // Claude's real channel: the statusline payload carries the window its percent is computed from.
+    manifest("[telemetry.context]\nchannel = \"event\"\nformat = \"claude-statusline-json\"\n");
 
     // Fire SessionStart carrying a model no entry names (only gemini-* ships as recognized).
     let payload = r#"{"session_id":"s","hook_event_name":"SessionStart","source":"startup","model":"claude-sonnet-5"}"#;
@@ -490,6 +495,7 @@ fn doctor_reports_an_unrecognized_hook_stamped_model_without_gating() {
         "the hook intake stamped @agent_model"
     );
 
+    // The shipped case: the model is reported, and nothing is said about a table nothing reads.
     let out = tma(&s, &["doctor", "--json"]);
     assert!(out.status.success());
     let json = String::from_utf8_lossy(&out.stdout);
@@ -498,15 +504,32 @@ fn doctor_reports_an_unrecognized_hook_stamped_model_without_gating() {
         "the stamped model is reported: {json}"
     );
     assert!(
-        json.contains("\"window_covered\":false"),
-        "an unrecognized model is reported as such: {json}"
+        json.contains("\"window_covered\":null"),
+        "a channel that carries its own window consults no table: {json}"
+    );
+    let text_out = tma(&s, &["doctor"]);
+    let text = String::from_utf8_lossy(&text_out.stdout);
+    assert!(
+        text.contains("model: claude-sonnet-5\n"),
+        "the model is named on its own line: {text}"
+    );
+    assert!(
+        !text.contains("unrecognized"),
+        "and carries no lint about a table its gauge never reads: {text}"
     );
 
-    let doctor_text = tma(&s, &["doctor"]);
-    let text = String::from_utf8_lossy(&doctor_text.stdout);
+    // The load-bearing case: a channel whose format carries no window of its own.
+    manifest("[telemetry.context]\nchannel = \"screen\"\nformat = \"raw-token-count\"\n");
+    let json = String::from_utf8_lossy(&tma(&s, &["doctor", "--json"]).stdout).into_owned();
     assert!(
-        text.contains("unrecognized; no [telemetry.windows] entry names it"),
-        "the human-readable form says the name is unrecognized, not that a gauge is unsized: {text}"
+        json.contains("\"window_covered\":false"),
+        "there the unrecognized name is a real finding: {json}"
+    );
+    let text_out = tma(&s, &["doctor"]);
+    let text = String::from_utf8_lossy(&text_out.stdout);
+    assert!(
+        text.contains("unrecognized: no [telemetry.windows] entry names it"),
+        "the human-readable form says the name is unrecognized: {text}"
     );
     assert!(
         !text.contains("size its gauge"),
