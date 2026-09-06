@@ -38,6 +38,8 @@ pub mod transitions;
 pub mod actions;
 pub mod broker;
 pub mod debug;
+// The U10 authorization record: which remote devices are paired and what each may ask for.
+pub mod device;
 pub mod hook_lane;
 mod http;
 pub mod json;

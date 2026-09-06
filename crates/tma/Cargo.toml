@@ -32,6 +32,9 @@ tma-daemon = { path = "../tma-daemon" }
 # The display crate: the picker, jump, and ls/status surfaces the bin dispatches. The
 # ratatui/crossterm/nucleo UI stack moved here with it, so the bin no longer names them.
 tma-ui = { path = "../tma-ui" }
+# The wire protocol: the frames `tma serve` speaks and the scope vocabulary `tma device` grants.
+# Types only, so this edge adds a codec and no behaviour.
+tma-proto = { path = "../tma-proto" }
 clap.workspace = true
 # `tma completions <shell>` writes the script for one shell to stdout; the release tarball and the
 # nix package generate theirs by running it.
@@ -61,8 +64,5 @@ similar.workspace = true
 [dev-dependencies]
 # Shared scratch-socket harness + daemon flock gate for the integration tests.
 tma-test-support = { path = "../tma-test-support" }
-# The wire protocol, for the host-to-proto vocabulary drift guard (`tests/proto_drift.rs`). The bin
-# does not speak it yet; the serve subcommand is what will promote this to a dependency.
-tma-proto = { path = "../tma-proto" }
-# Reading the drift guard's own JSON back as keys and tokens.
+# Reading the drift guard's own JSON back as keys and tokens, and driving the serve harness.
 serde_json = "1"

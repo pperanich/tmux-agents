@@ -1204,6 +1204,7 @@ dependencies = [
  "signal-hook 0.4.4",
  "thiserror",
  "tma-core",
+ "tma-proto",
  "tma-test-support",
  "tma-tmux",
  "toml",

@@ -80,6 +80,9 @@ pub(crate) enum Command {
     /// document with `--json`. Reads only, so it answers "did my dispatch land" without
     /// dispatching anything to find out.
     Receipts(ReceiptsArgs),
+    /// Pair, grant, revoke and list the devices `tma serve` will answer. The whole write side of
+    /// the scope model: no device can widen its own grants, and there is no in-app path that asks.
+    Device(DeviceArgs),
     /// Suppress notifications for the matched panes (`--for <DURATION>`, or indefinitely), or lift
     /// it with `--clear`. Detection, stamping, and the counts are untouched; the deadline lives in
     /// `@agent_mute_until`, so a mute survives a tma or daemon restart.
@@ -691,6 +694,67 @@ pub(crate) struct ReceiptsArgs {
     #[arg(long = "since-ms", value_name = "MS")]
     pub(crate) since_ms: Option<u64>,
     /// Emit the schema-1 document instead of one tab-separated line per receipt.
+    #[arg(long)]
+    pub(crate) json: bool,
+}
+
+/// Args for `tma device`, a verb with four subcommands and no flags of its own.
+#[derive(clap::Args)]
+pub(crate) struct DeviceArgs {
+    #[command(subcommand)]
+    pub(crate) command: DeviceCommand,
+}
+
+#[derive(clap::Subcommand)]
+pub(crate) enum DeviceCommand {
+    /// Record a device and what it may ask for. Grants `read`, `act:answer` and `act:steer`;
+    /// `act:always` is never granted by default and takes an explicit `--scope` or a later `grant`.
+    Pair(DevicePairArgs),
+    /// Add one scope to a paired device. The only way a scope is ever widened.
+    Grant(DeviceGrantArgs),
+    /// Remove a device's record entirely. Every live serve process re-reads the store per request
+    /// and per publish, so a revoked device's next request is refused and its stream stops.
+    Revoke(DeviceRevokeArgs),
+    /// One tab-separated line per paired device (`name`, `id`, `scopes`, `paired_at_ms`), or the
+    /// schema-1 document with `--json`.
+    List(DeviceListArgs),
+}
+
+#[derive(clap::Args)]
+pub(crate) struct DevicePairArgs {
+    /// The label `grant` and `revoke` address this device by. Unique within the store.
+    #[arg(value_name = "NAME")]
+    pub(crate) name: String,
+    /// The opaque id the spawner will pass as `tma serve --device`. For SSH that is the public
+    /// key's fingerprint (`ssh-keygen -lf <key.pub>` prints it).
+    #[arg(long, value_name = "ID")]
+    pub(crate) id: String,
+    /// Grant this scope on top of the defaults. Repeatable.
+    #[arg(long, value_name = "SCOPE", value_parser = crate::device::parse_scope)]
+    pub(crate) scope: Vec<tma_proto::Scope>,
+    /// Grant `read` and whatever `--scope` names, instead of the defaults. Bare, this is the
+    /// watch-only device: it sees the fleet and can answer nothing.
+    #[arg(long)]
+    pub(crate) only: bool,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct DeviceGrantArgs {
+    #[arg(value_name = "NAME")]
+    pub(crate) name: String,
+    #[arg(value_name = "SCOPE", value_parser = crate::device::parse_scope)]
+    pub(crate) scope: tma_proto::Scope,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct DeviceRevokeArgs {
+    #[arg(value_name = "NAME")]
+    pub(crate) name: String,
+}
+
+#[derive(clap::Args)]
+pub(crate) struct DeviceListArgs {
+    /// Emit the schema-1 document instead of one tab-separated line per device.
     #[arg(long)]
     pub(crate) json: bool,
 }
