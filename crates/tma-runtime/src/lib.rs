@@ -37,6 +37,9 @@ pub mod transitions;
 // and the shared primitives (`http` is internal to the broker).
 pub mod actions;
 pub mod broker;
+// What a serving tma answers a `card` request with. The serve loop itself is the binary's; this is
+// the pure builder over the facts it gathers, so a card is testable without a pipe.
+pub mod card;
 pub mod debug;
 pub mod hook_lane;
 mod http;

@@ -1201,11 +1201,14 @@ dependencies = [
  "regex",
  "rustix",
  "serde",
+ "serde_json",
  "signal-hook 0.4.4",
  "thiserror",
  "tma-core",
+ "tma-proto",
  "tma-test-support",
  "tma-tmux",
+ "tma-transcript",
  "toml",
 ]
 
