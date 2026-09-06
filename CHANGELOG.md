@@ -35,8 +35,7 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   behind a card is best-effort: a missing record or an unreachable endpoint subtracts detail rather
   than refusing the frame, because a device with no card cannot even fall back to opening the pane
   on the host. See [Serve tma over ssh](docs/how-to/serve-over-ssh.md).
-
-- **A wire protocol crate, `tma-proto`: internal plumbing, with nothing yet speaking it.** The
+- **A wire protocol crate, `tma-proto`, the vocabulary `tma serve` speaks.** The
   frames a remote device and a serving `tma` will exchange, defined once so the serve loop, when it
   lands, has a single definition to build against rather than one on each side of the pipe. It is
   types, a versioning discipline, and a corpus of golden JSON vectors; it does no I/O, spawns no
@@ -74,6 +73,15 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   is library-only for now: it means quoting the option labels the user picked, one list per
   question, and `tma act` has no flag that could carry that yet. See
   [Agent coverage](docs/reference/agent-coverage.md#opencode-api-lane).
+- **`tma transcript` now serves OpenCode panes, whose conversation is a SQLite database rather than
+  a file.** The `ses_*` id on the pane opens `~/.local/share/opencode/opencode.db` read-only, once,
+  and that connection is held for the life of the reader: a reader that reconnects on every poll
+  made 42 of 400 of the writing agent's own commits fail with `database is locked`, and a held one
+  made none fail. History comes from `message` and `part`, the newer `event` log is the live tail,
+  and a tool call watched from `running` to `completed` is one event whose status advanced rather
+  than three, because in this store a call and its result are the same row mutating in place.
+  SQLite is linked in rather than shelled out to, so an OpenCode transcript needs no `sqlite3` on
+  `PATH`. See [Agent transcript stores](docs/explanation/transcript-stores.md).
 
 ### Changed
 
@@ -117,15 +125,9 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   made `contradiction_capture_flips_stale_hook_working` fail on the macOS release run while passing
   on the pull request minutes earlier, and the acceptance now counts a recovering look the way the
   hookless one already did.
-- **`tma transcript` now serves OpenCode panes, whose conversation is a SQLite database rather than
-  a file.** The `ses_*` id on the pane opens `~/.local/share/opencode/opencode.db` read-only, once,
-  and that connection is held for the life of the reader: a reader that reconnects on every poll
-  made 42 of 400 of the writing agent's own commits fail with `database is locked`, and a held one
-  made none fail. History comes from `message` and `part`, the newer `event` log is the live tail,
-  and a tool call watched from `running` to `completed` is one event whose status advanced rather
-  than three, because in this store a call and its result are the same row mutating in place.
-  SQLite is linked in rather than shelled out to, so an OpenCode transcript needs no `sqlite3` on
-  `PATH`. See [Agent transcript stores](docs/explanation/transcript-stores.md).
+- **`tma doctor` no longer flags a model name where the context window table is never read.**
+  Claude's statusline and Codex's rollout carry their own window, so `[telemetry.windows]` is consulted
+  only for the sources that need it, and the model line stays quiet for the rest.
 
 ## [0.5.13] - 2026-09-05
 
