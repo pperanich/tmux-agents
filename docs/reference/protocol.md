@@ -49,7 +49,7 @@ inline.
 | `receipt` | what one dispatch resolved to |
 | `receipts` | the ledger, filtered |
 | `ack` | the request was accepted and has no body of its own |
-| `error` | a typed refusal: `unsupported-schema`, `bad-request`, `not-found`, `scope-denied`, `too-many-connections`, `unsupported`, `internal` |
+| `error` | a typed refusal: `unsupported-schema`, `bad-request`, `not-found`, `cursor-invalid`, `scope-denied`, `too-many-connections`, `unsupported`, `internal` |
 
 ## A session, frame by frame
 
@@ -152,12 +152,20 @@ re-reads the store per request and per publish. The next request is refused
 `scope-denied`, the stream stops, and the process exits: absence of the *record*
 is not absence of a *scope*, and a revoked device is not a read-only one.
 
-**What is not wired yet.** `card`, `window` and `event` parse and answer
-`unsupported`. They are the transcript and card surfaces, and they land in the
-same milestone; a device should read the refusal as "this host will not serve it"
-and grey the control out either way.
+**Reading one pane.** `card`, `window` and `event` all name a pane, and a pane
+this host does not have is `not-found` on each of them:
 
-| `error` | a typed refusal: `unsupported-schema`, `bad-request`, `not-found`, `cursor-invalid`, `scope-denied`, `unsupported`, `internal` |
+```
+→ {"schema":1,"id":"6","t":"card","pane":"%5"}
+← {"schema":1,"id":"6","t":"card","card":"permission","pane":"%5","agent":"claude","lane":"hook",…}
+→ {"schema":1,"id":"7","t":"window","pane":"%5","last":50}
+← {"schema":1,"id":"7","t":"window","pane":"%5","agent":"claude","older":"t1.…","events":[…]}
+```
+
+One transcript reader is held for the life of the connection, so its per-file
+stat memo and its OpenCode database handle survive between requests. That is not
+a cache for speed: a reader that reconnected per page would make the writing
+agent's own commits fail, which is a far worse bug than a slow page.
 
 ## What a card carries
 
@@ -203,6 +211,31 @@ ships for any agent yet. A `hook` card reports `exact` by construction: nothing 
 option carrying no `option_id` prints no index, so an app must not render one as a keycap: a
 position the host invented is not a key the user can type.
 
+### What the host gathers for one
+
+The pane's own read comes first, and it is the same read a `dispatch` gates on, so a card and the
+dispatch it invites describe one pane rather than two readings of it. It supplies the state, the
+detail, the episode the binder quotes, the permission-request id, and the pending tool and call the
+agent's hook stamped. Everything after it is **best-effort, and none of it can refuse the card**:
+
+- **The parked hook record**, when `@agent_permission_request` names one on disk. Its presence is
+  the whole difference between the `hook` lane and the `screen` one: a hold that already expired
+  left none behind, and the same pane degrades to `screen` / `failed`.
+- **The `approve` and `deny` labels** for that agent, from the loaded action manifests. An agent no
+  bundled action covers is offered nothing at all, rather than a control this host could not fire.
+- **The pending question**, for a pane blocked on one: a `GET /question` against the endpoint
+  `@agent_api_endpoint` resolved, bounded at **750 ms**, and asked only when the pane carries a
+  `@agent_question_request` id. The request loop answers one frame at a time, so the fetch is short
+  by construction; a server that does not answer in time yields an informational card, which is
+  something to read, rather than a stalled connection.
+- **The transcript tail**: roughly twenty headers off the end of the pane's own file, read only to
+  fill `pending_call` when the pane's stamps did not. A pane whose transcript this host cannot
+  resolve still gets its card.
+
+Only the pane read itself can fail the request, and a pane that is not there is `not-found`. A
+device that gets no frame cannot even fall back to opening the pane on the host, which is why every
+other gap subtracts detail instead.
+
 ## Windows and events
 
 A `window` is a page of transcript event **headers**, newest first, with an `older` cursor to page
@@ -211,9 +244,15 @@ body rides a window, so 200 events cost kilobytes. An `event` request fetches ex
 body.
 
 **The device asks and the host clamps.** Every field of `budget` is capped at the host's own
-default (`header_bytes` 256, `read_bytes` 1 MiB, `frame_bytes` 32 KiB), and so is `last`. A frame
-budget is a promise to the network, so a caller cannot raise it. `budget_truncated` means the byte
-budget, not the event count, ended the scan: the page is still exact and `older` pages on.
+default (`header_bytes` 256, `read_bytes` 1 MiB, `frame_bytes` 32 KiB), and so is `last`: absent it
+is 200, and it is clamped to 1000 however large a number arrives. A frame budget is a promise to the
+network, so a caller cannot raise it. `budget_truncated` means the byte budget, not the event count,
+ended the scan: the page is still exact and `older` pages on.
+
+**Which file is served** comes from the pane and never from the request. The host resolves it from
+`@agent_transcript` (the path the agent's own hook payload named, so it is one `stat`), falling back
+to walking the store's layout from `@agent_session` and the pane's working directory. A device names
+a pane; it cannot name a path.
 
 **Cursors are opaque.** A device only ever echoes back a token the host minted. A cursor stops
 addressing its bytes when the file is rewritten, truncated or replaced, and a hand-edited one was

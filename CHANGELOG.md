@@ -28,8 +28,13 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   approve, the slot says this approval was not already sent, and the binder says the thing you
   approved is still on screen. And the device store is re-read on every request and every publish,
   so revoking a device stops a connection that is already open rather than only its next dial.
-  `card`, `window` and `event` parse and answer `unsupported` until the transcript and card surfaces
-  land beside them. See [Serve tma over ssh](docs/how-to/serve-over-ssh.md).
+  `card`, `window` and `event` answer too: a card gathers what one blocked pane is asking (the
+  pane's own read, the parked hook record when the reply lane left one, the agent's pending question
+  fetched over a bounded 750 ms request, and a short transcript tail), and a window pages that
+  pane's transcript newest-first through one reader held for the life of the connection. Everything
+  behind a card is best-effort: a missing record or an unreachable endpoint subtracts detail rather
+  than refusing the frame, because a device with no card cannot even fall back to opening the pane
+  on the host. See [Serve tma over ssh](docs/how-to/serve-over-ssh.md).
 
 - **A wire protocol crate, `tma-proto`: internal plumbing, with nothing yet speaking it.** The
   frames a remote device and a serving `tma` will exchange, defined once so the serve loop, when it
@@ -43,10 +48,10 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   grew can be noticed. And every type and enum variant must appear in a committed vector, so a
   change to the wire shows up as a diff in a JSON file that a reviewer reads, instead of as nothing
   at all. See [The remote wire protocol](docs/reference/protocol.md).
-- **The two builders a serving tma will answer with, as library functions with no loop above them
-  yet.** `tma_runtime::card::build_card` turns one pane's facts into a card, and
+- **The two builders a serving tma answers with, as library functions the loop only feeds.**
+  `tma_runtime::card::build_card` turns one pane's facts into a card, and
   `tma_runtime::serve_transcript` turns the transcript reader's events, cursors and refusals into
-  the wire's. Both are pure over their inputs, so what a device would be told is testable without a
+  the wire's. Both are pure over their inputs, so what a device is told is testable without a
   pipe. The rule the card builder turns on is worth stating because it is the one a later change
   would be tempted to break: an unresolved tool call in a transcript says a call is in flight, which
   a slow tool, an open prompt and a crashed process all produce, so it is read only to say what a
