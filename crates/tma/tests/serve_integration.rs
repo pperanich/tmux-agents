@@ -105,11 +105,64 @@ fn pair(s: &Scratch, name: &str, id: &str, scopes: &[&str], only: bool) {
 /// path skips its freshness re-verify. The `tma act --slot` suite's fixture, so the wire path is
 /// measured against the same one the CLI path is.
 fn stamp_blocked_claude(s: &Scratch, pane: &str) {
+    stamp_blocked_claude_from(s, pane, "capture", "4242");
+}
+
+/// A `blocked/permission` stamp that survives detection cycles: the pane's live pid is the agent,
+/// so the exit sweep never removes the row, and `agent_manifest_for` names the pane's process so the
+/// cycle keeps treating the pane as an agent instead of clearing a lingering stamp.
+fn stamp_blocked_claude_held(s: &Scratch, pane: &str) {
+    let out = s.tmux(&["display-message", "-p", "-t", pane, "#{pane_pid}"]);
+    let pid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    stamp_blocked_claude_from(s, pane, "capture", &pid);
+}
+
+/// A `claude` manifest whose identity is the given process names and which carries no screen rule,
+/// so detection recognizes the fixture panes as agents and has nothing to contradict their stamps.
+fn agent_manifest_for(s: &Scratch, commands: &[String]) {
+    let names: Vec<String> = commands.iter().map(|c| format!("{c:?}")).collect();
+    let toml = format!(
+        "min_engine_version = \"0.1\"\n[identity]\nprocess_names = [{}]\n[capture]\nvisible = []\n",
+        names.join(", ")
+    );
+    std::fs::write(s.manifest_dir().join("claude.toml"), toml).expect("write the fixture manifest");
+}
+
+fn current_command(s: &Scratch, pane: &str) -> String {
+    let out = s.tmux(&[
+        "display-message",
+        "-p",
+        "-t",
+        pane,
+        "#{pane_current_command}",
+    ]);
+    String::from_utf8_lossy(&out.stdout).trim().to_string()
+}
+
+/// The `ps` comm of the pane's process: identity walks the process tree by comm, while the
+/// foreground cap reads `#{pane_current_command}`, and uutils reports `coreutils` for one and
+/// `sleep` for the other. A fixture manifest names both.
+fn process_names_of(s: &Scratch, pane: &str) -> Vec<String> {
+    let out = s.tmux(&["display-message", "-p", "-t", pane, "#{pane_pid}"]);
+    let pid = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let ps = std::process::Command::new("ps")
+        .args(["-o", "comm=", "-p", &pid])
+        .output()
+        .expect("ps");
+    let comm = String::from_utf8_lossy(&ps.stdout).trim().to_string();
+    let comm = comm.rsplit('/').next().unwrap_or(&comm).to_string();
+    let mut names = vec![current_command(s, pane), comm];
+    names.sort();
+    names.dedup();
+    names
+}
+
+fn stamp_blocked_claude_from(s: &Scratch, pane: &str, source: &str, pid: &str) {
     s.set_opt(pane, "@agent_name", "claude");
     s.set_opt(pane, "@agent_state", "blocked");
     s.set_opt(pane, "@agent_detail", "permission");
-    s.set_opt(pane, "@agent_source", "capture");
-    s.set_opt(pane, "@agent_pid", "4242");
+    s.set_opt(pane, "@agent_source", source);
+    s.set_opt(pane, "@agent_pid", pid);
     let now = tma_runtime::now_ms();
     // A real stamp dates its episode. Without it `episode_ms` is zero, which the wire reads as
     // "no expectation", and a binder test would pass by never checking anything.
@@ -649,8 +702,23 @@ fn a_subscription_streams_edges_and_a_resumed_one_replays_nothing() {
     }
     let s = scratch("serve_stream");
     s.write_config("[serve]\nreconcile_interval_ms = 250\n");
-    let pane = s.new_pane();
-    stamp_blocked_claude(&s, &pane);
+    // The first pane brings the scratch server up; it stays an unstamped shell. Both fixture panes
+    // run `sleep`, so one manifest naming that process (probed, since uutils reports it as
+    // `coreutils`) keeps them agents across cycles; a shell's comm would not match.
+    let _shell = s.new_pane();
+    let out = s.tmux(&[
+        "new-window",
+        "-d",
+        "-t",
+        "s1",
+        "-P",
+        "-F",
+        "#{pane_id}",
+        "exec sleep 100000",
+    ]);
+    let pane = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    agent_manifest_for(&s, &process_names_of(&s, &pane));
+    stamp_blocked_claude_held(&s, &pane);
     pair(&s, "phone", "SHA256:phone", &[], false);
 
     let mut first = ServeHarness::open(&s, "SHA256:phone");
@@ -673,7 +741,7 @@ fn a_subscription_streams_edges_and_a_resumed_one_replays_nothing() {
         "exec sleep 100000",
     ]);
     let second = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    stamp_blocked_claude(&s, &second);
+    stamp_blocked_claude_held(&s, &second);
 
     let edge = loop {
         let frame = first
