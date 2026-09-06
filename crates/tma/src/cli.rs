@@ -80,6 +80,11 @@ pub(crate) enum Command {
     /// document with `--json`. Reads only, so it answers "did my dispatch land" without
     /// dispatching anything to find out.
     Receipts(ReceiptsArgs),
+    /// Answer one remote connection: NDJSON requests on stdin, NDJSON responses and events on
+    /// stdout, logs on stderr. Spawned by an SSH forced command rather than typed, and it trusts
+    /// `--device` and nothing in the stream. Exit 0 on EOF or SIGTERM, 2 when the connection is
+    /// refused (unknown or revoked device, or the connection cap).
+    Serve(ServeArgs),
     /// Pair, grant, revoke and list the devices `tma serve` will answer. The whole write side of
     /// the scope model: no device can widen its own grants, and there is no in-app path that asks.
     Device(DeviceArgs),
@@ -696,6 +701,20 @@ pub(crate) struct ReceiptsArgs {
     /// Emit the schema-1 document instead of one tab-separated line per receipt.
     #[arg(long)]
     pub(crate) json: bool,
+}
+
+/// Args for `tma serve`. Two flags and no third: the transport is stdio, and the caller's identity
+/// is whatever the spawner authenticated and passed. Nothing in the stream can change either.
+#[derive(clap::Args)]
+pub(crate) struct ServeArgs {
+    /// Speak the protocol over stdin and stdout. Required today; a flag rather than the implicit
+    /// default so a future transport can be added without changing what a bare `tma serve` means.
+    #[arg(long)]
+    pub(crate) stdio: bool,
+    /// Which paired device this connection belongs to, as `tma device pair` recorded it. The
+    /// spawner authenticated the caller and passes this; serve trusts it and nothing in the stream.
+    #[arg(long, value_name = "ID")]
+    pub(crate) device: String,
 }
 
 /// Args for `tma device`, a verb with four subcommands and no flags of its own.

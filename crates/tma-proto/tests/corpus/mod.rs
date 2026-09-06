@@ -281,6 +281,13 @@ pub(crate) fn corpus() -> Vec<Vector> {
                         "a code this build has never heard of, kept verbatim",
                     )),
                 ),
+                ResponseFrame::new(
+                    "8",
+                    Response::Error(ErrorFrame::new(
+                        ErrorCode::TooManyConnections,
+                        "this host already has 4 serve connections open",
+                    )),
+                ),
             ],
             &[
                 "Response::Error",
@@ -289,6 +296,7 @@ pub(crate) fn corpus() -> Vec<Vector> {
                 "ErrorCode::BadRequest",
                 "ErrorCode::NotFound",
                 "ErrorCode::ScopeDenied",
+                "ErrorCode::TooManyConnections",
                 "ErrorCode::Unsupported",
                 "ErrorCode::Internal",
                 "ErrorCode::Other",

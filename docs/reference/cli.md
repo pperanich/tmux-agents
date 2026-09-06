@@ -106,6 +106,7 @@ your other sessions exactly as an unscoped one does.
 | `wait` | Block until the target reaches one of `--until`'s states, then print the matched row(s). One pane, or a fleet (`--all` / `--count`). |
 | `act` | Fire a guarded action into an agent pane (`--all` for every pane in scope), or enumerate/menu the fireable ones (`--list` / `--menu`). |
 | `receipts` | Read the dispatch ledger `act --slot` writes: what a dispatch ended as, without dispatching to find out. |
+| `serve` | Answer one remote connection over stdio: NDJSON requests in, NDJSON responses and events out. Spawned by an ssh forced command, not typed. |
 | `device` | Pair, grant, revoke and list the devices `tma serve` will answer. The whole write side of the remote scope model. |
 | `mute` | Suppress notifications for the panes in scope, for `--for <DURATION>` or until `--clear`. |
 | `subscribe` | Stream the read path: one complete `ls --json` document per line, pushed when a daemon is present. |
@@ -727,6 +728,48 @@ the size cap evicts them, so a receipt older than the 24 h TTL can still be
 listed even though a fresh dispatch on that slot would fire again; `at_ms` is
 what says which. Exit `0` (an empty result is not an error), or `1` when the
 ledger is torn.
+
+## `tma serve`
+
+Answer one remote connection. NDJSON requests on stdin, NDJSON responses and
+events on stdout, logs on stderr; nothing but frames reaches stdout.
+
+```
+Usage: tma serve --stdio --device <ID>
+```
+
+| option | meaning |
+|---|---|
+| `--stdio` | Speak the protocol over stdin and stdout. Required today. It is a flag rather than the implicit default so a future transport can be added without changing what a bare `tma serve` means. |
+| `--device <ID>` | Which paired device this connection belongs to, as [`tma device pair`](#tma-device) recorded it. |
+
+This is spawned, not typed. One process per connection, started by an ssh forced
+command:
+
+```
+command="tma serve --stdio --device SHA256:0Mn3XQvC…",restrict ssh-ed25519 AAAAC3Nza… phone
+```
+
+sshd authenticates the caller and passes its id; **serve trusts that argument and
+nothing in the stream**. The handshake frame names a device too, and that field is
+the client's own claim, used for the host's log line and never for authorization.
+[Serve tma over ssh](../how-to/serve-over-ssh.md) is the recipe, and [the remote
+wire protocol](protocol.md) is what the two ends say to each other.
+
+There is no listening socket, no TLS and no bearer token, because the ssh channel
+is the transport. What a connection may do is read from the device store on every
+request and every publish, so `tma device revoke` reaches a connection that is
+already open: its next request is refused `scope-denied`, its event stream stops,
+and the process exits.
+
+Every serve connection runs its **own** detection cycle, so connections cost tmux
+query throughput. `[serve] max_connections` caps them, four by default, and the
+next dial is refused with a typed `too-many-connections` error rather than
+accepted and starved. `[serve] reconcile_interval_ms` is both the stream's poll
+cadence and the freshness number the handshake quotes.
+
+Exit `0` on EOF or SIGTERM, `2` when the connection is refused (an unknown or
+revoked device, or the cap), `1` when the host could not start.
 
 ## `tma device`
 

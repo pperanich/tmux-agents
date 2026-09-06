@@ -20,6 +20,7 @@ mod install_keys;
 mod mute;
 mod receipts;
 mod redact;
+mod serve;
 mod subscribe;
 mod transcript;
 mod wait;
@@ -188,6 +189,14 @@ fn main() -> ExitCode {
             slot: args.slot,
             since_ms: args.since_ms,
             json: args.json,
+        }),
+        Some(Command::Serve(args)) => serve::run(serve::ServeOpts {
+            stdio: args.stdio,
+            device: args.device,
+            server: server.clone(),
+            manifest_dir,
+            config,
+            config_path: cli.config,
         }),
         // The device store is the config dir's, not the target server's: a pairing is per user,
         // not per tmux socket, so nothing here reads `server`.
