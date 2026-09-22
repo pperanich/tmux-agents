@@ -10,6 +10,25 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- **A session ending no longer wipes the stamp of a pane whose agent is still running.** A
+  SessionEnd-class hook event removed every `@agent_*` option, on the assumption that the agent had
+  exited. It often has not: pi opens and closes a sub-session inside the live process for each
+  workflow run, and claude fires `SessionEnd` on `/clear`. With the stamp gone the next poll had no
+  prior claim, and on a pane no screen rule matched it published the `unknown` floor and stayed
+  there until the next hook event — a pi pane reading `unknown` for the twenty minutes its agent
+  spent working. The event now removes the stamp only when nothing the agent's manifest would claim
+  is left in the pane's process tree; otherwise it clears the session lane alone (`@agent_session`,
+  the transcript path, the subagent set, and any pending permission/question id, all of which
+  belonged to the ended session) and leaves the state tuple to the poll cycle, which already removes
+  the stamp the moment a pane stops being an agent pane. The subagent set goes with the session on
+  purpose: left standing with no owner, it made the ownership guard ignore every later event.
+- **pi's idle rule reads a megatoken context window.** The gauge leaf spelled the window unit as
+  `k`, which is what every fixture carried (kimi-k2.6, `0.3%/262k`). A pane running a 1M-window
+  model prints `6.3%/1.0M`, so the idle rule matched nothing, and a pi pane with no hook claim had
+  no verdict to reach at all.
+
 ## [0.5.15] - 2026-09-06
 
 ### Changed
