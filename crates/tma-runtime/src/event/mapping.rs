@@ -105,7 +105,9 @@ pub(crate) enum EventPlan {
     /// A decision to write nothing: a foreign-session event while subagents are live. The pane was
     /// deliberately left alone, so this is a real verdict and the daemon acks it.
     Ignore,
-    /// Remove every `@agent_*` option (SessionEnd-class lifecycle).
+    /// A SessionEnd-class lifecycle event: the session is over. `execute` removes every
+    /// `@agent_*` option when the agent's process is gone too, and clears the session lane alone
+    /// when it is still running (an in-process sub-session, a `/clear`).
     Deregister,
     /// Rewrite `@agent_subagents` to this exact set (bookkeeping only, never touches state).
     Subagents(Vec<String>),

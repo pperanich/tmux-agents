@@ -401,7 +401,9 @@ pub fn run_cycle_with(
                 let p = render::project_publish(prev.as_ref(), publish);
                 (p.state, p.since, p.attention)
             }
-            StampPlan::Hold { .. } | StampPlan::Remove => (
+            // `EndSession` is the event path's plan; the cycle never builds one. Grouped here
+            // because it, too, leaves the stored state tuple alone.
+            StampPlan::Hold { .. } | StampPlan::Remove | StampPlan::EndSession => (
                 verdict.state,
                 prev.as_ref()
                     .map(|p| p.since)

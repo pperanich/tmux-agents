@@ -662,6 +662,33 @@ pub fn render_remove(pane_id: &str) -> Vec<StampCommand> {
     REMOVABLE.iter().map(|k| unset_pane(pane_id, k)).collect()
 }
 
+/// The session-owned subset of [`REMOVABLE`]: what a SessionEnd-class event invalidates when the
+/// agent PROCESS is still running (an in-process sub-session ending, a `/clear`). The state tuple
+/// stays, because the pane still holds a live agent and wiping it drops the row to `unknown` until
+/// the next event. `@agent_subagents` rides along on purpose: a non-empty set with no owning session
+/// makes the ownership guard ignore every later event, and the permission/question/pending ids name
+/// a prompt only the ended session could have answered.
+const SESSION_LANE: &[&str] = &[
+    opt::SESSION,
+    opt::TRANSCRIPT,
+    opt::SUBAGENTS,
+    opt::PERMISSION_REQUEST,
+    opt::QUESTION_REQUEST,
+    opt::PENDING_TOOL,
+    opt::PENDING_CALL,
+    opt::PENDING_SUMMARY,
+];
+
+/// Render the end of one agent session on a pane whose agent is still running: the session lane
+/// only. The pane keeps its state tuple and its identity; the poll cycle removes the whole stamp
+/// once the pane stops being an agent pane ([`render_remove`] is the agent-exited case).
+pub fn render_end_session(pane_id: &str) -> Vec<StampCommand> {
+    SESSION_LANE
+        .iter()
+        .map(|k| unset_pane(pane_id, k))
+        .collect()
+}
+
 /// The lanes [`REMOVABLE`] deliberately spares on a deregister but an uninstall must still clear:
 /// the single-flight action lock (a live action outlives its agent's exit), the watcher's own pid
 /// marker (its owner is a `tma watch`, not the agent), and a `tma mute` deadline (tma wrote it, so

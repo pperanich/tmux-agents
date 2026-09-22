@@ -326,6 +326,14 @@ fn leader_pid(subtree: &[&ProcInfo], names: &[String]) -> Option<u32> {
     Some(matches[0].pid)
 }
 
+/// Is a process this manifest would claim still running in the pane's tree? The same matcher the
+/// walk identifies with, asked as a yes/no: "did the agent itself exit, or only one of its
+/// sessions?". Read by the deregister carve-out in `event::execute`, which runs on a lifecycle-end
+/// event only, never on the hot path.
+pub(crate) fn agent_running(pane_pid: u32, procs: &[ProcInfo], names: &[String]) -> bool {
+    leader_pid(&subtree(pane_pid, procs), names).is_some()
+}
+
 /// Shells that can be a pane's root process. A subtree of nothing but these means the registered
 /// agent's process is GONE (a live agent always leaves a non-shell process behind). Matched against
 /// the normalized comm with a leading `-` stripped (login shells report `-zsh`); `login` covers a
