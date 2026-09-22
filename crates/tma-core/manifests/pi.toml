@@ -154,7 +154,10 @@ format = "pi-context-json"
 #   - a full-width horizontal rule in column 0 — pi brackets the input row with one above and
 #     one below. Transcript content is indented one space, so `^─` is the composer's, not a
 #     tool's.
-#   - the context gauge on the status row (`0.3%/262k (auto)`) — `<pct>%/<window>k`.
+#   - the context gauge on the status row (`0.3%/262k (auto)`) — `<pct>%/<window>`, where the
+#     window carries pi's own unit: `262k` on a 262k model, `1.0M` on a 1M one. Every fixture was
+#     captured on kimi-k2.6, so the rule first spelled `k` alone and a pane running a 1M-window
+#     model (`6.3%/1.0M`) matched no rule at all and sat at `unknown`.
 # Requiring both means a stray rule line in tool output is not enough on its own. Verified
 # present at both widths in pi_idle_w{100,60} AND pi_working_w{100,60} (the co-render).
 #
@@ -167,5 +170,5 @@ priority = 5
 region = "visible"
 match = { all = [
   { line_regex = '^─{20,}$' },
-  { line_regex = '\d+(\.\d+)?%/\d+k' },
+  { line_regex = '\d+(\.\d+)?%/\d+(\.\d+)?[kM]' },
 ] }
