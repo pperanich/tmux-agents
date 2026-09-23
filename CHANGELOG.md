@@ -28,6 +28,15 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
   `k`, which is what every fixture carried (kimi-k2.6, `0.3%/262k`). A pane running a 1M-window
   model prints `6.3%/1.0M`, so the idle rule matched nothing, and a pi pane with no hook claim had
   no verdict to reach at all.
+- **A pi pane no longer reads as `gemini`.** Two faults in the identity walk combined. The walk
+  attributed a pane to its group-leader match with the lowest pid, and pi's pi-lens extension starts
+  `node pyright-langserver` under `setsid`, so after pid wraparound that child outranked pi itself.
+  Then the title flicker anchor, `@tma_title_match_pid`, stored only a pid: pi's title matched on
+  the `node` child, and gemini, walked before pi and also matching a bare `node`, read pi's anchor
+  as its own hold. The pane showed `gemini` at `unknown` for as long as the language server lived.
+  The walk now prefers the outermost match (one with no matching ancestor in the pane), and the
+  anchor is stored as `<agent>:<pid>`, holding only for the manifest that set it. An anchor in the
+  old bare-pid form holds nothing and is rewritten on the next title match.
 
 ## [0.5.15] - 2026-09-06
 

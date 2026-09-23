@@ -93,22 +93,57 @@ pub struct Registration {
     pub session: Option<String>,
 }
 
+/// The `@tma_title_match_pid` flicker anchor: which title-narrowed manifest last matched the pane's
+/// title, and on which agent pid. Stored as `<agent>:<pid>`.
+///
+/// The agent name is what keeps a hold from crossing manifests. cursor, gemini and pi all match a bare
+/// `node`, so a pid alone cannot say whose title matched: an anchor pi set on a `node` pid satisfied
+/// gemini's hold on the same pid, and gemini (walked first) claimed a pi pane for as long as that
+/// process lived.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct TitleAnchor<'a> {
+    /// The manifest whose title pattern matched.
+    pub agent: &'a str,
+    /// The agent pid it matched on; a different pid re-requires a title match.
+    pub pid: u32,
+}
+
+impl<'a> TitleAnchor<'a> {
+    /// Read a stored anchor. A bare pid (what tma wrote before the agent name was added) names no
+    /// manifest, so it holds nothing; the next title match rewrites it.
+    pub fn parse(stored: &'a str) -> Option<Self> {
+        let (agent, pid) = stored.rsplit_once(':')?;
+        if agent.is_empty() {
+            return None;
+        }
+        Some(TitleAnchor {
+            agent,
+            pid: pid.parse().ok()?,
+        })
+    }
+
+    fn render(self) -> String {
+        format!("{}:{}", self.agent, self.pid)
+    }
+}
+
 /// A recognized agent owning a pane.
 #[derive(Clone, Copy)]
 pub struct Identified<'a> {
     /// The manifest whose `process_names` matched a process in the pane's tree.
     pub manifest: &'a LoadedManifest,
-    /// The matched agent process (group leader among matches); feeds the fold's episode-boundary
-    /// pid comparison.
+    /// The matched agent process (the outermost match, see [`leader_pid`]); feeds the fold's
+    /// episode-boundary pid comparison.
     pub agent_pid: u32,
     /// Foreground-cap input: is the pane's foreground command the agent itself? False for wrapper-TUI
     /// panes caps screen evidence at `unknown`.
     pub foreground_is_agent: bool,
     /// Provenance of this identification.
     pub source: IdentitySource,
-    /// Flicker anchor: `Some(pid)` for a title-narrowed match (fresh or held), so the producer sets
-    /// `@tma_title_match_pid == pid`. `None` for a process-only manifest: leave the anchor untouched.
-    pub title_match_pid: Option<u32>,
+    /// Flicker anchor: `Some` for a title-narrowed match (fresh or held), naming this manifest and
+    /// `agent_pid`, so the producer stores it. `None` for a process-only manifest: leave the anchor
+    /// untouched.
+    pub title_anchor: Option<TitleAnchor<'a>>,
     /// The out-of-scope foreground this pane's registration outranks (an agent in a container, or on
     /// the far side of an inner multiplexer server). `Some(..)` means nothing local is walkable and no
     /// capture crosses the boundary: the hook path is this pane's only evidence source.
@@ -150,7 +185,7 @@ pub fn is_ignored(options: &std::collections::HashMap<String, String>) -> bool {
 }
 
 /// Resolve the pane's agent, if any, from its process tree, foreground command, and title.
-/// `title_match_pid` is the stored `@tma_title_match_pid` flicker anchor; `registration` is the
+/// `title_anchor` is the stored `@tma_title_match_pid` flicker anchor; `registration` is the
 /// hook-registered claim when a stored `@agent_session` names one.
 pub fn identify<'a>(
     pane_pid: u32,
@@ -158,7 +193,7 @@ pub fn identify<'a>(
     pane_title: &str,
     procs: &[ProcInfo],
     manifests: &'a [LoadedManifest],
-    title_match_pid: Option<u32>,
+    title_anchor: Option<TitleAnchor<'_>>,
     registration: Option<&Registration>,
 ) -> PaneIdentity<'a> {
     let foreground = normalize_comm(current_command);
@@ -179,7 +214,7 @@ pub fn identify<'a>(
                 agent_pid: 0,
                 foreground_is_agent: false,
                 source: IdentitySource::Registered,
-                title_match_pid: None,
+                title_anchor: None,
                 behind: Some(scope),
             }),
             None => match scope {
@@ -200,12 +235,17 @@ pub fn identify<'a>(
         let registered_here = matches!(registration, Some(r) if r.agent_name == lm.name);
         // Title narrowing + flicker stickiness. A title-narrowed manifest (cursor runs as a bare
         // `node`) claims the pane only when the title matches a pattern NOW or the sticky hold is
-        // live (agent pid unchanged since a prior match); satisfying neither, fall through so a bare
-        // `node` pane is not mis-claimed. A hook registration for THIS manifest bypasses the gate:
-        // it is authoritative identity, claimed with the real walkable pid and no anchor.
+        // live (THIS manifest's title matched on the same agent pid before); satisfying neither,
+        // fall through so a bare `node` pane is not mis-claimed. A hook registration for THIS
+        // manifest bypasses the gate: it is authoritative identity, claimed with the real walkable
+        // pid and no anchor.
+        let this_anchor = TitleAnchor {
+            agent: &lm.name,
+            pid: agent_pid,
+        };
         let title_match = if lm.engine.has_title_patterns() {
-            if lm.engine.title_matches(pane_title) || title_match_pid == Some(agent_pid) {
-                Some(agent_pid)
+            if lm.engine.title_matches(pane_title) || title_anchor == Some(this_anchor) {
+                Some(this_anchor)
             } else if registered_here {
                 None
             } else {
@@ -228,7 +268,7 @@ pub fn identify<'a>(
             agent_pid,
             foreground_is_agent,
             source,
-            title_match_pid: title_match,
+            title_anchor: title_match,
             behind: None,
         });
     }
@@ -243,7 +283,7 @@ pub fn identify<'a>(
             foreground_is_agent: false,
             source: IdentitySource::Registered,
             // A pid-less registered identity holds no title anchor (no live pid to anchor).
-            title_match_pid: None,
+            title_anchor: None,
             behind: None,
         });
     }
@@ -292,16 +332,16 @@ fn registered_manifest<'a>(
     manifests.iter().find(|m| m.name == r.agent_name)
 }
 
-/// Reconcile the `@tma_title_match_pid` anchor. `desired` is [`Identified::title_match_pid`], or
+/// Reconcile the `@tma_title_match_pid` anchor. `desired` is [`Identified::title_anchor`], or
 /// `None` to clear a stale anchor. Returns a set/unset command only when it differs from `stored`,
 /// so a process-only pane or an already-correct anchor issues no write.
 pub(crate) fn title_anchor_command(
     pane: &str,
     stored: Option<&str>,
-    desired: Option<u32>,
+    desired: Option<TitleAnchor<'_>>,
 ) -> Option<StampCommand> {
-    let want = desired.map(|p| p.to_string());
-    if stored.map(str::to_string) == want {
+    let want = desired.map(TitleAnchor::render);
+    if stored == want.as_deref() {
         return None;
     }
     Some(match want {
@@ -310,20 +350,47 @@ pub(crate) fn title_anchor_command(
     })
 }
 
-/// The pid to attribute to the agent among subtree processes matching `names`: prefer a group
-/// leader (`pid == pgid`), else the lowest matched pid for determinism. `None` when none match.
+/// The pid to attribute to the agent among subtree processes matching `names`. `None` when none
+/// match.
+///
+/// The outermost match wins: one with no matching ancestor in the pane's tree. An agent's own
+/// children can share its names (pi matches `node` and spawns `node` language servers through its
+/// extensions), and a child started with `setsid` leads its own group, so group leadership cannot
+/// tell the agent from its child. Among outermost matches (siblings), prefer a group leader
+/// (`pid == pgid`), then the lowest pid for determinism.
 fn leader_pid(subtree: &[&ProcInfo], names: &[String]) -> Option<u32> {
-    let mut matches: Vec<&ProcInfo> = subtree
+    let matches: Vec<&ProcInfo> = subtree
         .iter()
         .copied()
         .filter(|p| names.iter().any(|n| normalize_comm(&p.comm) == n))
         .collect();
-    if matches.is_empty() {
-        return None;
+    matches
+        .iter()
+        .min_by_key(|p| {
+            (
+                has_ancestor_in(p, &matches, subtree),
+                p.pid != p.pgid,
+                p.pid,
+            )
+        })
+        .map(|p| p.pid)
+}
+
+/// Does any process in `among` sit on `p`'s ppid chain inside `subtree`? The chain ends at the pane
+/// root, whose parent is outside the tree. The step bound only matters for a `ps` snapshot that
+/// raced a pid reuse into a ppid loop, the case `subtree`'s own `seen` list guards against.
+fn has_ancestor_in(p: &ProcInfo, among: &[&ProcInfo], subtree: &[&ProcInfo]) -> bool {
+    let mut ppid = p.ppid;
+    for _ in 0..subtree.len() {
+        if among.iter().any(|m| m.pid == ppid) {
+            return true;
+        }
+        match subtree.iter().find(|q| q.pid == ppid) {
+            Some(parent) => ppid = parent.ppid,
+            None => return false,
+        }
     }
-    // Group leaders first (pid == pgid), then lowest pid.
-    matches.sort_by_key(|p| (p.pid != p.pgid, p.pid));
-    Some(matches[0].pid)
+    false
 }
 
 /// Is a process this manifest would claim still running in the pane's tree? The same matcher the
@@ -590,6 +657,27 @@ mod tests {
         assert_eq!(agent(&id).agent_pid, 250);
     }
 
+    /// The live shape from a pi pane (2026-09-23): pi's pi-lens extension started
+    /// `node pyright-langserver` with `setsid`, so the child leads its own group, and after pid
+    /// wraparound it had the LOWER pid. Group-leader-then-lowest-pid picked the child, which put the
+    /// agent's group off the tty (`unknown`) and handed gemini a `node` pid to hold on.
+    #[test]
+    fn an_agent_outranks_its_own_namesake_child() {
+        let procs = vec![
+            proc_tty(100, 1, 100, 600, "-zsh"),
+            proc(600, 100, 600, "pi"),
+            proc(234, 600, 234, "node"), // the language server: its own session and group
+        ];
+        let ms = vec![titled_manifest("pi", "\"node\", \"pi\"", "\"^π \"")];
+        let id = identify(100, "pi", "π - repo", &procs, &ms, None, None);
+        let i = agent(&id);
+        assert_eq!(
+            i.agent_pid, 600,
+            "the parent agent, not its lower-pid child"
+        );
+        assert!(i.foreground_is_agent, "pi's group owns the tty");
+    }
+
     // --- remote shells --------------------------------------------------------
 
     #[test]
@@ -775,14 +863,18 @@ mod tests {
 
     // --- title narrowing + flicker stickiness ---------------------------
 
+    fn anchor(agent: &'static str, pid: u32) -> Option<TitleAnchor<'static>> {
+        Some(TitleAnchor { agent, pid })
+    }
+
     #[test]
     fn shipped_process_only_manifest_never_sets_title_anchor() {
-        // A process-only manifest (claude etc.) reports title_match_pid == None, so the producer
+        // A process-only manifest (claude etc.) reports title_anchor == None, so the producer
         // leaves @tma_title_match_pid untouched — the drift-critical invariant.
         let procs = vec![proc(200, 100, 200, "claude")];
         let ms = vec![manifest("claude", "\"claude\"")];
         let id = identify(200, "claude", "Cursor Agent", &procs, &ms, None, None);
-        assert_eq!(agent(&id).title_match_pid, None);
+        assert_eq!(agent(&id).title_anchor, None);
     }
 
     #[test]
@@ -794,10 +886,10 @@ mod tests {
             identify(300, "node", "some other title", &procs, &ms, None, None),
             PaneIdentity::None
         ));
-        // With a matching title, it is claimed and reports the anchor pid to stamp.
+        // With a matching title, it is claimed and reports the anchor to stamp.
         let id = identify(300, "node", "Cursor Agent", &procs, &ms, None, None);
         assert_eq!(agent(&id).agent_pid, 300);
-        assert_eq!(agent(&id).title_match_pid, Some(300));
+        assert_eq!(agent(&id).title_anchor, anchor("cursor", 300));
     }
 
     #[test]
@@ -812,13 +904,13 @@ mod tests {
             "Shell Command Output",
             &procs,
             &ms,
-            Some(300),
+            anchor("cursor", 300),
             None,
         );
         assert_eq!(agent(&id).agent_pid, 300);
         assert_eq!(
-            agent(&id).title_match_pid,
-            Some(300),
+            agent(&id).title_anchor,
+            anchor("cursor", 300),
             "the hold re-affirms the anchor for the same pid"
         );
     }
@@ -837,7 +929,7 @@ mod tests {
                     "Shell Command Output",
                     &procs,
                     &ms,
-                    Some(300),
+                    anchor("cursor", 300),
                     None
                 ),
                 PaneIdentity::None
@@ -873,7 +965,7 @@ mod tests {
         );
         assert_eq!(i.source, IdentitySource::Registered);
         assert_eq!(
-            i.title_match_pid, None,
+            i.title_anchor, None,
             "a registered pane needs no title anchor"
         );
     }
@@ -900,9 +992,9 @@ mod tests {
             assert_eq!(i.agent_pid, 500, "gemini title {title:?} claims the pane");
             assert_eq!(i.source, IdentitySource::Observed, "no hook: observed only");
             assert_eq!(
-                i.title_match_pid,
-                Some(500),
-                "a title-narrowed claim reports the anchor pid to stamp"
+                i.title_anchor,
+                anchor("gemini", 500),
+                "a title-narrowed claim reports the anchor to stamp"
             );
         }
         // A bare node pane (a dev server, a REPL) with a plain title is NOT gemini: process alone
@@ -917,16 +1009,66 @@ mod tests {
         ));
     }
 
+    /// The live shape behind a pi pane reading `gemini` (2026-09-23): pi's title matched on a `node`
+    /// pid, and gemini, walked first and matching the same bare `node`, took pi's anchor as its own
+    /// hold. An anchor holds only for the manifest that set it.
+    #[test]
+    fn a_title_anchor_holds_only_for_the_manifest_that_set_it() {
+        let procs = vec![proc(300, 100, 300, "node")];
+        let ms = vec![
+            titled_manifest("gemini", "\"node\"", "\"^◇  Ready \""),
+            titled_manifest("pi", "\"node\", \"pi\"", "\"^π \""),
+        ];
+        // A title neither manifest matches, so only the hold can claim the pane.
+        let id = identify(
+            300,
+            "node",
+            "Shell Command Output",
+            &procs,
+            &ms,
+            anchor("pi", 300),
+            None,
+        );
+        let i = agent(&id);
+        assert_eq!(i.manifest.name, "pi", "gemini must not hold on pi's anchor");
+        assert_eq!(i.title_anchor, anchor("pi", 300));
+
+        // The same pid anchored by gemini holds for gemini, so the hold itself still works.
+        let id = identify(
+            300,
+            "node",
+            "Shell Command Output",
+            &procs,
+            &ms,
+            anchor("gemini", 300),
+            None,
+        );
+        assert_eq!(agent(&id).manifest.name, "gemini");
+    }
+
+    #[test]
+    fn title_anchor_parses_only_the_owned_form() {
+        assert_eq!(TitleAnchor::parse("pi:300"), anchor("pi", 300));
+        // What tma wrote before the agent name: it names no manifest, so it holds nothing.
+        assert_eq!(TitleAnchor::parse("300"), None);
+        assert_eq!(TitleAnchor::parse(":300"), None);
+        assert_eq!(TitleAnchor::parse("pi:"), None);
+        assert_eq!(TitleAnchor::parse("pi:x"), None);
+    }
+
     #[test]
     fn title_anchor_command_is_idempotent_and_scoped() {
-        // No write when the stored anchor already equals the desired pid.
-        assert!(title_anchor_command("%1", Some("300"), Some(300)).is_none());
+        // No write when the stored anchor already equals the desired one.
+        assert!(title_anchor_command("%1", Some("cursor:300"), anchor("cursor", 300)).is_none());
         // No write when a process-only pane (desired None) has no stored anchor.
         assert!(title_anchor_command("%1", None, None).is_none());
         // A set on a fresh/changed match, a clear on a stale anchor.
-        assert!(title_anchor_command("%1", None, Some(300)).is_some());
-        assert!(title_anchor_command("%1", Some("300"), Some(400)).is_some());
-        assert!(title_anchor_command("%1", Some("300"), None).is_some());
+        assert!(title_anchor_command("%1", None, anchor("cursor", 300)).is_some());
+        assert!(title_anchor_command("%1", Some("cursor:300"), anchor("cursor", 400)).is_some());
+        assert!(title_anchor_command("%1", Some("cursor:300"), anchor("gemini", 300)).is_some());
+        assert!(title_anchor_command("%1", Some("cursor:300"), None).is_some());
+        // A bare-pid anchor from an older tma is rewritten in the owned form.
+        assert!(title_anchor_command("%1", Some("300"), anchor("cursor", 300)).is_some());
     }
 
     // --- shell-only classification (the dead-registration reaper's discriminator) --------

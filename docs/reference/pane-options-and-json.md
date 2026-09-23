@@ -58,7 +58,7 @@ options carry rollups and hints.
 
 | option | scope | semantics |
 |---|---|---|
-| `@agent_name`, `@agent_pid` | pane | identity (pid: process-group leader found by the walk) |
+| `@agent_name`, `@agent_pid` | pane | identity (pid: the outermost matching process the walk finds, so an agent wins over a child that shares its name) |
 | `@agent_state`, `@agent_detail` | pane | the verdict (state) and its detail token. A tool other than tma that writes these on the same pane implements [the `@agent_state` contract](agent-state-contract.md), which is what the two producers have to agree on |
 | `@agent_source` | pane | provenance of the current state: `hook` / `capture` / `process`. `activity` is a legacy value still accepted on read; nothing produces it any more (a viewport hash change stopped being state evidence) |
 | `@agent_evidence_at` | pane | epoch **ms** of the evidence behind the current state |

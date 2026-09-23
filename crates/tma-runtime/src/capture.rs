@@ -264,7 +264,7 @@ impl CaptureState {
                 &rec.title,
                 procs_ref,
                 manifests,
-                stored_title_anchor.and_then(|v| v.parse().ok()),
+                stored_title_anchor.and_then(|v| identity::TitleAnchor::parse(v)),
                 registration.as_ref(),
             );
             let PaneIdentity::Agent(id) = identity else {
@@ -365,11 +365,11 @@ impl CaptureState {
             self.note_foreground_cap(&rec.pane_id, landed == Landed::ForegroundCapped);
             // Persist the flicker anchor for a title-narrowed match (parity with the poll cycle), so
             // an unregistered cursor pane holds identity through the flicker. Registered panes carry none.
-            if id.title_match_pid.is_some() {
+            if id.title_anchor.is_some() {
                 if let Some(cmd) = identity::title_anchor_command(
                     &rec.pane_id,
                     stored_title_anchor.map(String::as_str),
-                    id.title_match_pid,
+                    id.title_anchor,
                 ) {
                     let _ = tmux.apply(&[cmd]);
                 }
