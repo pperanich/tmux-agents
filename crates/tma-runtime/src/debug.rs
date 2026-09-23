@@ -113,7 +113,7 @@ pub fn observe<'a>(
         record
             .options
             .get(opt::TITLE_MATCH_PID)
-            .and_then(|v| v.parse().ok()),
+            .and_then(|v| identity::TitleAnchor::parse(v)),
         registration.as_ref(),
     );
     let out_of_scope = pane_identity.out_of_scope();

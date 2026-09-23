@@ -287,6 +287,15 @@ carries a prompt too, but that lane is not what this action uses.
 
 ## Per-agent hook mappings
 
+An **agent-end** row below deregisters the session: `@agent_session`, the
+transcript path, the subagent set and any pending permission/question id are
+cleared. Whether the pane's state tuple goes with them depends on the process: a
+session ending is not proof the agent exited (pi opens and closes sub-sessions
+inside a live process, claude fires `SessionEnd` on `/clear`), so the tuple is
+removed only when nothing the agent's manifest would claim is left in the pane's
+tree. While the agent is still there the pane keeps its state and its row, and
+the poll cycle clears the stamp the moment the pane stops being an agent pane.
+
 ### Claude Code mapping
 
 | hook | tma event | state effect |
@@ -299,7 +308,7 @@ carries a prompt too, but that lane is not what this action uses.
 | `Notification` (usage-limit auto-continue) | rate limit | `working` / `rate_limit` while it resumes itself, `blocked` / `rate_limit` when it halts |
 | `Stop` | idle | `idle` |
 | `SubagentStart` / `SubagentStop` | subagent bookkeeping | append/remove session id in `@agent_subagents`; never a top-level state change |
-| `SessionEnd` | agent-end | pane deregistered, options removed |
+| `SessionEnd` | agent-end | session deregistered; the stamp is removed once the agent's process is gone |
 
 `PermissionRequest` is the claim that matters for `blocked`. It fires the moment
 a tool call needs a decision and carries the pending call in its payload
@@ -457,7 +466,7 @@ registration and the subagent guard are live here.
 | `PreToolUse` / `PostToolUse` | working | `working` |
 | `PermissionRequest` | blocked | `blocked`/permission (payload names the pending tool) |
 | `Stop` | idle | `idle` |
-| `SessionEnd` | agent-end | pane deregistered, options removed |
+| `SessionEnd` | agent-end | session deregistered; the stamp is removed once the agent's process is gone |
 | `SubagentStart` / `SubagentStop` | subagent bookkeeping | append/remove session id in `@agent_subagents` |
 
 Combined: `[hooks].covers = ["working", "idle", "blocked", "lifecycle"]`. Blocked
@@ -480,7 +489,7 @@ real snake_case `session_id`; Gemini uses its own native event names.
 | `BeforeTool` / `AfterTool` (`tool_name`/`tool_response`) | working | `working` |
 | `AfterAgent` (`prompt_response`/`stop_hook_active`) | idle | `idle` (fires last in a turn) |
 | `Notification` (`notification_type` = "ToolPermission") | blocked | `blocked`/`permission` |
-| `SessionEnd` (`reason` = "exit") | agent-end | pane deregistered, options removed |
+| `SessionEnd` (`reason` = "exit") | agent-end | session deregistered; the stamp is removed once the agent's process is gone |
 | `SubagentStart` / `SubagentStop` | subagent bookkeeping | wired but inert (no gemini subagent events) |
 
 `blocked` is gated by the `ToolPermission` matcher so a future non-permission
@@ -508,7 +517,7 @@ dedicated adapter. Payloads arrive on stdin with a real snake_case `session_id`.
 | `preToolUse` / `postToolUse` (`tool_name`/`tool_output`) | working | `working` |
 | `postToolUseFailure` (`failure_type`/`error_message`/`is_interrupt`) | working | `working` (matcher `"is_interrupt":false`) |
 | `stop` (token counts, `status`) | idle | `idle` |
-| `sessionEnd` (`reason`/`final_status` = "completed") | agent-end | pane deregistered, options removed |
+| `sessionEnd` (`reason`/`final_status` = "completed") | agent-end | session deregistered; the stamp is removed once the agent's process is gone |
 | `subagentStart` / `subagentStop` | not observed | absent (see below) |
 
 `blocked` is not hook-covered: Cursor exposes no dedicated permission hook
@@ -566,7 +575,7 @@ extension reads `ctx.sessionManager.getSessionId()` and forwards `{session_id}`.
 | `before_agent_start` (`prompt`, `systemPrompt`, …) | working | `working` |
 | `tool_execution_start` (`toolName`, `args`) | working | `working` |
 | `agent_settled` (`type` only) | idle | `idle` (fires once per turn) |
-| `session_shutdown` (`reason`="quit") | agent-end | pane deregistered, options removed |
+| `session_shutdown` (`reason`="quit") | agent-end | session deregistered; the stamp is removed once the agent's process is gone |
 | `SubagentStart` / `SubagentStop` | subagent bookkeeping | wired but inert (no pi subagent events) |
 
 `blocked` is not a pi state: pi auto-runs tools with no per-tool permission
@@ -574,7 +583,8 @@ prompt, so there is neither a hook nor a screen rule for it. Coverage:
 `[hooks].covers = ["working", "idle", "lifecycle"]` and `[capture].visible =
 ["working"]` (the `Working...` loader row). `idle` has a screen rule outside
 `visible`, requiring both a full-width composer rule line in column 0 and the
-`<pct>%/<window>k` context gauge on the status row.
+`<pct>%/<window>` context gauge on the status row. The window carries pi's own
+unit, `262k` or `1.0M`, and the rule reads either.
 
 On the turn-settled `agent_settled` event the extension additionally forwards pi's
 `ctx.getContextUsage()` to `tma event --kind context`. pi's `ContextUsage` carries

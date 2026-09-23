@@ -361,7 +361,7 @@ interpolates one unquoted re-parses it.
 | `TMA_DETAIL` | `@agent_detail` | empty when none |
 | `TMA_SESSION_ID` | `@agent_session` | agent's own session id; empty when never registered; agent-supplied, validated at *read*, not at stamp (the stamp path writes raw): the broker accepts a case-insensitive charset (ASCII alphanumerics plus `-`/`_`) and treats any other value as absent, so a corrupt or hostile stamp never reaches the env or satisfies `requires`. Broader than the manifest's lowercase-only token charset because real ids are mixed-case (OpenCode stamps `ses_…W6yCmb3x7wLH1X`), which lowercase-only would reject |
 | `TMA_CWD` | `#{pane_current_path}` | filesystem-derived; quote it like everything else |
-| `TMA_PID` | `@agent_pid` | process-group leader |
+| `TMA_PID` | `@agent_pid` | the agent process the walk found (outermost match) |
 | `TMA_LOCATOR` | `session:window.pane` | same form as JSON rows |
 | `TMA_TITLE` | `#{pane_title}` | untrusted text; env transport keeps it inert |
 | `TMA_ACTION` | action name | lets one script back several actions |

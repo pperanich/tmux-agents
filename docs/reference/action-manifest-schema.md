@@ -217,7 +217,7 @@ non-empty for the gate to pass, so a script never half-runs on a missing value.
 |---|---|---|
 | `session` | `TMA_SESSION_ID` | the agent's own session id (`@agent_session`) |
 | `cwd` | `TMA_CWD` | the pane's current path |
-| `pid` | `TMA_PID` | the process-group leader pid |
+| `pid` | `TMA_PID` | the agent's pid (the outermost matching process in the pane) |
 | `title` | `TMA_TITLE` | the pane title (untrusted text) |
 
 Beyond the `requires` set, every exec action also receives `TMA_PANE`,

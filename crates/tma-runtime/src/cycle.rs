@@ -198,7 +198,7 @@ pub fn run_cycle_with(
             &rec.title,
             procs,
             manifests,
-            stored_title_anchor.and_then(|v| v.parse().ok()),
+            stored_title_anchor.and_then(|v| identity::TitleAnchor::parse(v)),
             registration.as_ref(),
         );
         let PaneIdentity::Agent(id) = identity else {
@@ -373,12 +373,12 @@ pub fn run_cycle_with(
             Err(e) => return Err(e),
         }
         // Persist the flicker anchor for a title-narrowed match so identity holds across cursor's
-        // title flicker next cycle. Only a title-narrowed claim carries `title_match_pid`.
-        if id.title_match_pid.is_some() {
+        // title flicker next cycle. Only a title-narrowed claim carries `title_anchor`.
+        if id.title_anchor.is_some() {
             if let Some(cmd) = identity::title_anchor_command(
                 &rec.pane_id,
                 stored_title_anchor.map(String::as_str),
-                id.title_match_pid,
+                id.title_anchor,
             ) {
                 let _ = tmux.apply(&[cmd]);
             }
@@ -401,7 +401,9 @@ pub fn run_cycle_with(
                 let p = render::project_publish(prev.as_ref(), publish);
                 (p.state, p.since, p.attention)
             }
-            StampPlan::Hold { .. } | StampPlan::Remove => (
+            // `EndSession` is the event path's plan; the cycle never builds one. Grouped here
+            // because it, too, leaves the stored state tuple alone.
+            StampPlan::Hold { .. } | StampPlan::Remove | StampPlan::EndSession => (
                 verdict.state,
                 prev.as_ref()
                     .map(|p| p.since)
