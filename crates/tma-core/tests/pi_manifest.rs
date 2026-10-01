@@ -258,6 +258,43 @@ fn idle_screen_never_reads_working_or_blocked_at_wide_and_narrow() {
     }
 }
 
+// ---- the gauge unit: pi prints its own context window ---------------------------
+
+/// Evaluate an idle fixture with the context gauge's window rewritten (`262k` → `1.0M`). The only
+/// thing separating a pi pane on kimi-k2.6 from one on a megatoken model is that string, so a
+/// rewrite is the honest way to test the other unit without a second live capture.
+fn evaluate_with_window(name: &str, window: &str) -> Evaluation {
+    let mut fx = Fixture::load(&fixtures_dir().join(name)).unwrap();
+    assert!(
+        fx.capture.contains("262k"),
+        "{name}: the shipped fixtures carry the kimi-k2.6 window"
+    );
+    fx.capture = fx.capture.replace("262k", window);
+    engine().evaluate(&snapshot(&fx))
+}
+
+#[test]
+fn idle_claim_survives_a_megatoken_context_window() {
+    // The regression this closes: pi renders the window in its own unit, so a 1M-context model
+    // reads `6.3%/1.0M` where kimi-k2.6 reads `0.3%/262k`. The gauge leaf spelled `\d+k`, so on a
+    // 1M pane neither rule matched, the fold fell through to `hold previous`, and a pane with no
+    // prior stamp published `unknown` and stayed there.
+    for name in ["pi_idle_w100.txt", "pi_idle_w60.txt"] {
+        for window in ["262k", "200k", "1M", "1.0M", "2.0M"] {
+            let ev = evaluate_with_window(name, window);
+            assert!(
+                has_state(&ev, AgentState::Idle),
+                "{name}: a `%/{window}` gauge must still raise the idle claim"
+            );
+            assert_eq!(
+                ev.evidence.len(),
+                1,
+                "{name}: a `%/{window}` gauge raises exactly the idle claim"
+            );
+        }
+    }
+}
+
 // ---- the pinned-`working` trap: a finished turn now lands ------------------------
 
 #[test]

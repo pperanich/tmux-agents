@@ -613,7 +613,7 @@ fn gather(
             manifests,
             rec.options
                 .get(opt::TITLE_MATCH_PID)
-                .and_then(|v| v.parse().ok()),
+                .and_then(|v| identity::TitleAnchor::parse(v)),
             registration.as_ref(),
         );
         // The two out-of-scope foregrounds are reported separately: the walk can never see what

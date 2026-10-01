@@ -304,7 +304,7 @@ pub fn apply_event(
         tmux,
         &panes,
         pane,
-        &manifest.name,
+        manifest,
         stored.as_ref(),
         &plan,
         event_transcript.as_deref(),
@@ -365,6 +365,23 @@ pub fn apply_event(
     }
 }
 
+/// Is the agent's own process still in the pane's tree? The deregister carve-out's liveness test:
+/// one `ps` on a lifecycle-end event, never on the hot path. An unreadable process table (or a pane
+/// that vanished) answers "gone", which keeps the historical full-removal behavior.
+fn agent_still_running(panes: &[PaneRecord], pane: &str, manifest: &LoadedManifest) -> bool {
+    let Some(rec) = panes.iter().find(|r| r.pane_id == pane) else {
+        return false;
+    };
+    let Ok(procs) = tma_tmux::tmux::ps_all() else {
+        return false;
+    };
+    crate::identity::agent_running(
+        rec.pane_pid,
+        &procs,
+        &manifest.manifest.identity.process_names,
+    )
+}
+
 /// Execute an [`EventPlan`] against tmux: one chained invocation per plan, plus the notification
 /// display fired *after* the marker write commits (write-before-fire).
 #[allow(clippy::too_many_arguments)]
@@ -372,17 +389,30 @@ fn execute(
     tmux: &Tmux,
     panes: &[PaneRecord],
     pane: &str,
-    agent: &str,
+    manifest: &LoadedManifest,
     stored: Option<&StampedState>,
     plan: &EventPlan,
     transcript: Option<&str>,
     policy: &NotifyPolicy<'_>,
     now: u64,
 ) {
+    let agent = manifest.name.as_str();
     match plan {
         EventPlan::Unmapped | EventPlan::Ignore => {}
         EventPlan::Deregister => {
-            let _ = stamp::apply(tmux, panes, pane, &StampPlan::Remove, true);
+            // A session ending is not proof the agent exited. pi runs a workflow's sub-sessions
+            // inside the live process and claude fires SessionEnd on `/clear`, so wiping the whole
+            // stamp here dropped a pane whose agent was still sitting there to the `unknown` floor
+            // (no prior stamp + no matching screen rule = nothing to publish) until the next event
+            // re-registered it. Remove the stamp only when nothing the manifest would claim is left
+            // in the pane's tree; otherwise end the session lane alone and leave the state tuple to
+            // the poll cycle, which removes the stamp the moment the pane stops being an agent pane.
+            let plan = if agent_still_running(panes, pane, manifest) {
+                StampPlan::EndSession
+            } else {
+                StampPlan::Remove
+            };
+            let _ = stamp::apply(tmux, panes, pane, &plan, true);
         }
         EventPlan::Subagents(ids) => {
             // Bookkeeping only: no state, no summary recompute (state is unchanged).

@@ -25,6 +25,9 @@ pub enum StampPlan {
     Hold { stamped_at: u64, hash: Option<u64> },
     /// The agent exited: remove all `@agent_*` options.
     Remove,
+    /// One session ended under a still-running agent: clear the session lane, keep the state tuple
+    /// (`render::render_end_session`).
+    EndSession,
 }
 
 /// Choose the write guard for a verdict's `Publish`. The guard re-checks `@agent_source` (and, for
@@ -193,13 +196,15 @@ pub fn apply_with(
         }
         StampPlan::Hold { stamped_at, hash } => render::render_hold(pane_id, *stamped_at, *hash),
         StampPlan::Remove => render::render_remove(pane_id),
+        StampPlan::EndSession => render::render_end_session(pane_id),
     };
 
     // The target pane's state as it will read *after* this write, for the rollup.
     let target_state = match plan {
         StampPlan::Publish(p) => Some(p.state),
         StampPlan::Remove => None,
-        StampPlan::Hold { .. } => stored_state(all_panes, pane_id),
+        // The state tuple is untouched, so the rollups read exactly what they read before.
+        StampPlan::Hold { .. } | StampPlan::EndSession => stored_state(all_panes, pane_id),
     };
     cmds.push(window_summary_command(all_panes, pane_id, target_state));
     cmds.push(session_summary_command(all_panes, pane_id, target_state));

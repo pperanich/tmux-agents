@@ -275,7 +275,7 @@ fn reverify_pane(
     let anchor = rec
         .options
         .get(opt::TITLE_MATCH_PID)
-        .and_then(|v| v.parse().ok());
+        .and_then(|v| identity::TitleAnchor::parse(v));
     let identity = identity::identify(
         rec.pane_pid,
         &rec.current_command,
