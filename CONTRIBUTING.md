@@ -30,6 +30,28 @@ every source under `crates/` and panics on a stale one, so this reports itself i
 passing green. Run `cargo build --workspace` first, or just use the whole-workspace
 command above. `TMA_TEST_BIN_NO_STALE_CHECK` skips the scan.
 
+## Scratch shells and ad-hoc probes
+
+Use `tma_test_support::Scratch` for tmux tests. Its server starts with `-f /dev/null`,
+`SHELL=/bin/sh`, and `HOME` plus the XDG config, cache, data, state, and runtime
+directories under `<workdir>/home`. Shell startup overrides (`ENV`, `BASH_ENV`,
+`ZDOTDIR`, `ZIM_HOME`, `ZIM_CONFIG_FILE`) are removed before the server starts.
+The lower-level `scratch_tmux(socket, home, args)` requires a temporary home owned
+by the caller; remove it after stopping the server.
+
+Apply the same isolation to ad-hoc probes, including their outer tmux process and
+any attached clients. A private socket and `-f /dev/null` only isolate tmux's own
+configuration. Redirecting `XDG_CONFIG_HOME` while retaining your real `HOME` can
+make shell startup regenerate real caches, including `~/.zim/init.zsh`, from a
+temporary config. Set both before starting tmux, select `/bin/sh`, and remove the
+startup overrides above. Pass commands as separate arguments when possible,
+rather than interpolating paths into shell strings. Stop every scratch server
+before removing its temporary directories.
+
+The harness preserves `PATH` and other environment variables, including explicitly
+exported API keys for the live lane below. Agent-specific configuration still
+needs `live_agent_env`; shell isolation is not a filesystem sandbox.
+
 ## Live-gated tests
 
 A handful of tests drive a **real agent binary** in a scratch pane instead of a synthetic stamp:

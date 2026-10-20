@@ -7,7 +7,7 @@
 //!
 //! These tests are the project's crown jewels; do not weaken them to pass.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -15,10 +15,11 @@ use std::sync::{Arc, Mutex};
 use common::{scratch_tmux, unique_id};
 use tma_test_support as common;
 
-// Deliberately NOT folded onto the shared `tma-test-support::Scratch`: this harness is socket-only
-// (no workdir) and its `tma` carries NO `--manifest-dir`, which the shared type would both add.
+// Deliberately NOT folded onto the shared `tma-test-support::Scratch`: its `tma` carries
+// NO `--manifest-dir`, which the shared type would add. The home only isolates pane startup.
 struct Scratch {
     socket: String,
+    home: PathBuf,
 }
 
 impl Scratch {
@@ -27,11 +28,12 @@ impl Scratch {
         let unique = unique_id();
         Scratch {
             socket: format!("tma_test_{tag}_{unique}"),
+            home: std::env::temp_dir().join(format!("tma_stamp_home_{unique}")),
         }
     }
 
     fn tmux(&self, args: &[&str]) -> std::process::Output {
-        scratch_tmux(&self.socket, args)
+        scratch_tmux(&self.socket, &self.home, args)
     }
 
     /// Set a pane option directly (test scaffolding for the prior stamp).
@@ -74,6 +76,7 @@ impl Drop for Scratch {
         // would abort the binary and leave every other scratch server behind.
         common::kill_scratch_server(&self.socket);
         common::cleanup_scratch_socket(&self.socket);
+        let _ = std::fs::remove_dir_all(&self.home);
     }
 }
 

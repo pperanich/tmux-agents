@@ -32,7 +32,7 @@ impl Scratch {
     }
 
     fn tmux(&self, args: &[&str]) -> Output {
-        scratch_tmux(&self.socket, args)
+        scratch_tmux(&self.socket, &self.workdir.join("home"), args)
     }
 
     fn config_dir(&self) -> PathBuf {

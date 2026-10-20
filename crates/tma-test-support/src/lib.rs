@@ -2,7 +2,8 @@
 //!
 //! Every test drives an isolated scratch `tmux -L <socket>` server started with `-f /dev/null`, so
 //! the user's real `~/.tmux.conf`, options, hooks, and key-tables never perturb it (the "no real
-//! config touched" guarantee). Each `Scratch` owns a process-globally-unique socket +
+//! config touched" guarantee). Panes use `/bin/sh` with a private home and XDG directories, so
+//! starting a shell cannot load the developer's dotfiles. Each `Scratch` owns a unique socket +
 //! workdir, so the whole workspace suite runs green under parallel `cargo test`. Dev-dependency-only
 //! (`publish = false`): shared by four crates' integration tests, so a harness fix lands in one place.
 #![deny(rustdoc::broken_intra_doc_links)]
@@ -336,17 +337,14 @@ fn without_ambient_tmux(cmd: &mut Command) -> &mut Command {
 }
 
 /// Run a tmux command against the scratch `-L` socket with `-f /dev/null` (isolates the server: no
-/// config loaded). The server-spawning `new-session` retries once on a transient parallel-startup fail.
-pub fn scratch_tmux(socket: &str, args: &[&str]) -> std::process::Output {
+/// config loaded), using `/bin/sh` and private HOME/XDG directories under `home`.
+/// The caller owns and removes `home` after stopping the server. The server-spawning `new-session`
+/// retries once on a transient parallel-startup fail.
+pub fn scratch_tmux(socket: &str, home: &Path, args: &[&str]) -> std::process::Output {
     let run = || {
-        without_ambient_tmux(&mut Command::new("tmux"))
-            .arg("-L")
-            .arg(socket)
-            .arg("-f")
-            .arg("/dev/null")
-            .args(args)
-            .output()
-            .expect("spawn tmux")
+        let mut cmd = scratch_tmux_command(socket);
+        isolate_shell(&mut cmd, home);
+        cmd.args(args).output().expect("spawn tmux")
     };
     let out = run();
     if !out.status.success() && args.first() == Some(&"new-session") {
@@ -354,6 +352,40 @@ pub fn scratch_tmux(socket: &str, args: &[&str]) -> std::process::Output {
         return run();
     }
     out
+}
+
+fn scratch_tmux_command(socket: &str) -> Command {
+    let mut cmd = Command::new("tmux");
+    without_ambient_tmux(&mut cmd);
+    cmd.args(["-L", socket, "-f", "/dev/null"]);
+    cmd
+}
+
+/// Isolate the outer shell tmux starts, including when a caller supplies a shell command.
+/// Changing XDG_CONFIG_HOME alone is unsafe: shell startup can regenerate caches under HOME.
+fn isolate_shell(cmd: &mut Command, home: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    std::fs::create_dir_all(home).expect("create scratch home");
+    cmd.env("HOME", home).env("SHELL", "/bin/sh");
+    for (key, rel) in [
+        ("XDG_CONFIG_HOME", ".config"),
+        ("XDG_CACHE_HOME", ".cache"),
+        ("XDG_DATA_HOME", ".local/share"),
+        ("XDG_STATE_HOME", ".local/state"),
+        ("XDG_RUNTIME_DIR", ".runtime"),
+    ] {
+        let dir = home.join(rel);
+        std::fs::create_dir_all(&dir).expect("create scratch XDG directory");
+        if key == "XDG_RUNTIME_DIR" {
+            std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700))
+                .expect("restrict scratch runtime directory");
+        }
+        cmd.env(key, dir);
+    }
+    for key in ["ENV", "BASH_ENV", "ZDOTDIR", "ZIM_HOME", "ZIM_CONFIG_FILE"] {
+        cmd.env_remove(key);
+    }
 }
 
 /// The directory tmux keeps `-L` sockets in (`<TMUX_TMPDIR-or-/tmp>/tmux-<uid>`).
@@ -633,11 +665,13 @@ pub fn wait_until(deadline: Duration, mut cond: impl FnMut() -> bool) -> bool {
 /// marker proves the shell reached its `exec`, unlike `#{pane_current_command}` (breaks under uutils).
 pub fn wait_capture_contains(socket: &str, target: &str, marker: &str, deadline: Duration) -> bool {
     wait_until(deadline, || {
-        let out = if target.is_empty() {
-            scratch_tmux(socket, &["capture-pane", "-p"])
-        } else {
-            scratch_tmux(socket, &["capture-pane", "-p", "-t", target])
-        };
+        // This read has no home to own and must never start a server.
+        let mut cmd = scratch_tmux_command(socket);
+        cmd.args(["-N", "capture-pane", "-p"]);
+        if !target.is_empty() {
+            cmd.args(["-t", target]);
+        }
+        let out = cmd.output().expect("capture scratch pane");
         String::from_utf8_lossy(&out.stdout).contains(marker)
     })
 }
@@ -766,7 +800,7 @@ impl Scratch {
 
     /// Run a tmux command against the scratch `-L` socket (`-f /dev/null`, [`scratch_tmux`]).
     pub fn tmux(&self, args: &[&str]) -> Output {
-        scratch_tmux(&self.socket, args)
+        scratch_tmux(&self.socket, &self.workdir.join("home"), args)
     }
 
     /// A `display-message -p` read of `fmt` on `target` (empty omits `-t`), `trim_end` only. Companion
@@ -984,21 +1018,26 @@ impl Scratch {
     /// [`Scratch::new_pane`], which execs `sleep` in a named `s1`: the broker/act/detach suites need
     /// a live shell.
     ///
-    /// `env -i` isolates the shell the way the `-L` socket isolates the server. Without it the
-    /// developer's own rc files load into the pane, and a test that looks for a typed keystroke in
-    /// the capture can find it in a themed prompt instead — which is how the broker's only
-    /// "the keys were delivered" assertion came to pass with `send-keys` stubbed out entirely. The
-    /// prompt is the fixed [`SHELL_PROMPT`], so a needle anchored on it cannot be ambient noise.
+    /// The server already has an isolated shell environment. The prompt is the fixed
+    /// [`SHELL_PROMPT`], so a needle anchored on it cannot be ambient noise.
     /// The pane is returned only once that prompt is on screen: the shell is then reading input, so
     /// a caller's keys land in it rather than in the pty buffer of a process still starting up.
     pub fn new_shell_pane(&self) -> String {
-        let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
-        let shell = format!(
-            "exec env -i PATH={path} HOME={home} TERM=xterm-256color PS1='{SHELL_PROMPT}' sh -i",
-            home = self.workdir.display()
-        );
         assert!(self
-            .tmux(&["new-session", "-d", "-x", "80", "-y", "24", &shell])
+            .tmux(&[
+                "new-session",
+                "-d",
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "-e",
+                &format!("PS1={SHELL_PROMPT}"),
+                "-e",
+                "TERM=xterm-256color",
+                "/bin/sh",
+                "-i",
+            ])
             .status
             .success());
         let pane = self.get("", "#{pane_id}");
@@ -1198,6 +1237,8 @@ impl Scratch {
         .unwrap();
         let mut cmd = Command::new("python3");
         without_ambient_tmux(&mut cmd);
+        // Attaching updates the session environment, so use the same shell isolation here.
+        isolate_shell(&mut cmd, &self.workdir.join("home"));
         // The tmux client refuses to attach without a usable TERM, and CI step environments
         // carry none; the PTY is synthetic, so pin a terminfo every platform ships.
         cmd.env("TERM", "xterm-256color");
