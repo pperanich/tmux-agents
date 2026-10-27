@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-27
+
 ### Fixed
 
 - Reduce repeated parsing of large process-lineage guards on tmux 3.7. This lowers
@@ -1274,7 +1276,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.6.1...HEAD
+[0.6.1]: https://github.com/pperanich/tmux-agents/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/pperanich/tmux-agents/compare/v0.5.16...v0.6.0
 [0.5.16]: https://github.com/pperanich/tmux-agents/compare/v0.5.15...v0.5.16
 [0.5.15]: https://github.com/pperanich/tmux-agents/compare/v0.5.14...v0.5.15
