@@ -347,13 +347,12 @@ emitter identity: buffered bytes during a process handoff cannot always be
 attributed. Identical terminal results without observed intervening work are
 treated as retransmissions because OSC supplies no completion event id.
 
-State-hook retirement remains staged. M1 requires reproducible native coverage,
-recovery and resource evidence before a default change. M2 requires every
-formerly supported state path plus separated metadata/action callbacks before
-stopping state-hook installation for an agent/version. M3 is a separate
-daemonless compatibility migration. M4 requires replacement or explicit
-retirement of session, transcript, telemetry and action capabilities before
-removing remaining adapters. None of those removals happens automatically.
+Stopping state-hook installation for an agent/version requires coverage of every
+formerly supported state path, recovery and resource evidence, and separated
+metadata/action callbacks. Removing daemonless operation is a separate
+compatibility migration. Removing remaining adapters requires replacement or
+explicit retirement of session, transcript, telemetry and action capabilities.
+None of those removals happens automatically.
 
 ## Per-agent hook mappings
 
