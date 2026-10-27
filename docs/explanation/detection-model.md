@@ -139,6 +139,14 @@ authority wins over hook timestamps, screen chrome, dwell/decay, history view
 and a temporary foreground editor or pager. The public source remains `hook`
 for compatibility; private ownership distinguishes the actual origin.
 
+Every independently recognized local agent is eligible without a per-agent
+opt-in. Reports match the manifest's filename stem automatically; optional
+manifest aliases cover different emitter names, such as `claude-code` for
+`claude`. App filtering keeps a child tool's completion from completing the
+agent's turn. Since every process in a pane shares its output stream, the name
+is collision avoidance, not emitter authentication. A first anonymous report
+cannot establish ownership; later records can inherit an established lineage.
+
 Authority is conditional on observation coverage, not report age. A silent
 agent keeps its state while the daemon renews the collector lease. Clear removes
 the named record subtree; another eligible record can still supply state. If
@@ -161,9 +169,11 @@ use record/work-generation identity independently of projected state equality.
 OSC has no completion event id, so identical results without intervening
 observed work are idempotent.
 
-Only Pi's configuration in the [coverage ledger](../reference/agent-coverage.md#osc-7501-rollout-ledger)
-has native acceptance. The default is prefer; observe mode collects diagnostics
-while leaving publication with baseline detection.
+Pi's configuration in the [coverage ledger](../reference/agent-coverage.md#osc-7501-rollout-ledger)
+has verified native lifecycle coverage. Codex and Claude reports are accepted,
+but enabling their names does not establish native emission or lifecycle
+coverage. The default is prefer; observe mode collects diagnostics while
+leaving publication with baseline detection.
 
 Without eligible native authority, `tma` learns a pane's state from three kinds
 of baseline evidence, in descending fidelity:

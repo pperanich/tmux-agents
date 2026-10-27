@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
+use tma_core::program_status::AppId;
 use tma_core::{Manifest, RuleEngine};
 
 use crate::config::AgentConfig;
@@ -120,6 +121,18 @@ pub enum LoadError {
 }
 
 impl LoadedManifest {
+    pub(crate) fn program_status_apps(&self) -> Vec<AppId> {
+        let mut apps: Vec<_> = AppId::parse(&self.name).into_iter().collect();
+        if let Some(declared) = &self.manifest.program_status {
+            for app in &declared.apps {
+                if !apps.contains(app) {
+                    apps.push(app.clone());
+                }
+            }
+        }
+        apps
+    }
+
     fn build(name: &str, source: &str, toml_src: &str) -> Result<LoadedManifest, LoadError> {
         let manifest = Manifest::parse(toml_src, source)?;
         let engine = RuleEngine::build(&manifest).map_err(|e| LoadError::Engine {
@@ -375,22 +388,18 @@ mod tests {
     }
 
     #[test]
-    fn only_pi_ships_a_verified_program_alias() {
+    fn bundled_agents_accept_their_names_and_claude_code_alias() {
         let set = load_raw(None).unwrap();
-        let declared: Vec<_> = set
-            .manifests
-            .iter()
-            .filter_map(|manifest| {
-                manifest
-                    .manifest
-                    .program_status
-                    .as_ref()
-                    .map(|apps| (manifest.name.as_str(), apps))
-            })
-            .collect();
-        assert_eq!(declared.len(), 1);
-        assert_eq!(declared[0].0, "pi");
-        assert_eq!(declared[0].1.apps[0].as_ref().as_str(), "pi");
+        for manifest in &set.manifests {
+            let apps = manifest.program_status_apps();
+            let actual: Vec<_> = apps.iter().map(|app| app.as_ref().as_str()).collect();
+            let expected = if manifest.name == "claude" {
+                vec!["claude", "claude-code"]
+            } else {
+                vec![manifest.name.as_str()]
+            };
+            assert_eq!(actual, expected);
+        }
     }
 
     /// Every bundled `state = "idle"` hook entry is a turn end, and nothing else is. The flag is

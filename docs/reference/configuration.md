@@ -115,9 +115,10 @@ Without that coverage it uses baseline detection. `prefer` is the default when
 the section or its `mode` key is absent; an explicit `off` remains disabled.
 
 This section requires a running daemon. It neither launches an agent nor changes
-its environment or installed hooks. The manifest's separate
-`[program_status] apps` list declares eligible application names, not runtime settings. Unknown
-keys here, including `apps`, are errors.
+its environment or installed hooks. Every recognized agent accepts reports matching
+its manifest name automatically. The manifest's separate `[program_status] apps`
+list adds alternate application names, not runtime settings. Unknown keys here,
+including `apps`, are errors.
 
 After entering `prefer`, attaching a new stream, recovering a gap or changing
 eligibility, a fresh complete native report is required. A silent agent can stay

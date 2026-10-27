@@ -1,8 +1,5 @@
 min_engine_version = "0.1"
 
-[program_status]
-apps = ["pi"]
-
 # pi coding agent (https://github.com/earendil-works/pi) — LIVE-AUDITED on 0.82.1
 # (captured 2026-07-26) in a scratch tmux server, driving trivial / tool-using / trust-prompt
 # turns under an isolated `PI_CODING_AGENT_DIR` (a copy of the user's config so the real

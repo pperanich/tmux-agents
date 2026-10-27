@@ -313,15 +313,10 @@ fn recognize(
         PaneIdentity::Agent(agent) if agent.agent_pid > 0 && agent.behind.is_none() => agent,
         _ => return Err(RecoveryReason::Unrecognized),
     };
-    let apps = identified
-        .manifest
-        .manifest
-        .program_status
-        .as_ref()
-        .filter(|apps| !apps.apps.is_empty())
-        .ok_or(RecoveryReason::NoAliases)?
-        .apps
-        .clone();
+    let apps = identified.manifest.program_status_apps();
+    if apps.is_empty() {
+        return Err(RecoveryReason::NoAliases);
+    }
     Ok(Recognized {
         manifest: identified.manifest.name.clone(),
         apps,

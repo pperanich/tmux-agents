@@ -297,10 +297,17 @@ effects, and `"off"` disables collection.
 activation and disable steps. An app alias or capability query proves neither
 emission nor lifecycle coverage.
 
+All recognized agents accept their own manifest name automatically. Claude also
+accepts `claude-code`; no per-agent tma enable setting is required. This policy is
+separate from native coverage: Codex 0.164.0's installed implementation emits
+without negotiation on a terminal, while Claude requires a probe reply that stock
+tmux does not provide. Native Codex lifecycle coverage has not been executed here.
+The runtime tests exercise both bundled mappings with synthetic reports.
+
 | evidence | environment and activation | executed coverage | limits |
 |---|---|---|---|
 | Native Pi, production daemon | Pi 1.3.0, tmux 3.7b, Darwin 25.6 arm64; collector started first, `PI_PROGRAM_STATUS=1` per process; private empty home/project, fake-key loopback model, no tma state hooks or metadata-emitting extension | working, three successful completions, two real confirmation dialogs, restoration of a spent result, HTTP failure and cancellation; exact result/ACK and notification claims; shell survives Pi exit and authority is released | The test extension only opens Pi's real confirmation UI. Cancellation was a fresh Idle report with no result, attention or done effect while the model response stayed gated. Exit proves authority loss, not consumption of native Clear. Approve refused `wrong-agent` because Pi's shipped action manifest has no approval mapping. |
-| Native Claude probe | Claude Code 2.1.303, tmux 3.7b, Darwin 25.6 arm64; isolated home/settings/project and fake loopback credentials, bounded TUI probe | theme onboarding reached | Activation, model, dialog and completion coverage remain unverified. No local model request completed. Zero accepted cold-scanner events do not prove absent raw emission. Claude retains baseline detection and has no shipped OSC app alias. |
+| Native Claude probe | Claude Code 2.1.303, tmux 3.7b, Darwin 25.6 arm64; isolated home/settings/project and fake loopback credentials, bounded TUI probe | theme onboarding reached | Activation, model, dialog and completion coverage remain unverified. No local model request completed. Zero accepted cold-scanner events do not prove absent raw emission. The bundled manifest now accepts `claude-code`; baseline detection remains active until eligible reports arrive. |
 | Synthetic production and native adapter cases | tmux 3.7b, Darwin 25.6 arm64; controlled emitters through the real collector/daemon, hookless state and independent hook-metadata cases | gaps/reconnect, linked-session transfer, process replacement/birth checks, silent renewal, overflow and fresh-report recovery, reload/disable/shutdown, result dedup/ACK, guarded publication and request binding | These establish generic integration behavior, not native agent emission. Separate hook-request coverage proves action binding; protocol text cannot create a request. |
 | Redacted native protocol corpus | Pi 1.3.0, tmux 3.6a, macOS, 2026-10-26; per-process override, local model | eight preserved report bodies plus split transport framing, including Clear | Prototype evidence, not production collector acceptance. See fixture provenance in `crates/tma-core/fixtures/program_status/README.md`. |
 

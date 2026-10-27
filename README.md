@@ -88,8 +88,10 @@ evidence-backed record is in
 (which exposes no permission hook). Pi's extension has no blocked mapping, but
 native Pi 1.3.0 confirmation dialogs report it with per-process
 `PI_PROGRAM_STATUS=1` and daemon `[program_status] mode = "prefer"`.
-The mode defaults to prefer; see [activation and limits](docs/how-to/run-the-daemon.md#use-native-pi-state).
-Claude's native OSC coverage remains unverified. Agents that
+The mode defaults to prefer. Every recognized agent accepts its own OSC app name
+automatically; Claude also accepts `claude-code`. See [activation and limits](docs/how-to/run-the-daemon.md#use-native-agent-state).
+Codex needs no emission override; Claude still needs a capability reply that
+stock tmux does not provide. Native lifecycle coverage for both remains unverified. Agents that
 run under a generic process name (`node`) are disambiguated by their pane title.
 
 Adding an agent `tma` does not ship is one TOML manifest, no code: identity,

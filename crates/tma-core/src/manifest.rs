@@ -34,8 +34,8 @@ pub struct Manifest {
     /// the context metric is what distinguishes a `gated` refusal (channel present, metric absent) from
     /// a permanent `no-coverage` one.
     pub telemetry: Option<Telemetry>,
-    /// Validated protocol aliases. These describe reports from an independently
-    /// recognized local process; they cannot register an agent.
+    /// Additional protocol names beyond the manifest's filename stem. These describe
+    /// reports from an independently recognized local process; they cannot register an agent.
     pub program_status: Option<ProgramStatusApps>,
 }
 

@@ -108,10 +108,25 @@ under `[daemon]`; see
 [Configuration](../reference/configuration.md#daemon-tier-3-daemon-cadences).
 They apply only while the daemon runs.
 
+## Use native agent state
+
+The daemon automatically accepts OSC 7501 reports matching a recognized agent's
+name. No per-agent enable setting is needed. Codex's `app=codex` matches directly;
+Claude's `app=claude-code` is included as an alias in its bundled manifest.
+Custom agents use their manifest's filename stem by default. See the
+[manifest schema](../reference/manifest-schema.md#program_status) for aliases
+and the shared-pane attribution limit.
+
+Codex 0.164.0's installed implementation emits reports when stdout is a terminal
+without capability negotiation. Claude Code still requires a successful probe,
+which stock tmux does not answer; accepting its app name prepares tma to use
+reports when they arrive. Changing `TERM` or `allow-passthrough` alone does not
+enable Claude reporting. See [the upstream request](https://github.com/anthropics/claude-code/issues/103022).
+
 ## Use native Pi state
 
 The verified native configuration is Pi 1.3.0 with tmux 3.7b on macOS (Darwin
-25.6 arm64). Claude's native coverage is still unverified. See the
+25.6 arm64). Codex and Claude native lifecycle coverage is still unverified. See the
 [coverage ledger](../reference/agent-coverage.md#osc-7501-rollout-ledger) for the
 executed transitions and platform limits. Upgrade all tma writers together;
 older tma binaries and third-party direct option writers lack the ownership

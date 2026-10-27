@@ -332,17 +332,20 @@ fn release_owner_read(f: &Fixture) {
 }
 
 #[test]
-fn default_mode_collects_native_reports() {
+fn defaults_collect_native_reports_without_manifest_opt_in() {
     let _gate = common::DaemonTestGuard::acquire();
     if !available() {
         return;
     }
     let f = Fixture::new_with("prefer", |scratch| {
         scratch.write_config("[notify]\non = []\n");
+        scratch.write_manifest("reporter.toml", "min_engine_version = '0.1'\n[identity]\nprocess_names = ['cat']\n[capture]\nvisible = ['working']\n");
         None
     });
-    f.report("working");
+    f.emit("\x1b]7501;state=working:app=reporter\x1b\\");
     f.wait_live("working");
+    f.emit("\x1b]7501;state=done:app=reporter\x1b\\");
+    f.wait_live("idle");
 }
 
 #[test]

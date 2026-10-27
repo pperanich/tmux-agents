@@ -242,6 +242,161 @@ fn cold_bind_drops_queued_reports_then_requires_matching_fresh_app() {
 }
 
 #[test]
+fn agent_name_enables_native_reports_without_an_alias_declaration() {
+    let (mut runtime, mut collector) = (ProgramRuntime::new(), Collector::default());
+    let manifests = vec![manifest("new-agent", None, false)];
+    let snapshot = snapshot(&[1], 10);
+    run(
+        &mut runtime,
+        &mut collector,
+        &[pane(1)],
+        &manifests,
+        &snapshot,
+    );
+    collector.report(
+        1,
+        "",
+        Some("new-agent"),
+        ProgramStatus::Working { progress: None },
+    );
+    run(
+        &mut runtime,
+        &mut collector,
+        &[pane(1)],
+        &manifests,
+        &snapshot,
+    );
+    assert_eq!(state(&runtime, 1), Some(AgentState::Working));
+
+    collector.report(1, "build", Some("cargo"), ProgramStatus::Done);
+    run(
+        &mut runtime,
+        &mut collector,
+        &[pane(1)],
+        &manifests,
+        &snapshot,
+    );
+    assert_eq!(state(&runtime, 1), Some(AgentState::Working));
+    collector.report(1, "", Some("cargo"), ProgramStatus::Done);
+    run(
+        &mut runtime,
+        &mut collector,
+        &[pane(1)],
+        &manifests,
+        &snapshot,
+    );
+    assert_eq!(
+        state(&runtime, 1),
+        None,
+        "a child tool cannot complete the agent's turn"
+    );
+}
+
+#[test]
+fn bundled_codex_and_claude_accept_native_reports_after_independent_binding() {
+    for (process_name, app, source) in [
+        (
+            "codex",
+            "codex",
+            include_str!("../../../tma-core/manifests/codex.toml"),
+        ),
+        (
+            "claude",
+            "claude-code",
+            include_str!("../../../tma-core/manifests/claude.toml"),
+        ),
+    ] {
+        let manifest = Manifest::parse(source, process_name).unwrap();
+        let engine = RuleEngine::build(&manifest).unwrap();
+        let manifests = vec![LoadedManifest {
+            name: process_name.into(),
+            manifest,
+            engine,
+        }];
+        let (mut runtime, mut collector) = (ProgramRuntime::new(), Collector::default());
+        let mut agent_pane = pane(1);
+        agent_pane.current_command = process_name;
+        agent_pane.title = "";
+        let snapshot = ProcessSnapshot::from_samples([
+            process(100, 1, "zsh", 1),
+            process(101, 100, process_name, 10),
+        ]);
+        run(
+            &mut runtime,
+            &mut collector,
+            &[agent_pane],
+            &manifests,
+            &snapshot,
+        );
+        for status in [
+            ProgramStatus::Working { progress: None },
+            ProgramStatus::Done,
+        ] {
+            let mut agent_pane = pane(1);
+            agent_pane.current_command = process_name;
+            agent_pane.title = "";
+            collector.report(1, "", Some(app), status);
+            run(
+                &mut runtime,
+                &mut collector,
+                &[agent_pane],
+                &manifests,
+                &snapshot,
+            );
+            assert_eq!(
+                state(&runtime, 1),
+                Some(if matches!(status, ProgramStatus::Done) {
+                    AgentState::Idle
+                } else {
+                    AgentState::Working
+                }),
+                "{process_name}"
+            );
+        }
+    }
+}
+
+#[test]
+fn invalid_default_app_requires_a_valid_declared_alias() {
+    let (mut runtime, mut collector) = (ProgramRuntime::new(), Collector::default());
+    let snapshot = snapshot(&[1], 10);
+    let manifests = vec![manifest("name with spaces", None, false)];
+    run(
+        &mut runtime,
+        &mut collector,
+        &[pane(1)],
+        &manifests,
+        &snapshot,
+    );
+    assert_eq!(
+        runtime.diagnostics(PaneId::new(1)).unwrap().coverage,
+        CoverageState::Recovering(RecoveryReason::NoAliases)
+    );
+    let manifests = vec![manifest("name with spaces", Some("\"valid-app\""), false)];
+    run(
+        &mut runtime,
+        &mut collector,
+        &[pane(1)],
+        &manifests,
+        &snapshot,
+    );
+    collector.report(
+        1,
+        "",
+        Some("valid-app"),
+        ProgramStatus::Working { progress: None },
+    );
+    run(
+        &mut runtime,
+        &mut collector,
+        &[pane(1)],
+        &manifests,
+        &snapshot,
+    );
+    assert_eq!(state(&runtime, 1), Some(AgentState::Working));
+}
+
+#[test]
 fn same_pid_different_birth_and_replacement_cannot_inherit_authority() {
     let (mut runtime, mut collector, manifests, original) = setup();
     collector.report(1, "", Some("pi"), ProgramStatus::Done);
@@ -512,10 +667,13 @@ fn aliases_are_optional_and_alias_change_discards_queued_old_interval() {
     assert_eq!(collector.boundaries, 2);
     let absent = vec![manifest("pi", None, true)];
     run(&mut runtime, &mut collector, &[pane(1)], &absent, &snapshot);
-    assert_eq!(
-        runtime.diagnostics(PaneId::new(1)).unwrap().coverage,
-        CoverageState::Recovering(RecoveryReason::NoAliases)
-    );
+    assert_eq!(collector.boundaries, 3);
+    collector.report(1, "", Some("pi2"), ProgramStatus::Done);
+    run(&mut runtime, &mut collector, &[pane(1)], &absent, &snapshot);
+    assert_eq!(state(&runtime, 1), None);
+    collector.report(1, "", Some("pi"), ProgramStatus::Working { progress: None });
+    run(&mut runtime, &mut collector, &[pane(1)], &absent, &snapshot);
+    assert_eq!(state(&runtime, 1), Some(AgentState::Working));
 }
 
 #[test]

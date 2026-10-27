@@ -1,5 +1,9 @@
 min_engine_version = "0.5.11"
 
+# Claude reports this app name when its terminal capability probe succeeds.
+[program_status]
+apps = ["claude-code"]
+
 [identity]
 process_names = ["claude"]
 
