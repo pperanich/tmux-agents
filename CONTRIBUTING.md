@@ -48,6 +48,20 @@ With it, `tma_test_support::have_agent("<agent>")` **panics** when the agent's b
 opted into the lane cannot report all-green while running none of it. CI never sets the variable,
 because CI has neither the binaries nor the credentials.
 
+For OSC 7501 acceptance, run only the named Pi test after a workspace build:
+
+```sh
+cargo build --workspace
+TMA_REQUIRE_TMUX=1 TMA_LIVE_AGENTS=1 cargo test -p tma-daemon --test native_pi_program_status native_pi_osc7501_through_production_daemon_without_state_hooks -- --exact --nocapture
+```
+
+This test needs Pi on `PATH`, but no account credentials. It runs the production
+daemon on an owned scratch tmux server, isolates Pi's home/config/project, and
+uses a fake-key loopback model. The sole extension opens Pi's real confirmation
+UI; it emits neither OSC reports nor tma metadata. The harness never copies user
+credentials. You do not need to enable every other live-agent suite for this
+feature's acceptance. Keep ambient `TMUX`/`TMUX_PANE` unset for native test runs.
+
 ### The scratch home
 
 `tma_test_support::live_agent_env(agent, scratch_home)` returns the environment that pins that
@@ -119,7 +133,8 @@ review will check are these.
   line. This matters most for writes: concurrent producers stamp the same
   options and tmux has no transactions, so the conditional-write shape lives in
   exactly one adapter.
-- **Tier 3 is never required.** Only the `tma daemon` subcommand dispatch may
+- **Baseline operation does not require tier 3.** Native OSC 7501 collection is
+  explicitly daemon-dependent. Only the `tma daemon` subcommand dispatch may
   reach `tma-daemon`. The wire protocol and the notify primitive live in
   `tma-runtime` so a daemonless `tma event` can use them. A source-guard test
   (`crates/tma/tests/tier_boundary.rs`) catches the one legitimate edge drifting,

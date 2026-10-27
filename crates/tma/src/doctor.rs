@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use tma_core::stamp::opt;
-use tma_core::{AgentState, GrammarError, Provenance, ReadResult, StampedState};
+use tma_core::{AgentState, GrammarError, Provenance, ReadResult};
 use tma_runtime::{actions, identity, ipc, notify};
 
 use crate::cli_support;
@@ -30,6 +30,7 @@ use render::{render_json, render_text};
 
 /// Options for `tma doctor` (from the CLI + the loaded config).
 pub(crate) struct DoctorOpts {
+    pub program_mode: tma_runtime::config::ProgramStatusMode,
     pub json: bool,
     /// `--exit-code`: exit non-zero when the report carries a warning or a pane sits below the tier
     /// its manifest supports. Off by default, so plain `doctor` stays a report.
@@ -84,6 +85,7 @@ impl HookClass {
 enum TierReason {
     /// Tier 3 — the daemon tier; nothing higher.
     DaemonTier,
+    ProgramTier,
     /// Tier 2 — hook events flow but no daemon is running (they direct-stamp).
     NoDaemon,
     /// Tier 1 — a hook-capable agent whose hooks are not (fully) installed.
@@ -141,7 +143,7 @@ fn tier_reason_str(tier: Tier, agent: &str, daemon_alive: bool) -> Option<String
         }
     };
     match tier.reason {
-        TierReason::DaemonTier => None,
+        TierReason::DaemonTier | TierReason::ProgramTier => None,
         TierReason::NoDaemon => Some(
             "daemon not running (events direct-stamp; run `tma daemon --ensure` for the daemon tier)"
                 .to_string(),
@@ -380,6 +382,7 @@ fn diagnose_process_names(manifests: &[LoadedManifest]) -> Vec<ProcessNameLint> 
 
 /// The whole `tma doctor` report for one server.
 struct Report {
+    program_mode: tma_runtime::config::ProgramStatusMode,
     /// The server's `#{version}`, `None` when the read failed. Reported so a server below
     /// [`MIN_TMUX_VERSION`] is named before its symptoms are blamed on tma.
     tmux_version: Option<String>,
@@ -482,6 +485,7 @@ fn diagnose_actions(known_agents: &[String]) -> (usize, Vec<ActionLint>) {
 
 /// Gather the read-only diagnosis. One `list-panes`, one `ps` parse (the identity read path), a
 /// daemon socket probe, and the hook-config reads — no captures, no stamps, no writes.
+#[allow(clippy::too_many_arguments)]
 fn gather(
     tmux: &Tmux,
     manifests: &[LoadedManifest],
@@ -490,6 +494,7 @@ fn gather(
     windows: &WindowsSection,
     api: &ApiSection,
     wrapper_ref: WrapperRef,
+    program_mode: tma_runtime::config::ProgramStatusMode,
 ) -> Result<Report, TmuxError> {
     let now = tma_runtime::now_ms();
     let panes = tmux.list_panes()?;
@@ -568,7 +573,7 @@ fn gather(
         }
         // Unlike every other reader, doctor keeps the decode error: a corrupt option is why a pane
         // that looks stamped reads as never-stamped, and nothing else says so.
-        let read = match StampedState::from_options(&rec.options) {
+        let read = match tma_core::persistence::current_stamp(&rec.options, now) {
             Ok(read) => read.map(ReadResult::into_inner),
             Err(err) => {
                 stamp_issues.push(StampLint {
@@ -644,7 +649,19 @@ fn gather(
             .find(|a| a.agent == agent)
             .map(|a| a.wiring.clone())
             .unwrap_or(HookWiring::NotInstalled);
-        let tier = derive_tier(HookClass::from_wiring(&wiring), daemon_alive);
+        let native = daemon_alive
+            && matches!(
+                tma_core::persistence::read_projection(&rec.options, now),
+                Ok(tma_core::persistence::ProjectionRead::Live { .. })
+            );
+        let tier = if native {
+            Tier {
+                level: 3,
+                reason: TierReason::ProgramTier,
+            }
+        } else {
+            derive_tier(HookClass::from_wiring(&wiring), daemon_alive)
+        };
 
         let (state, source, evidence_age_ms) = match &read {
             Some(s) => (
@@ -730,6 +747,7 @@ fn gather(
         None => (PathBuf::new(), false, None),
     };
     Ok(Report {
+        program_mode,
         tmux_version,
         daemon_alive,
         daemon_socket,
@@ -784,7 +802,10 @@ fn gate(r: &Report) -> (usize, usize) {
     warnings += usize::from(r.mouse_bindings && !r.mouse_enabled);
     warnings += usize::from(r.notify_failure.is_some());
     for a in &r.agents {
-        warnings += usize::from(matches!(a.wiring, HookWiring::Incomplete(_)));
+        warnings += usize::from(
+            a.tier.reason != TierReason::ProgramTier
+                && matches!(a.wiring, HookWiring::Incomplete(_)),
+        );
         warnings += usize::from(a.hook_demoted);
         warnings += usize::from(a.endpoint_ok == Some(false));
     }
@@ -813,6 +834,7 @@ pub(crate) fn run(opts: DoctorOpts) -> ExitCode {
         &opts.windows,
         &opts.api,
         opts.wrapper_ref,
+        opts.program_mode,
     ) {
         Ok(r) => r,
         Err(TmuxError::ServerGone) => return cli_support::no_server(),
@@ -1016,6 +1038,7 @@ mod tests {
     /// A fully-populated report, so every conditional branch in both emitters is exercised.
     pub(super) fn sample_report() -> Report {
         Report {
+            program_mode: tma_runtime::config::ProgramStatusMode::Off,
             tmux_version: Some("3.6a".to_string()),
             daemon_alive: true,
             daemon_socket: PathBuf::from("/tmp/tma.sock"),

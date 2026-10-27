@@ -25,7 +25,7 @@ default answer — both reference projects made structural choices we reject bel
 │ capture-pane (on demand)         │   │  state engine        │   │ (@agent_*)    │   │ tma watch       │
 │ process tree (ps / sysinfo)      │   │  (pure, manifest-    │   │               │   │ tma jump / ls   │
 │ pane title / activity / flags    │   │   driven)            │   │ daemon memory │   │ user tmux conf  │
-└──────────────────────────────────┘   └──────────────────────┘   │ (history only)│   └─────────────────┘
+└──────────────────────────────────┘   └──────────────────────┘   │ (raw/history) │   └─────────────────┘
                                                                   └───────────────┘
 ```
 
@@ -33,7 +33,8 @@ Invariants the shape enforces:
 
 - The core is pure (D7): snapshot + evidence in, verdict out. All I/O lives in edges.
 - tmux user options are the only shared store (AD4). Surfaces are dumb readers.
-- Every evidence source is optional; the system degrades by losing latency or
+- Every baseline evidence source is optional; native OSC collection requires the daemon.
+  Baseline detection degrades by losing latency or
   coverage, never by breaking (goal 5, DAEMON.md tiers).
 
 ## AD1 — State model: small closed core + open detail dimension
@@ -313,7 +314,11 @@ missed events. But full probabilistic fusion (weights, Bayesian updates) is
 overengineering: sources have a natural strict ranking, and D1/D2 demand explainable
 verdicts (`tma debug explain` must say *which rule/event decided*).
 
-**Decision.** A typed evidence record and a deterministic fold:
+**Decision.** A typed evidence record and a deterministic fold. Native program
+reporting adds `ProgramStatus` as an internal source and passes separately
+validated authority to the fold before baseline ranking. The public provenance
+projects it into `hook`; it does not encode protocol ownership. The baseline
+record shape remains:
 
 ```rust
 Evidence {
@@ -447,83 +452,58 @@ emoji string in the option and reverse-maps it to an enum.
   | `@tma_reg_dead_since` | pane | dead-registration reaper marker: epoch **ms** of the first cycle a hook-registered pane (`@agent_pid == 0`) was seen SHELL-ONLY (its named process gone, no non-shell process under the pane). Once shell-only persists past the reaper threshold the poll cycle clears the registration; any non-shell process reappearing clears the marker |
   | `@agent_model` | pane | best-effort model-name label the file-tail context intake reads from the rollout tail window (ACT9). Never load-bearing for a gauge; it only feeds `tma doctor`'s recognized-model line (a model no `[telemetry.windows]` entry names). Plain-set, cleared on deregister, absent when no model record sat in the tail window |
 
-- **Write-ownership rules** (the coherence mechanism, in place of transactions).
-  Round-2 adversarial review showed advisory rules (producer reads `@agent_source`,
-  then decides) are still TOCTOU: the read-to-write span is a whole cycle, and hook
-  events land *inside* it, correlated with exactly the transitions that matter.
-  Enforcement is therefore **server-side conditional writes**: `set-option -pF`
-  expands formats in the target pane's context atomically at write time, giving
-  CAS-shaped guards with zero new infrastructure. Verified on tmux 3.6a
-  (2026-07-20):
+- **Write ownership, current contract.** All current producers compose evidence-time
+  arbitration with private program ownership. The earlier per-field `set -pF`
+  recipe alone was insufficient: a predicate can change while its own chain
+  mutates the values it reads. Frozen `if-shell -F` bodies now admit only literal,
+  explicitly targeted option mutations. Dependent state, identity, attention,
+  freshness, hold and removal edits share that admission. Private commit and
+  receipt fields plus complete readback determine the winning publication.
+  This is not a tmux atomic transaction.
 
-  ```
-  # capture producer's state write — cannot clobber a hook-sourced stamp:
-  set -pF -t %13 @agent_state '#{?#{==:#{@agent_source},hook},#{@agent_state},working}'
-  # write-once since — keeps existing value when state already equals the new state,
-  # chained BEFORE the state write so once-ness is evaluated in the server:
-  set -pF -t %13 @agent_since '#{?#{==:#{@agent_state},working},#{@agent_since},<now>}' \; ...
-  ```
+  Failed admission writes nothing. An admitted body can execute before later
+  interference makes client readback return Lost. That outcome does not prove
+  no mutation and cannot authorize replay. The separately typed advisory poll
+  hint can remain after Lost readback; it certifies complete server execution
+  only, never state or effect permission. Exact result ACK and notification
+  claims provide at-most-once admission, not exactly-once external delivery.
 
-  **Normative chain rule (round-3 fix — the flagship hole):** every field in a
-  producer's chained write MUST carry the *same suppression condition* as the state
-  write. A suppressed state write with unsuppressed companion writes self-destructs
-  in one cycle: the since-guard (comparing against the *rejected* new state) bumps
-  `@agent_since` mid-episode (re-firing F22), and an unguarded `@agent_source`
-  overwrite flips `hook` → `capture`, letting the next cycle's state guard pass and
-  clobber after all. Concretely: the producer computes one guard expression
-  (`SUPPRESSED = source is hook ∧ my evidence may not override`) and embeds it in
-  every `-pF` write of the chain — state, source, evidence_at, detail, since — so
-  the whole tuple commits or holds together. The examples above are illustrative;
-  this paragraph is the spec.
+  A nonempty effective `after-set-option` hook can yield between mutations, so
+  native authority is unsupported for that target. Capability is checked in
+  target context at admission; affected pane ownership is revoked without
+  modifying user hooks. Healthy peers can retain coverage through a supported
+  lease target. Unsupported configurations keep protected baseline fallback,
+  never unguarded native authority. Oversized guards use bounded `source-file -`
+  input (256 KiB cap), preserving exact comparisons after loading.
 
-  Rules, all enforced via such guards, never via producer-side reads:
-  1. Hook-sourced state is overwritten by a capture producer only when the
-     guard passes: source is not `hook`, OR the evidence is process-level (pid gone),
-     OR the hook claim has aged past its freshness window *and* the state is
-     capture-visible (AD2 coverage-aware decay). Round-2 carve-out, made precise in
-     round 3: **visible blocker chrome overrides a `working`/`idle` hook claim iff
-     the stamped `@agent_evidence_at` predates the capture's timestamp** — an
-     evidence-ordering comparison, not "immediately" and not "stale". This closes
-     the answered-prompt race: capture at T0 sees the prompt, user answers, hook
-     stamps `working` at T1 with evidence_at=T1; the capture producer's blocked
-     write carries capture-time T0 < T1, so the guard suppresses it — the hook
-     claim is *newer evidence* and wins, per F8's core ordering. The guard is
-     expressible in `-pF` via timestamp comparison with the producer's capture time
-     embedded as a literal (tmux `e|` arithmetic; on the N10 probe list). Blocker
-     chrome never needs a decay wait when its evidence genuinely postdates the hook
-     claim; coverage gating applies only to flips D1 tolerates. This rule is stated
-     identically here, in F8, and in DAEMON.md — any future edit changes all three.
-  2. `@agent_since` and `@agent_notified_at` are write-once per episode via the
-     guard-before-state chain above. A pid mismatch (walked pid ≠ stamped
-     `@agent_pid`) is an episode boundary: same-pane agent replacement between
-     cycles resets `since`/`notified_at`/attention in that cycle (F4).
-  3. Everything else is last-writer-wins over *deterministic* values (same fold, same
-     persisted inputs), which converges.
-  4. Writers order stamped fields so `@agent_stamped_at` is written last in the
-     chained `tmux` invocation; readers treating `stamped_at` older than `state` as
-     in-progress get a documented read-consistency rule instead of torn-tuple
-     surprises (chained `set-option`s are sequential in the server, not atomic to
-     readers).
-  5. **Writes-on-hold**: a producer whose verdict is freeze/suppress (scrolled pane
-     F9, history view F10, dwell suppression F12) refreshes `@agent_stamped_at`
-     **and `@agent_hash`** — never `@agent_evidence_at`, never state.
-     `@agent_evidence_at` means "most recent evidence *consistent with the stamped
-     state*"; evidence for a not-yet-published candidate state updates nothing until
-     it publishes. (Without this rule, dwell livelocks: fresh contradicting evidence
-     would reset its own clock every cycle.) The hash refreshes because it is an
-     *observation baseline*, not state-consistent evidence. HISTORICAL RATIONALE: this
-     guarded against the next cycle diffing a static screen against the pre-pause
-     streaming hash, manufacturing a phantom activity edge and restarting the dwell
-     clock (round-3 finding). No cycle diffs two hashes any more (the activity-delta
-     source was removed), so the refresh now only keeps the baseline honest for the
-     presence check. Harmless, and kept for that; re-derive before relying on it.
+  Baseline rules still compare hook/capture evidence times, with newer blocker
+  chrome and coverage-aware decay. While eligible native authority is live,
+  neither timestamps nor public `source=hook` permit a fallback overwrite.
+  Baseline holds refresh stamp/hash only when ownership permits. Public
+  `stamped_at` follows the public state fields; private commit/receipt fields can
+  follow it, and independent metadata/ACK edits need not advance it.
 
-  Runtime floor note: `set-option -F` needs probing at the tmux 3.2 floor (N10);
-  verified present on 3.6a. If absent, degrade is documented advisory writes with
-  the known race, not silent behavior change.
-- Stamping is batched: one `tmux` invocation with `;`-chained commands per pane
-  (~70 individual spawns per 10-agent cycle otherwise — a predictable cost, not a
-  profiling surprise).
+  Metadata has independent process/session binding. Valid session/transcript,
+  telemetry, model/endpoint, subagent and request updates can survive a losing
+  hook state write. A first sessionless state event can establish its validated
+  private binding without inventing public session or request data. A first
+  metadata Lost permits one receipt-only re-admission if the complete original
+  process birth chain, metadata/update token and episode remain unchanged. An
+  already-applied update is not replayed after lost readback.
+
+  The private key groups, lease timing, normalized history and public-field
+  meanings are recorded in
+  [pane options](../reference/pane-options-and-json.md#private-program-ownership-and-result-history).
+  Full raw records remain bounded daemon memory. Lease liveness alone does not
+  establish record eligibility; fresh stream framing/reporting and process
+  validation are required after a gap. Unsupported process birth identity uses
+  fallback. Same-pane in-flight bytes have no authenticated emitter identity.
+
+  Upgrade all active tma producers together. Older tma and third-party direct
+  option writers cannot be made safe by timestamp arbitration alone. The
+  public read vocabulary stays unchanged, with program evidence projected into
+  `hook` and actual origin retained privately. No hook retirement or daemonless
+  removal follows from this compatibility projection.
 
 ## AD5 — Process model: one-shots + `tma event` + optional daemon
 
@@ -542,12 +522,15 @@ upgrade, no consumer-side changes between tiers (goal 5):
    second resolution even though stamps are ms; already specified in DAEMON.md) bounds
    duplicate work.
 2. **Hook tier** — `tma event` direct-stamps when no daemon runs, including
-   recomputing its window's `@agent_summary` (deterministic rollup, converges);
+   recomputing its window's `@agent_summary` under the
+   [bounded rollup contract](../reference/agent-state-contract.md#the-rollups-are-tmas);
    resident surfaces advertise pids on their own pane and take SIGUSR1 nudges from
    tmux focus hooks. Event-latency state, instant refresh, still no daemon.
 3. **Daemon tier** — event hub (socket + control-mode client + on-demand capture +
    30–60 s reconciliation sweep). Adds fallback-detection scheduling for hookless
-   agents, history, notification dispatch/dedup, self-healing.
+   agents, history, notification dispatch/dedup, self-healing, and native
+   OSC collection. That collection has no daemonless counterpart; baseline
+   operation remains daemon-optional.
 
 The picker is a resident surface while open: it runs its own refresh (1 s) regardless
 of tier, so it never depends on the daemon for liveness (N3).

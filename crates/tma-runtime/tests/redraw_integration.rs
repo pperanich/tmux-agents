@@ -1,10 +1,9 @@
 //! Acceptance: how many `tmux` write invocations one poll cycle costs, on a scratch server.
 //!
-//! Every `set-option` tmux executes ends in an unguarded full redraw of every attached client
-//! (`options_push_changes()`), so the invocation count IS the redraw count. A working agent used to
-//! cost two per cycle: the chained pane stamp, then a separate `@tma_last_poll` claim. The claim now
-//! rides the stamp. Counted through a logging `tmux` shim, so the assertion is on what was actually
-//! spawned rather than on what the code looks like it spawns.
+//! A working cycle batches the pane stamp and advisory `@tma_last_poll` hint in one writing
+//! invocation. A logging shim counts actual spawns; it does not measure attached-client redraws.
+//! The hint proves complete server execution of the exact receipt, even if a later replacement
+//! defeats client readback.
 
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -69,7 +68,9 @@ fn option_writes(log: &Path) -> Vec<String> {
     std::fs::read_to_string(log)
         .unwrap_or_default()
         .lines()
-        .filter(|l| l.contains("set-option"))
+        .filter(|l| {
+            l.contains("'set-option'") || l.split_whitespace().any(|word| word == "set-option")
+        })
         .map(String::from)
         .collect()
 }
@@ -185,11 +186,11 @@ fn a_working_pane_costs_one_option_write_per_cycle() {
     assert_eq!(
         writes.len(),
         1,
-        "one working pane must cost ONE option-writing tmux invocation, and so one client redraw. \
+        "one working pane must cost ONE option-writing tmux invocation. \
          Invocations logged:\n{}",
         writes.join("\n")
     );
-    // The claim is folded into that same chain, not dropped: same key, same meaning, no second spawn.
+    // The advisory hint retains its server key and shares the pane-writing invocation.
     assert!(
         writes[0].contains("@agent_state") && writes[0].contains("@tma_last_poll"),
         "the stampede claim must ride the stamp chain: {}",
@@ -241,11 +242,69 @@ fn an_all_quiet_cycle_writes_no_options_at_all() {
     assert!(
         writes.is_empty(),
         "an all-quiet cycle must write no option at all, the stampede claim included, \
-         so an idle fleet costs zero client redraws. Invocations logged:\n{}",
+         so this quiet cycle creates no option-writing client. Invocations logged:\n{}",
         writes.join("\n")
     );
     assert!(
         sx.display("", "#{@tma_last_poll}").is_empty(),
         "a cycle that produced nothing must not claim the hint"
     );
+}
+
+#[test]
+fn departed_pane_during_readback_is_skipped_but_malformed_live_readback_is_fatal() {
+    if !common::tmux_available() {
+        return;
+    }
+    for departed in [true, false] {
+        let (sx, pane) = scratch_with_pane("readback-departure", "WORKING", "working");
+        assert!(sx
+            .tmux(&["new-session", "-d", "-s", "keep", "exec /bin/cat"])
+            .status
+            .success());
+        let manifests = manifests(&sx);
+        let cfg = FoldConfig {
+            freshness_secs: 0,
+            ..Default::default()
+        };
+        let plain = Tmux::new(Some(sx.socket.clone()));
+        cycle::run_cycle(&plain, &manifests, &cfg).unwrap();
+        release_stampede_claim(&sx);
+        let ready = sx.workdir.join("readback-ready");
+        let release = sx.workdir.join("readback-release");
+        let result = sx.workdir.join("readback-result");
+        let wrapper = sx.workdir.join("gated-readback");
+        std::fs::write(&wrapper, format!(
+            "#!/bin/sh\nfor arg do\ncase \"$arg\" in\n*'@tma_program_origin'*'end')\ntouch '{}'\ni=0\nwhile [ ! -e '{}' ] && [ $i -lt 200 ]; do sleep 0.01; i=$((i+1)); done\n[ -e '{}' ] || exit 125\n{}\nexit $?\n;;\nesac\ndone\nexec tmux \"$@\"\n",
+            ready.display(), release.display(), release.display(),
+            if departed { format!("tmux \"$@\" > '{}'\nstatus=$?\nprintf '%s' \"$status\" > '{}.status'\ncat '{}'\nexit \"$status\"", result.display(), result.display(), result.display()) }
+            else { "printf 'malformed-live-pane'".into() }
+        )).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let delayed = client(&sx, &wrapper);
+        std::thread::scope(|scope| {
+            let pending = scope.spawn(|| cycle::run_cycle(&delayed, &manifests, &cfg));
+            common::poll_until("actual persistence readback is gated", || ready.exists());
+            if departed {
+                assert!(sx.tmux(&["kill-pane", "-t", &pane]).status.success());
+            }
+            std::fs::write(&release, "release").unwrap();
+            let observed = pending.join().unwrap();
+            if departed {
+                eprintln!(
+                    "departed readback: native_status={}, native_output={:?}, cycle={observed:?}",
+                    std::fs::read_to_string(result.with_extension("status")).unwrap(),
+                    std::fs::read_to_string(&result).unwrap()
+                );
+                let report = observed.expect("a proved departed pane is skipped");
+                assert!(report.skipped_dead > 0);
+                assert!(!report.rows.iter().any(|row| row.pane_id == pane));
+            } else {
+                assert!(
+                    matches!(observed, Err(tma_tmux::tmux::TmuxError::Parse { .. })),
+                    "malformed output for a live pane must fail closed: {observed:?}"
+                );
+            }
+        });
+    }
 }

@@ -9,11 +9,18 @@ use tma_core::AgentRow;
 /// now, is the broker's knowledge, not the fold's. The executor re-invokes `tma act --menu` for it.
 #[derive(Clone, Debug)]
 pub enum Effect {
-    Refresh,                         // executor: dash::refresh -> RowsRefreshed | RefreshFailed
-    CapturePreview { pane: String }, // executor: ui::capture_preview -> PreviewCaptured
-    Focus(Box<AgentRow>),            // executor: jump::focus_agent (boxed, AgentRow is wide)
-    ClearAttention { pane: String }, // executor: tmux.unset_pane_option(pane, ATTENTION)
-    ActMenu { pane: String },        // executor: run-shell -b `tma act --menu --pane <id>`
+    Refresh, // executor: dash::refresh -> RowsRefreshed | RefreshFailed
+    CapturePreview {
+        pane: String,
+    }, // executor: ui::capture_preview -> PreviewCaptured
+    Focus(Box<AgentRow>), // executor: jump::focus_agent (boxed, AgentRow is wide)
+    ClearAttention {
+        pane: String,
+        observation: Option<Box<tma_core::persistence::ObservationIdentity>>,
+    }, // executor: verify and acknowledge the original row observation
+    ActMenu {
+        pane: String,
+    }, // executor: run-shell -b `tma act --menu --pane <id>`
     Quit,
 }
 

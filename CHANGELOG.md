@@ -10,6 +10,33 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-27
+
+### Added
+
+- Native OSC 7501 state in the daemon. `[program_status] mode = "observe"`
+  collects diagnostics; `"prefer"` uses reports while process, stream and write
+  ownership remain verified. The default is `"prefer"`; set `"off"` to disable
+  collection. Recognized agents accept their own app name automatically, with
+  `claude-code` included as an alias for Claude. Codex needs no emission override;
+  Claude's capability negotiation still prevents reports under stock tmux.
+  Pi 1.3.0 is verified with per-process `PI_PROGRAM_STATUS=1` on
+  tmux 3.7b/macOS, including confirmation
+  dialogs, completion, failure and cancellation without tma state hooks. Codex and Claude
+  native coverage remains unverified. See the activation and coverage guides
+  for agent activation requirements; Linux and older-tmux production paths remain
+  unexecuted.
+
+### Changed
+
+- State producers and result consumers now preserve private program ownership
+  through guarded publication, exact acknowledgement and bounded recovery.
+  Public states, source tokens and JSON contracts stay compatible; native direct
+  evidence uses `source=hook`. Upgrade all tma writers together. Regenerate old
+  focus hooks with `tma install-hooks <agent>` for dispatch-time capture safety.
+  Metadata/action adapters remain independent, no hooks are removed, and
+  daemonless baseline operation remains available.
+
 ## [0.5.16] - 2026-10-12
 
 ### Fixed
@@ -1241,7 +1268,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.16...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/pperanich/tmux-agents/compare/v0.5.16...v0.6.0
 [0.5.16]: https://github.com/pperanich/tmux-agents/compare/v0.5.15...v0.5.16
 [0.5.15]: https://github.com/pperanich/tmux-agents/compare/v0.5.14...v0.5.15
 [0.5.14]: https://github.com/pperanich/tmux-agents/compare/v0.5.13...v0.5.14

@@ -417,6 +417,15 @@ fn host_protocol_row_keys() -> BTreeSet<String> {
 
     // Every optional populated, so a key cannot be missing because its value was absent.
     let row = AgentRow {
+        acknowledgement: Some(tma_core::persistence::ObservationIdentity::Legacy {
+            blocked: None,
+            episode: None,
+            pid: 10,
+            state: tma_core::AgentState::Idle,
+            source: tma_core::Provenance::Hook,
+            since: 1,
+            turn_at: 1,
+        }),
         pane_id: "%1".to_string(),
         agent: "claude".to_string(),
         state: AgentState::Blocked,

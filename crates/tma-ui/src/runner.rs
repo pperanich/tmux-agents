@@ -374,8 +374,8 @@ impl ExecuteEffect for Executor<'_> {
                 self.note_failure("jump", r);
                 None
             }
-            Effect::ClearAttention { pane } => {
-                let r = ui::clear_attention(self.env.tmux, &pane);
+            Effect::ClearAttention { pane, observation } => {
+                let r = ui::clear_observed_attention(self.env.tmux, &pane, observation.as_deref());
                 self.note_failure(&format!("clearing attention on {pane}"), r);
                 None
             }
@@ -502,6 +502,7 @@ mod tests {
             seen: Vec::new(),
             batches: VecDeque::from(vec![vec![
                 Effect::ClearAttention {
+                    observation: None,
                     pane: "%0".to_string(),
                 },
                 Effect::Quit,
@@ -570,7 +571,7 @@ mod tests {
     fn a_failed_pane_effect_is_recorded_once() {
         // A socket path with no server behind it: every tmux call fails, whatever the failure mode.
         let server = Server {
-            socket_path: Some(PathBuf::from("/nonexistent/tma-runner-test.sock")),
+            socket_path: Some(PathBuf::from("/nonexistent/tma_test_runner.sock")),
             ..Server::default()
         };
         let tmux = Tmux::connect(&server);
@@ -592,6 +593,17 @@ mod tests {
         for _ in 0..3 {
             assert!(exec
                 .execute(Effect::ClearAttention {
+                    observation: Some(Box::new(
+                        tma_core::persistence::ObservationIdentity::Legacy {
+                            blocked: None,
+                            episode: None,
+                            pid: 0,
+                            state: tma_core::AgentState::Idle,
+                            source: tma_core::Provenance::Capture,
+                            since: 0,
+                            turn_at: 0,
+                        }
+                    )),
                     pane: "%1".to_string()
                 })
                 .is_none());

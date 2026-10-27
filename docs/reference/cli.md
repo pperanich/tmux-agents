@@ -121,7 +121,7 @@ your other sessions exactly as an unscoped one does.
 | `completions` | Print a shell completion script on stdout (`tma completions zsh`). |
 | `debug` | Manifest-authoring and inspection tools. |
 | `event` | Internal, unstable: bridge one agent hook event to a stamp. |
-| `clear-attention` | Internal: clear the attention flag on the pane named and, when the tmux hook that fired it says a departure happened, on the pane just left; then nudge any resident `tma watch`. Invoked by the auto-installed tmux focus hooks. Navigation is not the only clear — the poll cycle also drops the flag on a pane a client is displaying once that client has been typed into after the flag went up. |
+| `clear-attention` | Internal: acknowledge the generated focus hook's captured arrival/departure observations, then nudge resident `tma watch` panes. A delayed handler cannot clear a newer result; direct calls clear the named pane's current observation. Regenerate older hooks with `tma install-hooks <agent>` for this guarantee. The poll cycle also clears attention after a client types into the displayed pane following the attention raise. |
 | `supervise` | Internal: the detached-action supervisor. Spawned by the `act` broker's detach path to hold the single-flight lock for the child's lifetime, kill it at the deadline, then clear the lock and fire the completion notification. Never user-invoked. |
 
 `event` is invoked only through the `tma-hook` wrapper an agent's config
@@ -1213,8 +1213,9 @@ The invoking client comes from the global `--client`.
 
 ## `tma daemon`
 
-Run the event-hub daemon in the foreground. The daemon is strictly additive
-(tier 3): never required.
+Run the event-hub daemon in the foreground. Baseline detection works without
+this tier; [native OSC 7501 collection](../how-to/run-the-daemon.md#use-native-pi-state)
+requires it.
 
 ```
 Usage: tma daemon [OPTIONS]
@@ -1224,7 +1225,7 @@ Usage: tma daemon [OPTIONS]
 |---|---|
 | `--ensure` | Spawn a detached daemon if none is running for this server, then exit 0 (idempotent). |
 | `--restart` | Stop the daemon running for this server and start one from THIS binary, waiting until it answers. Starts one if none was running. Cannot be combined with `--ensure`. |
-| `--stop` | Stop the daemon for this server and leave it stopped. Detection falls back to the poll tier, which is strictly additive. Exit 0 when nothing was running. Mutually exclusive with `--ensure` and `--restart`. |
+| `--stop` | Stop the daemon for this server and leave it stopped. Native collection stops and baseline detection falls back to polling. Exit 0 when nothing was running. Mutually exclusive with `--ensure` and `--restart`. |
 
 A resident daemon keeps the detection code it started with, so `--restart` is how
 an upgraded `tma` takes effect on demand ([`reload`](#tma-reload) re-reads config

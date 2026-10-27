@@ -16,6 +16,8 @@ pub mod evidence;
 pub mod fixture;
 pub mod fold;
 pub mod manifest;
+pub mod persistence;
+pub mod program_status;
 pub mod render;
 pub mod row;
 pub mod seen;
@@ -33,7 +35,7 @@ pub use action::{
 pub use edge::{diff_rows, Edge};
 pub use engine::{EngineError, Evaluation, RuleEngine, RuleReport};
 pub use evidence::{Claim, Evidence, Lifecycle, Provenance, Source, StateClaim};
-pub use fold::{verdict, FoldConfig, SnapshotFacts};
+pub use fold::{verdict, verdict_with_program, FoldConfig, SnapshotFacts};
 pub use manifest::{Channel, Manifest, ManifestError, Telemetry};
 pub use render::{
     render_context, render_context_advisory, render_hold, render_publish, render_quota,
@@ -53,4 +55,4 @@ pub use telemetry::{
     hook_payload_model, parse_context, parse_usage, ContextReport, QuotaReport, QuotaWindow,
     QuotaWindowReading, UsageReport,
 };
-pub use verdict::{Verdict, WinningEvidence, WriteAction, WritePlan};
+pub use verdict::{ProgramVerdict, Verdict, WinningEvidence, WriteAction, WritePlan};

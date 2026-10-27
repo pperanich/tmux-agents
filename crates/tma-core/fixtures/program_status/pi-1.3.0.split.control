@@ -1,0 +1,2 @@
+%output %0 \033]7501;state=idle:
+%output %0 app=pi\033\134

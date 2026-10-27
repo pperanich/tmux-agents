@@ -1,8 +1,9 @@
 # Run the daemon
 
 Add the optional daemon tier for lower latency, fallback detection of hookless
-agents, and deduplicated notifications. The daemon is strictly additive: every
-surface works without it, so run it only when you want what it adds.
+agents, deduplicated notifications and native OSC 7501 state. Every
+surface has baseline polling behavior without it; collecting native program
+state requires the daemon.
 
 ## The three tiers
 
@@ -12,11 +13,10 @@ tier, daemon); for what each adds and why none is required, see
 Which tier a given pane is actually at, and why it is not higher, is what
 `tma doctor` reports (below).
 
-## Two setups where it stops being optional
+## Setups that need a resident driver
 
-"Strictly additive" assumes something else is driving the poll. Two common tmux
-setups leave nothing driving it, and on those the daemon is the only thing keeping
-state fresh.
+Baseline detection assumes something drives the poll. Two common tmux setups
+leave nothing driving it unless you run the daemon or an external timer.
 
 **Detached sessions.** `#()` status jobs run only while a client is drawing the
 status line. A session started with `new-session -d` and never attached — a
@@ -56,8 +56,9 @@ Both of these do count against `tma doctor --exit-code`: a server with no attach
 client and no daemon covering it is a warning, and so is `status off`. What
 `--exit-code` deliberately ignores is a missing daemon on its own, which is a
 runtime choice rather than a misconfiguration, so a wired agent sitting at tier 2
-gates green. The two above are the cases where something that should be driving
-the poll is not.
+gates green. The two above are cases where something that should be driving the
+poll is not. Native OSC 7501 collection also requires the daemon, even with a
+polling status line. Polling cannot recover reports that were never observed.
 
 ## Start it
 
@@ -99,13 +100,89 @@ the daemon the first time you use any surface
 autostart = true
 ```
 
-That one is off by default. Either way the daemon stays strictly additive:
-nothing breaks without it, every surface falls back to polling.
+That one is off by default. Without the daemon every surface falls back to
+polling; native protocol collection stops.
 
 The cadence knobs (`sweep_secs`, `quiet_ms`, `demote_edges`, and others) also live
 under `[daemon]`; see
 [Configuration](../reference/configuration.md#daemon-tier-3-daemon-cadences).
 They apply only while the daemon runs.
+
+## Use native agent state
+
+The daemon automatically accepts OSC 7501 reports matching a recognized agent's
+name. No per-agent enable setting is needed. Codex's `app=codex` matches directly;
+Claude's `app=claude-code` is included as an alias in its bundled manifest.
+Custom agents use their manifest's filename stem by default. See the
+[manifest schema](../reference/manifest-schema.md#program_status) for aliases
+and the shared-pane attribution limit.
+
+Codex 0.164.0's installed implementation emits reports when stdout is a terminal
+without capability negotiation. Claude Code still requires a successful probe,
+which stock tmux does not answer; accepting its app name prepares tma to use
+reports when they arrive. Changing `TERM` or `allow-passthrough` alone does not
+enable Claude reporting. See [the upstream request](https://github.com/anthropics/claude-code/issues/103022).
+
+## Use native Pi state
+
+The verified native configuration is Pi 1.3.0 with tmux 3.7b on macOS (Darwin
+25.6 arm64). Codex and Claude native lifecycle coverage is still unverified. See the
+[coverage ledger](../reference/agent-coverage.md#osc-7501-rollout-ledger) for the
+executed transitions and platform limits. Upgrade all tma writers together;
+older tma binaries and third-party direct option writers lack the ownership
+guards needed on authoritative panes.
+
+The daemon prefers eligible native reports by default. If your tma config
+previously disabled collection or selected observation only, change it to:
+
+```toml
+[program_status]
+mode = "prefer"
+```
+
+Start the collector, then launch Pi in a pane on that server:
+
+```sh
+tma daemon --ensure
+tma reload
+PI_PROGRAM_STATUS=1 pi
+```
+
+The environment setting applies to this Pi process. The daemon must already
+cover the session before you request work. Normal Pi negotiation under tmux was
+not sufficient in the prototype; do not inject replies with `send-keys`, change
+`TERM`, or enable `allow-passthrough` as an activation workaround. This input
+protocol does not need the passthrough setting used by notification output.
+
+For a diagnostic trial, use `mode = "observe"` and reload. Reports are collected
+without taking state ownership or firing protocol effects. Changing to `prefer`
+requires a new report, even if observe already saw one. Initial attach and gap
+recovery also need known terminal framing and a subsequent complete report.
+The first ST-terminated sequence may only establish framing. A silent Pi may
+therefore remain on fallback until it next reports.
+
+Use `tma doctor` and `tma debug explain %0` (substitute Pi's pane id) to check
+the current winner. `source = hook` is the compatible public encoding for direct
+program evidence, so it alone does not prove native coverage. Doctor names live
+program authority separately. State hooks are optional for this verified native
+configuration; session/transcript, context/quota and request/action adapters
+remain independent. No installed hook is removed automatically.
+
+### Disable native state or stop the collector
+
+Set `mode = "off"` and run `tma reload`. This retires protocol authority and
+returns the pane to baseline detection. To stop the daemon as well:
+
+```sh
+tma daemon --stop
+```
+
+If `[daemon] autostart = true`, turn it off before using another surface when
+you intend the daemon to stay stopped. Disable and clean shutdown revoke the
+collector lease before bounded cleanup. A crash or failed retirement can require
+the 15-second lease expiry before same-version fallback recovers. Silence from
+the agent does not expire a healthy report: the daemon renews its lease without
+refreshing the report's evidence time.
 
 ## Reload config without a restart
 
@@ -186,12 +263,13 @@ restart_on_upgrade = false
 The daemon records its version next to its pid in the lock file, which is where
 doctor reads it from.
 
-A restart is cheap. The socket is gone for roughly 35 ms, then bound again but not
-yet draining for up to two seconds while the daemon runs its control-mode
+A baseline restart is cheap. The socket is gone for roughly 35 ms, then bound
+again but not yet draining for up to two seconds while the daemon runs its control-mode
 behaviour probe. Nothing is lost across either window: a hook that cannot reach a
 daemon stamps the pane itself, `tma wait` sees the connection close and degrades
 to polling, and notification de-duplication lives in a pane option that outlives
-the process.
+the process. Native program coverage must establish fresh framing and receive a
+new report after restart; persisted results alone cannot restore authority.
 
 Leaving the skew in place is the more expensive choice, and not only in latency.
 An event the old daemon's manifests map to *nothing* is refused rather than

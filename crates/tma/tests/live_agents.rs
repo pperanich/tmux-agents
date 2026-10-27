@@ -13,7 +13,7 @@
 //! client before it looks at the screen.
 
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Duration, Instant};
 
 use tma_test_support::{
@@ -180,7 +180,8 @@ impl Live {
     /// `--manifest-dir`: the point is to fire what ships) and the developer's own config and action
     /// dir pinned out.
     fn tma(&self, args: &[&str]) -> Output {
-        Command::new(self.s.bin())
+        self.s
+            .command()
             .args(args)
             .arg("--socket-name")
             .arg(&self.s.socket)

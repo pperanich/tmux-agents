@@ -30,3 +30,4 @@ signal-hook = { workspace = true }
 [dev-dependencies]
 # Shared scratch-socket harness + daemon flock gate for the integration tests.
 tma-test-support = { path = "../tma-test-support" }
+serde_json = "1"

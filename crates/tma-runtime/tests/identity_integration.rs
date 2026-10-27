@@ -17,7 +17,8 @@ use tma_test_support as common;
 fn explain_xdg(s: &Scratch, pane: &str, xdg: &Path) -> String {
     // `TMA_CONFIG` pins the config file to the empty default, keeping the real config out; the
     // manifest overlay reads `<xdg>/tma/agents/` from `XDG_CONFIG_HOME`, unaffected by it.
-    let out = Command::new(common::tma_bin())
+    let out = s
+        .command()
         .args(["debug", "explain", pane, "--json"])
         .arg("--socket-name")
         .arg(&s.socket)

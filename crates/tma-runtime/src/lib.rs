@@ -20,7 +20,9 @@ pub mod cycle;
 pub mod event;
 pub mod identity;
 pub mod manifests;
+mod metadata;
 pub mod origin;
+pub mod program_status;
 pub mod repo;
 // The cycle is `rollout`'s only in-crate caller, but `tests/rollout_integration.rs` drives the tail
 // directly, so the module stays public.

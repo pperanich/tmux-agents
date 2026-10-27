@@ -16,6 +16,11 @@ static SHUTDOWN: LazyLock<Arc<AtomicBool>> = LazyLock::new(|| Arc::new(AtomicBoo
 /// Set by the SIGHUP handler; the loop swaps it false on drain to hot-reload config + manifests.
 static RELOAD: LazyLock<Arc<AtomicBool>> = LazyLock::new(|| Arc::new(AtomicBool::new(false)));
 
+/// Observe shutdown between bounded IO operations without consuming the pipe's intent.
+pub(super) fn shutdown_requested() -> bool {
+    SHUTDOWN.load(Relaxed)
+}
+
 /// Create `dir` (and parents) with `0700` perms: the private directory the socket + lock
 /// live in. Idempotent; tightens perms even if the dir already existed.
 pub(super) fn ensure_dir(dir: &Path) -> std::io::Result<()> {

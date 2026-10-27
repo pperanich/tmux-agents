@@ -63,6 +63,7 @@ pub(crate) fn row(
     since: u64,
 ) -> AgentRow {
     AgentRow {
+        acknowledgement: None,
         pane_id: pane.to_string(),
         agent: "claude".to_string(),
         state,

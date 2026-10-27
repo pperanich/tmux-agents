@@ -22,6 +22,7 @@ token spellings only.
 | `[[rules]]` | no | array | Screen rules. |
 | `[details]` | no | table | Detail-token alternate spellings. |
 | `[telemetry]` | no | table | Metric channels the agent exposes. Absent means it exposes none. |
+| `[program_status]` | no | table | Additional OSC 7501 app names when the emitter uses a different name from the manifest's filename stem. |
 
 Unknown fields at any level are a parse error.
 
@@ -192,6 +193,33 @@ failing the whole manifest. Declaring the block is what separates a `gated`
 refusal for a context-gated action (the channel exists, the metric has not landed
 yet) from a permanent `no-coverage` one. Which agent uses which channel is in
 [Agent coverage](agent-coverage.md).
+
+## `[program_status]`
+
+Every recognized agent automatically accepts OSC 7501 reports whose `app`
+matches its manifest's filename stem. `codex.toml` accepts `app=codex` without
+this table. Declare additional names only when the emitter uses another name;
+the bundled `claude.toml` contains:
+
+```toml
+[program_status]
+apps = ["claude-code"]
+```
+
+Names are case-sensitive, 1 to 32 ASCII letters, digits, `_`, `.`, `+` or `-`.
+Duplicates are removed. An absent table or empty `apps` list retains the default
+name; a filename stem outside these rules requires a valid declared alias.
+
+The daemon must independently recognize the local agent process before accepting
+reports. The `app` field cannot register an unknown agent. A different named tool
+in the same pane must not complete the agent's turn, so the first eligible report
+must carry a matching name. Later anonymous records can follow that established
+record or ancestor. These names avoid accidental collisions; they do not prove
+which process wrote the bytes. See [native authority](../explanation/detection-model.md#native-authority-then-baseline-evidence).
+
+This table does not enable emission in the agent. Runtime collection is controlled
+by [configuration](configuration.md), where `[program_status] mode` defaults to
+`"prefer"`.
 
 ## Token rules
 

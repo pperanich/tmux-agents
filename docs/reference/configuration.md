@@ -29,6 +29,9 @@ The values shown are the defaults. Copy any subset; omitted sections and keys
 keep their defaults.
 
 ```toml
+[program_status]             # daemon-owned OSC 7501 reporting
+mode = "prefer"             # off | observe | prefer
+
 [fold]                       # state-machine tuning (seconds)
 dwell_secs = 3               # anti-flicker dwell before a working->idle drop
 hook_decay_secs = 60         # how long a hook claim outweighs screen evidence
@@ -95,6 +98,34 @@ name = "claude"
 enabled = true
 process_names = ["claude"]   # extra launcher basenames to match
 ```
+
+## `[program_status]`: native application state
+
+| key | default | meaning |
+|---|---|---|
+| `mode` | `"prefer"` | `off`, `observe`, or `prefer`, lowercase only |
+
+`off` keeps baseline hook/screen/process detection and control-mode activity
+tracking. It parses no protocol payloads, retains no protocol stores and acquires
+no collector lease. `observe` collects reports and recovery diagnostics while
+baseline detection owns the state; it produces no protocol attention, turn,
+notification or action effects. `prefer` lets an eligible report own state while
+the daemon verifies the current process, observation stream and guarded writes.
+Without that coverage it uses baseline detection. `prefer` is the default when
+the section or its `mode` key is absent; an explicit `off` remains disabled.
+
+This section requires a running daemon. It neither launches an agent nor changes
+its environment or installed hooks. Every recognized agent accepts reports matching
+its manifest name automatically. The manifest's separate `[program_status] apps`
+list adds alternate application names, not runtime settings. Unknown keys here,
+including `apps`, are errors.
+
+After entering `prefer`, attaching a new stream, recovering a gap or changing
+eligibility, a fresh complete native report is required. A silent agent can stay
+on fallback until it reports again; a query alone never establishes coverage.
+Unrelated valid reloads retain coverage. Invalid reloads keep the previous
+configuration. See [enable and disable native state](../how-to/run-the-daemon.md#use-native-pi-state)
+and the [verified coverage ledger](agent-coverage.md#osc-7501-rollout-ledger).
 
 ## `[fold]`: detection tuning
 
@@ -346,7 +377,8 @@ attaches with the same client everything else spawns.
 
 ## `[daemon]`: tier-3 daemon cadences
 
-The daemon is strictly additive; these knobs apply only when it runs.
+These knobs apply only while the daemon runs. Baseline detection remains
+available without it; native OSC 7501 collection requires it.
 
 | key | default | meaning |
 |---|---|---|

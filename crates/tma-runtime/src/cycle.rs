@@ -11,7 +11,6 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use tma_core::evidence::Provenance;
-use tma_core::render;
 use tma_core::snapshot::{PaneSnapshot, ProcInfo};
 use tma_core::stamp::opt;
 use tma_core::{
@@ -45,9 +44,10 @@ pub struct CycleReport {
     /// Whether the stampede guard short-circuited producing this cycle.
     pub stampede_skipped: bool,
     /// Panes still carrying `@agent_attention` at the end of a [`SeenClear::Deferred`] cycle, with
-    /// each one's `@agent_since`: the input for the caller's own [`crate::seen::clear_seen`] pass.
+    /// each one's exact observed owner/result or legacy episode and raise instant. The caller
+    /// passes these observations unchanged to [`crate::seen::clear_seen`].
     /// Always empty on an inline cycle, which has already run that pass itself.
-    pub deferred_seen: Vec<(String, u64)>,
+    pub deferred_seen: Vec<tma_tmux::persistence::AttentionObservation>,
     pub elapsed: Duration,
 }
 
@@ -81,7 +81,7 @@ pub enum SeenClear {
 /// nowhere to report a per-pane failure and would blank every row if it aborted, so it treats any
 /// failed pane command as one pane lost. The broker acts on a user's request and owes an answer.
 pub(crate) fn is_dead_pane(err: &TmuxError) -> bool {
-    matches!(err, TmuxError::Failed { .. })
+    matches!(err, TmuxError::Failed { .. } | TmuxError::PaneGone { .. })
 }
 
 /// Run one poll cycle against the tmux server (tier 1). Reads every pane once, consumes
@@ -123,21 +123,29 @@ pub fn run_cycle_with(
     };
     let mut procs: Option<Vec<ProcInfo>> = None;
     let mut did_produce = false;
-    // The stampede claim, chained onto the first stamp this cycle commits (see that call site).
-    let poll_claim = render::set_server_option(opt::LAST_POLL, &now.to_string());
     // `-F` conditional-write support, probed lazily before the first producer write and cached for
-    // the server's life; an unsupported server degrades to advisory plain writes (a clobber race).
+    // the server's life; unsupported groups retain protected advisory writes without tuple proof.
     let mut guarded_supported: Option<bool> = None;
-    // This cycle's per-pane result: `Some(state)` for a pane ending as an agent, `None` otherwise.
-    // Every pane records exactly one entry; the end-of-cycle reconciliation reads it as the
-    // authoritative window-summary basis.
-    let mut resulting: HashMap<String, Option<AgentState>> = HashMap::new();
+    let mut observed: HashMap<String, tma_tmux::persistence::PaneRead> = panes
+        .iter()
+        .map(|pane| {
+            (
+                pane.pane_id.clone(),
+                tma_tmux::persistence::PaneRead::from_options(
+                    pane.pane_id.clone(),
+                    pane.options.clone(),
+                ),
+            )
+        })
+        .collect();
 
     for rec in &panes {
         // A corrupt stamp is deliberately treated as absent here: the pane is then re-detected and
         // restamped, which repairs it. `tma doctor` and `tma debug explain` are where the bad value
         // gets named; the hot path has nowhere to report it and no reason to stop for it.
-        let read = StampedState::from_options(&rec.options).ok().flatten();
+        let read = tma_core::persistence::current_stamp(&rec.options, now)
+            .ok()
+            .flatten();
         let prev = read.clone().map(ReadResult::into_inner);
 
         // The user's escape hatch, checked before the consumer fast path so a fresh stamp cannot
@@ -146,27 +154,32 @@ pub fn run_cycle_with(
         if identity::is_ignored(&rec.options) {
             if prev.is_some() {
                 match stamp::apply(tmux, &panes, &rec.pane_id, &StampPlan::Remove, true) {
-                    Ok(()) => report.removed += 1,
+                    Ok(applied) => {
+                        report.removed += usize::from(applied.committed);
+                        consume_readback(&mut report, &mut observed, rec, applied.read, now);
+                    }
                     Err(e) if is_dead_pane(&e) => report.skipped_dead += 1,
                     Err(e) => return Err(e),
                 }
             }
-            resulting.insert(rec.pane_id.clone(), None);
+
             continue;
         }
 
         // Consumer path: a fresh, settled stamp is trusted as-is. A `stamped_at` in the future (a
         // backward wall-clock step) fails the `<= now` guard, so the pane re-stamps against the
         // corrected clock instead of being trusted forever.
-        let fresh = matches!(&read, Some(ReadResult::Settled(s))
+        let live_program = matches!(
+            tma_core::persistence::read_projection(&rec.options, now),
+            Ok(tma_core::persistence::ProjectionRead::Live { .. })
+        );
+        let fresh = live_program
+            || matches!(&read, Some(ReadResult::Settled(s))
             if s.stamped_at <= now && now - s.stamped_at < cfg.freshness_ms());
         if fresh || (stampede_skip && prev.is_some()) {
             if let Some(p) = &prev {
                 report.consumed += 1;
                 report.rows.push(row_from_stamp(rec, p, now));
-                resulting.insert(rec.pane_id.clone(), Some(p.state));
-            } else {
-                resulting.insert(rec.pane_id.clone(), None);
             }
             continue;
         }
@@ -206,22 +219,16 @@ pub fn run_cycle_with(
             // the guard flag is irrelevant).
             if prev.is_some() {
                 match stamp::apply(tmux, &panes, &rec.pane_id, &StampPlan::Remove, true) {
-                    Ok(()) => report.removed += 1,
+                    Ok(applied) => {
+                        report.removed += usize::from(applied.committed);
+                        consume_readback(&mut report, &mut observed, rec, applied.read, now);
+                    }
                     // Pane already gone: the removal it wanted is moot; treat as skipped.
                     Err(e) if is_dead_pane(&e) => report.skipped_dead += 1,
                     Err(e) => return Err(e),
                 }
             }
-            // Clear a stale title anchor so a lost title-narrowed match leaves nothing behind for a
-            // future coincidence. No-op when the pane never had one.
-            if let Some(cmd) = identity::title_anchor_command(
-                &rec.pane_id,
-                stored_title_anchor.map(String::as_str),
-                None,
-            ) {
-                let _ = tmux.apply(&[cmd]);
-            }
-            resulting.insert(rec.pane_id.clone(), None);
+
             continue;
         };
 
@@ -240,42 +247,53 @@ pub fn run_cycle_with(
                 .options
                 .get(opt::REG_DEAD_SINCE)
                 .and_then(|v| v.parse::<u64>().ok());
-            match reg_dead_action(shell_only, marker, now) {
+            let marker_edit = match reg_dead_action(shell_only, marker, now) {
                 RegDeadAction::Reap => {
                     // Confirmed dead: the `Remove` path also unsets `@tma_reg_dead_since` (in
                     // `REMOVABLE`). Plain unsets, so the guard flag is irrelevant.
                     match stamp::apply(tmux, &panes, &rec.pane_id, &StampPlan::Remove, true) {
-                        Ok(()) => report.removed += 1,
+                        Ok(applied) => {
+                            report.removed += usize::from(applied.committed);
+                            consume_readback(&mut report, &mut observed, rec, applied.read, now);
+                        }
                         Err(e) if is_dead_pane(&e) => report.skipped_dead += 1,
                         Err(e) => return Err(e),
                     }
-                    resulting.insert(rec.pane_id.clone(), None);
+
                     continue;
                 }
-                // The marker rides the same apply path as the title anchor: a plain set/unset,
-                // outside the guarded state tuple.
-                RegDeadAction::SetMarker => {
-                    let cmd = render::set_pane_option(
-                        &rec.pane_id,
-                        opt::REG_DEAD_SINCE,
-                        &now.to_string(),
-                    );
-                    let _ = tmux.apply(&[cmd]);
+                RegDeadAction::SetMarker => Some(tma_tmux::persistence::OptionEdit::set(
+                    opt::REG_DEAD_SINCE,
+                    now.to_string(),
+                )),
+                RegDeadAction::ClearMarker => Some(tma_tmux::persistence::OptionEdit::unset(
+                    opt::REG_DEAD_SINCE,
+                )),
+                RegDeadAction::Hold => None,
+            };
+            let mut winner = rec.clone();
+            if let Some(edit) = marker_edit {
+                match stamp::apply_companions(tmux, &observed[&rec.pane_id], &[edit]) {
+                    Ok(applied) => {
+                        winner.options = applied.read.options.clone();
+                        observed.insert(rec.pane_id.clone(), applied.read);
+                    }
+                    Err(e) if is_dead_pane(&e) => {
+                        report.skipped_dead += 1;
+                        continue;
+                    }
+                    Err(e) => return Err(e),
                 }
-                RegDeadAction::ClearMarker => {
-                    let cmd = render::unset_pane_option(&rec.pane_id, opt::REG_DEAD_SINCE);
-                    let _ = tmux.apply(&[cmd]);
-                }
-                RegDeadAction::Hold => {}
             }
             // Hold the existing stamp rather than capture+fold: a fold with
             // `foreground_is_agent == false` would foreground-cap this hook state to `unknown`.
-            if let Some(p) = &prev {
+            if let Some(p) = tma_core::persistence::current_stamp(&winner.options, crate::now_ms())
+                .ok()
+                .flatten()
+                .map(ReadResult::into_inner)
+            {
                 report.consumed += 1;
-                report.rows.push(row_from_stamp(rec, p, now));
-                resulting.insert(rec.pane_id.clone(), Some(p.state));
-            } else {
-                resulting.insert(rec.pane_id.clone(), None);
+                report.rows.push(row_from_stamp(&winner, &p, now));
             }
             continue;
         }
@@ -292,7 +310,7 @@ pub fn run_cycle_with(
             report.skipped_quiet += 1;
             report.consumed += 1;
             report.rows.push(row_from_stamp(rec, p, now));
-            resulting.insert(rec.pane_id.clone(), Some(p.state));
+
             continue;
         }
 
@@ -302,7 +320,7 @@ pub fn run_cycle_with(
             Err(e) if is_dead_pane(&e) => {
                 // Pane died between `list-panes` and its capture: skip it, treated as removed, so the
                 // rollup shrinks like an externally-killed pane rather than the cycle aborting.
-                resulting.insert(rec.pane_id.clone(), None);
+
                 report.skipped_dead += 1;
                 continue;
             }
@@ -352,119 +370,55 @@ pub fn run_cycle_with(
         // Resolve (and cache) `-F` support once, right before the first producer write.
         let guarded =
             *guarded_supported.get_or_insert_with(|| stamp::guarded_writes_supported(tmux, &panes));
-        // The stampede claim rides the first stamp that lands, so a producing cycle costs ONE
-        // `set-option` invocation per pane and not one more for the hint (every invocation forces
-        // a full redraw of every attached client). Value and meaning are unchanged: this cycle's
-        // `now`, claimed only once a stamp has actually committed.
-        let trailing: &[render::StampCommand] = if did_produce {
-            &[]
-        } else {
-            std::slice::from_ref(&poll_claim)
-        };
-        match stamp::apply_with(tmux, &panes, &rec.pane_id, &plan, guarded, trailing) {
-            Ok(()) => {}
-            Err(e) if is_dead_pane(&e) => {
-                // Pane died between its capture and this stamp write: treat as removed, drop no
-                // sibling's row. Don't push a row for a pane that no longer exists.
-                resulting.insert(rec.pane_id.clone(), None);
+        // Batch the hint with the first pane write rather than spawning a separate
+        // option-writing client. The hint proves complete server
+        // execution of this receipt. A later replacement can defeat client confirmation
+        // while leaving the same-second advisory hint.
+        let hint = (!did_produce).then(|| tma_tmux::persistence::PollHint::new(now));
+        let mut companions = Vec::new();
+        if let Some(anchor) = id.title_anchor {
+            companions.push(tma_tmux::persistence::OptionEdit::set(
+                opt::TITLE_MATCH_PID,
+                anchor.render(),
+            ));
+        }
+        let applied = match stamp::apply_cycle(
+            tmux,
+            &panes,
+            &rec.pane_id,
+            &plan,
+            guarded,
+            hint,
+            &companions,
+        ) {
+            Ok(applied) => applied,
+            Err(error) if is_dead_pane(&error) => {
                 report.skipped_dead += 1;
                 continue;
             }
-            Err(e) => return Err(e),
-        }
-        // Persist the flicker anchor for a title-narrowed match so identity holds across cursor's
-        // title flicker next cycle. Only a title-narrowed claim carries `title_anchor`.
-        if id.title_anchor.is_some() {
-            if let Some(cmd) = identity::title_anchor_command(
-                &rec.pane_id,
-                stored_title_anchor.map(String::as_str),
-                id.title_anchor,
-            ) {
-                let _ = tmux.apply(&[cmd]);
-            }
-        }
-        did_produce = true;
-        resulting.insert(rec.pane_id.clone(), Some(verdict.state));
-        if verdict.writes.action == WriteAction::Publish {
+            Err(error) => return Err(error),
+        };
+        did_produce |= applied.committed;
+        if applied.committed && verdict.writes.action == WriteAction::Publish {
             report.produced += 1;
         } else {
             report.consumed += 1;
         }
+        let mut winner = rec.clone();
+        winner.options = applied.read.options.clone();
+        let current = tma_core::persistence::current_stamp(&winner.options, crate::now_ms())
+            .ok()
+            .flatten()
+            .map(ReadResult::into_inner);
 
-        // The row shows what the write leaves stored, not the intended verdict: a source-guarded
-        // write that loses (a hook claim the capture cannot clobber) commits nothing and keeps the
-        // prior tuple. `render::project_publish` mirrors the guard + write-once `@agent_since` +
-        // attention-hold so the row cannot drift from the write. Presentation only; a late concurrent
-        // hook self-corrects next cycle.
-        let (row_state, since, attention) = match &plan {
-            StampPlan::Publish(publish) => {
-                let p = render::project_publish(prev.as_ref(), publish);
-                (p.state, p.since, p.attention)
-            }
-            // `EndSession` is the event path's plan; the cycle never builds one. Grouped here
-            // because it, too, leaves the stored state tuple alone.
-            StampPlan::Hold { .. } | StampPlan::Remove | StampPlan::EndSession => (
-                verdict.state,
-                prev.as_ref()
-                    .map(|p| p.since)
-                    .unwrap_or(verdict.winning_evidence.at),
-                prev.as_ref().is_some_and(|p| p.attention),
-            ),
-        };
-        let turn_at = row_turn_at(&plan, prev.as_ref());
-        let companions = row_companions(rec, now);
-        report.rows.push(AgentRow {
-            pane_id: rec.pane_id.clone(),
-            agent: id.manifest.name.clone(),
-            state: row_state,
-            detail: verdict.detail.as_ref().map(|d| d.as_str().to_string()),
-            since,
-            turn_at,
-            session: rec.session.clone(),
-            window_index: rec.window_index,
-            pane_index: rec.pane_index,
-            title: rec.title.clone(),
-            attention,
-            agent_session: companions.agent_session,
-            transcript: companions.transcript,
-            permission_request: companions.permission_request,
-            stamped_at: companions.stamped_at,
-            context_pct: companions.context_pct,
-            context_at: companions.context_at,
-            tokens: companions.tokens,
-            quota: companions.quota,
-            cost_usd: companions.cost_usd,
-            muted: companions.muted,
-            model: companions.model,
-            cwd: rec.cwd.clone(),
-            repo: None,
-            pending: companions.pending,
-        });
-    }
-
-    // End-of-cycle summary reconciliation: the authoritative, convergent writer for both the window
-    // `@agent_summary` and its session-scoped mirror. Each scope's desired value is a pure function
-    // of its full membership (this cycle's `resulting` verdicts, falling back to each pane's
-    // cycle-start `@agent_state`), compared in memory against the stored value and written only on
-    // drift, so a pure-consumer cycle stays cheap. This corrects an externally-killed pane and any
-    // multi-agent scope the in-`apply()` per-pane append mis-rolled (that append stays a
-    // best-effort hint for non-cycle callers). Residual: a concurrent-hook-suppressed change
-    // reflects the intended verdict and self-corrects next cycle.
-    let summary_cmds =
-        stamp::reconcile_summary_commands(&panes, |p| match resulting.get(&p.pane_id) {
-            Some(entry) => *entry,
-            None => stamp::stored_pane_state(p),
-        });
-    if !summary_cmds.is_empty() {
-        match tmux.apply(&summary_cmds) {
-            Ok(()) => {}
-            // One pane killed since this cycle's `list-panes` fails the whole chained reconcile.
-            // Skip it on the same terms as the per-pane writes: the rollups are convergent, so the
-            // next cycle rewrites them, and aborting here would blank every row over one dead pane.
-            Err(e) if is_dead_pane(&e) => {}
-            Err(e) => return Err(e),
+        if let Some(stamp) = current {
+            report.rows.push(row_from_stamp(&winner, &stamp, now));
         }
+        observed.insert(rec.pane_id.clone(), applied.read);
     }
+
+    // Reconcile from a coherent persisted snapshot, guarded against later state/membership changes.
+    stamp::reconcile_summaries(tmux)?;
 
     // Context pull path: tail each Codex `file-tail` pane's rollout and stamp the gauge. The
     // memo is process-local (a `static`), so a long-lived surface's steady state is one stat per quiet
@@ -487,7 +441,12 @@ pub fn run_cycle_with(
     // a stampede-skipped cycle (the producer that did poll ran it) and on a fleet with nothing
     // flagged, so the zero-config floor pays no extra round trip in steady state.
     if !stampede_skip {
-        let raised = crate::seen::raised_panes(&report.rows);
+        let raised: Vec<_> = crate::seen::raised_panes(&report.rows)
+            .into_iter()
+            .filter_map(|(pane, _)| {
+                tma_tmux::persistence::AttentionObservation::from_read(observed.remove(&pane)?, now)
+            })
+            .collect();
         if !raised.is_empty() {
             match seen_clear {
                 SeenClear::Inline => {
@@ -523,7 +482,7 @@ pub fn stamp_rows(tmux: &Tmux) -> Result<Vec<AgentRow>, TmuxError> {
         .iter()
         .filter(|rec| !identity::is_ignored(&rec.options))
         .filter_map(|rec| {
-            let stamp = StampedState::from_options(&rec.options)
+            let stamp = tma_core::persistence::current_stamp(&rec.options, now)
                 .ok()
                 .flatten()
                 .map(ReadResult::into_inner)?;
@@ -542,9 +501,34 @@ pub fn stamp_rows(tmux: &Tmux) -> Result<Vec<AgentRow>, TmuxError> {
     Ok(rows)
 }
 
+fn consume_readback(
+    report: &mut CycleReport,
+    observed: &mut HashMap<String, tma_tmux::persistence::PaneRead>,
+    rec: &PaneRecord,
+    read: tma_tmux::persistence::PaneRead,
+    now: u64,
+) {
+    let mut winner = rec.clone();
+    winner.options = read.options.clone();
+    if !identity::is_ignored(&winner.options) {
+        if let Some(stamp) = tma_core::persistence::current_stamp(&winner.options, crate::now_ms())
+            .ok()
+            .flatten()
+            .map(ReadResult::into_inner)
+        {
+            report.consumed += 1;
+            report.rows.push(row_from_stamp(&winner, &stamp, now));
+        }
+    }
+    observed.insert(rec.pane_id.clone(), read);
+}
+
 fn row_from_stamp(rec: &PaneRecord, stamp: &StampedState, now: u64) -> AgentRow {
     let companions = row_companions(rec, now);
     AgentRow {
+        acknowledgement: tma_core::persistence::ProgramMetadata::from_options(&rec.options)
+            .attention_observation(&rec.options, now)
+            .map(|(_, identity)| identity),
         pane_id: rec.pane_id.clone(),
         agent: rec
             .options
@@ -561,7 +545,7 @@ fn row_from_stamp(rec: &PaneRecord, stamp: &StampedState, now: u64) -> AgentRow 
         title: rec.title.clone(),
         attention: stamp.attention,
         // `@agent_session` is already decoded on the stamp tuple; the metrics ride the options.
-        agent_session: stamp.session.clone(),
+        agent_session: companions.agent_session,
         transcript: companions.transcript,
         permission_request: companions.permission_request,
         stamped_at: companions.stamped_at,
@@ -603,7 +587,13 @@ struct RowCompanions {
 /// treated as absent (display-tolerant read). `now` resolves the mute deadline here, where the
 /// cycle's clock already is, so no surface downstream has to read one.
 fn row_companions(rec: &PaneRecord, now: u64) -> RowCompanions {
-    let opt = |k: &str| rec.options.get(k).filter(|v| !v.is_empty());
+    let metadata_visible = crate::metadata::visible(&rec.options);
+    let opt = |k: &str| {
+        rec.options
+            .get(k)
+            .filter(|v| !v.is_empty())
+            .filter(|_| metadata_visible || !tma_core::persistence::METADATA_KEYS.contains(&k))
+    };
     RowCompanions {
         agent_session: opt(opt::SESSION).cloned(),
         transcript: opt(opt::TRANSCRIPT).cloned(),
@@ -652,6 +642,7 @@ fn row_companions(rec: &PaneRecord, now: u64) -> RowCompanions {
 /// reset arm the row would carry the REPLACED agent's turn instant for one cycle, breaking the
 /// invariant stated above `row_companions` that the row shows what the write leaves stored — and
 /// under a backward clock step that stale value is what `episode_ms` and `wait --since` would read.
+#[cfg(test)]
 fn row_turn_at(plan: &StampPlan, prev: Option<&StampedState>) -> u64 {
     match plan {
         StampPlan::Remove => 0,
@@ -858,6 +849,7 @@ mod tests {
             state: AgentState::Idle,
             detail: None,
             winning_evidence: tma_core::WinningEvidence {
+                origin: None,
                 source: Provenance::Hook,
                 at: NOW,
                 label: "test".to_string(),
@@ -868,6 +860,7 @@ mod tests {
                 set_attention: false,
                 episode_reset,
             },
+            program: None,
         };
         stamp::plan_from_verdict("%0", &verdict, 4242, "claude", 0xabc, NOW)
     }

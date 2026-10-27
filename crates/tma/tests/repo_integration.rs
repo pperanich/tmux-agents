@@ -14,7 +14,7 @@ use tma_test_support::Scratch;
 
 /// Run `tma <args>` against the scratch server + this suite's manifest dir (the workdir).
 fn tma(s: &Scratch, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tma"))
+    s.command()
         .args(args)
         .arg("--socket-name")
         .arg(&s.socket)

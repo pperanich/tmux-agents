@@ -1,7 +1,4 @@
-use tma_core::render;
-use tma_core::stamp::opt;
-use tma_core::{AgentState, StampedState};
-use tma_tmux::tmux::Tmux;
+use tma_core::AgentState;
 
 use super::mapping::{json_object_field, json_string_field, EventPlan};
 use super::{PERMISSION_REPLIED, QUESTION_REPLIED};
@@ -332,80 +329,4 @@ fn cap_summary(s: String) -> String {
         end -= 1;
     }
     format!("{}{TRUNCATION_MARK}", &s[..end])
-}
-
-/// Apply the [`pending_call_effect`] to the pane's `@agent_pending_*` trio, in one chained
-/// invocation so a reader never sees a tool without its summary.
-pub(super) fn apply_pending_call(
-    tmux: &Tmux,
-    pane: &str,
-    kind: &str,
-    plan: &EventPlan,
-    stored: Option<&StampedState>,
-    event_session: Option<&str>,
-    payload: &str,
-) -> bool {
-    let owner = stored.and_then(|s| s.session.as_deref());
-    let cmds = match pending_call_effect(kind, plan, owner, event_session, payload) {
-        PendingCall::Set {
-            tool,
-            call,
-            summary,
-        } => vec![
-            render::set_pane_option(pane, opt::PENDING_TOOL, &tool),
-            render::set_pane_option(pane, opt::PENDING_CALL, &call),
-            render::set_pane_option(pane, opt::PENDING_SUMMARY, &summary),
-        ],
-        PendingCall::Clear => vec![
-            render::unset_pane_option(pane, opt::PENDING_TOOL),
-            render::unset_pane_option(pane, opt::PENDING_CALL),
-            render::unset_pane_option(pane, opt::PENDING_SUMMARY),
-        ],
-        PendingCall::None => return false,
-    };
-    let _ = tmux.apply(&cmds);
-    true
-}
-
-/// Apply the [`question_request_effect`] to the pane's `@agent_question_request` option. Returns
-/// whether a write was issued, on the same terms as [`apply_permission_request`].
-pub(super) fn apply_question_request(
-    tmux: &Tmux,
-    pane: &str,
-    kind: &str,
-    plan: &EventPlan,
-    stored: Option<&StampedState>,
-    event_session: Option<&str>,
-    payload: &str,
-) -> bool {
-    let owner = stored.and_then(|s| s.session.as_deref());
-    let cmd = match question_request_effect(kind, plan, owner, event_session, payload) {
-        PermReq::Set(id) => render::set_pane_option(pane, opt::QUESTION_REQUEST, &id),
-        PermReq::Clear => render::unset_pane_option(pane, opt::QUESTION_REQUEST),
-        PermReq::None => return false,
-    };
-    let _ = tmux.apply(&[cmd]);
-    true
-}
-
-/// Apply the [`permission_request_effect`] to the pane's `@agent_permission_request` option.
-/// Returns whether a write was issued: `permission.replied` maps to no state claim yet still clears
-/// the option, so this is the one way an otherwise-unmapped event counts as work actually applied.
-pub(super) fn apply_permission_request(
-    tmux: &Tmux,
-    pane: &str,
-    kind: &str,
-    plan: &EventPlan,
-    stored: Option<&StampedState>,
-    event_session: Option<&str>,
-    payload: &str,
-) -> bool {
-    let owner = stored.and_then(|s| s.session.as_deref());
-    let cmd = match permission_request_effect(kind, plan, owner, event_session, payload) {
-        PermReq::Set(id) => render::set_pane_option(pane, opt::PERMISSION_REQUEST, &id),
-        PermReq::Clear => render::unset_pane_option(pane, opt::PERMISSION_REQUEST),
-        PermReq::None => return false,
-    };
-    let _ = tmux.apply(&[cmd]);
-    true
 }

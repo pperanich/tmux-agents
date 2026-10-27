@@ -29,7 +29,7 @@ fn stamp_blocked_claude(s: &Scratch, pane: &str) {
     s.set_opt(pane, "@agent_detail", "permission");
     s.set_opt(pane, "@agent_stamped_at", &now);
     s.set_opt(pane, "@agent_source", "capture");
-    s.set_opt(pane, "@agent_pid", "4242");
+    s.set_opt(pane, "@agent_pid", &s.get(pane, "#{pane_pid}"));
 }
 
 /// A pid that is provably not running: a child spawned, waited for, and reaped. Asserted dead, so
@@ -165,7 +165,7 @@ fn stamp_blocked_opencode(s: &Scratch, pane: &str, request_id: &str, endpoint: &
     s.set_opt(pane, "@agent_detail", "permission");
     s.set_opt(pane, "@agent_stamped_at", &now);
     s.set_opt(pane, "@agent_source", "capture");
-    s.set_opt(pane, "@agent_pid", "4242");
+    s.set_opt(pane, "@agent_pid", &s.get(pane, "#{pane_pid}"));
     s.set_opt(pane, "@agent_permission_request", request_id);
     s.set_opt(pane, "@agent_api_endpoint", endpoint);
 }

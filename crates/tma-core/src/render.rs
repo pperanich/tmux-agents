@@ -18,6 +18,57 @@ pub struct StampCommand {
     pub argv: Vec<String>,
 }
 
+/// Quote one argument for tmux's command parser, never for a shell. Single quotes prevent
+/// environment expansion; quotes and newlines are escaped outside the quoted span. Physical
+/// newlines would remove following indentation/comments and preceding backslashes in tmux's lexer.
+pub fn quote_tmux_argument(value: &str) -> String {
+    format!(
+        "'{}'",
+        value.replace('\'', "'\\''").replace('\n', "'\\012'")
+    )
+}
+
+/// A literal format operand, including text read from a malformed persisted option.
+/// The literal modifier avoids both recursive expansion and tmux's special style handling.
+pub fn literal_tmux_format(value: &str) -> String {
+    let mut encoded = String::from("#{l:");
+    for ch in value.chars() {
+        if matches!(ch, '#' | '}' | ',') {
+            encoded.push('#');
+        }
+        encoded.push(ch);
+    }
+    encoded.push('}');
+    encoded
+}
+
+/// Evaluate `predicate` once for a complete dependent command group. The caller must ensure
+/// that the body cannot yield (in particular, reject effective after-set-option hooks).
+pub fn conditional_group(pane: &str, predicate: &str, body: &[StampCommand]) -> StampCommand {
+    let commands = body
+        .iter()
+        .map(|command| {
+            command
+                .argv
+                .iter()
+                .map(|arg| quote_tmux_argument(arg))
+                .collect::<Vec<_>>()
+                .join(" ")
+        })
+        .collect::<Vec<_>>()
+        .join(" ; ");
+    StampCommand {
+        argv: vec![
+            "if-shell".into(),
+            "-F".into(),
+            "-t".into(),
+            pane.into(),
+            predicate.into(),
+            commands,
+        ],
+    }
+}
+
 /// The suppression guard shared by every field of a chained write. Each variant renders to a
 /// tmux format that is truthy when the write must be suppressed (held at the stored value).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -44,7 +95,7 @@ pub enum Guard {
 
 impl Guard {
     /// The tmux format that evaluates truthy (`1`) when the write must be suppressed.
-    fn suppress_expr(self) -> String {
+    pub fn suppress_expr(self) -> String {
         match self {
             Guard::Unconditional => "0".to_string(),
             Guard::ProtectHook => format!("#{{==:#{{{src}}},hook}}", src = opt::SOURCE),
@@ -701,6 +752,11 @@ const PURGEABLE: &[&str] = &[opt::ACTION, opt::WATCH_PID, opt::MUTE_UNTIL];
 pub fn render_purge(pane_id: &str) -> Vec<StampCommand> {
     let mut cmds = render_remove(pane_id);
     cmds.extend(PURGEABLE.iter().map(|k| unset_pane(pane_id, k)));
+    cmds.extend(
+        crate::persistence::opt::PANE_KEYS
+            .iter()
+            .map(|key| unset_pane(pane_id, key)),
+    );
     cmds.push(render_summary(SummaryScope::Window, pane_id, None));
     cmds.push(render_summary(SummaryScope::Session, pane_id, None));
     cmds

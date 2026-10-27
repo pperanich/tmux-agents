@@ -63,6 +63,10 @@ pub struct QuotaLabel {
 /// One agent pane's resolved state for a surface (`tma ls`, `tma status`, jump, the picker).
 #[derive(Clone, Debug)]
 pub struct AgentRow {
+    /// Private observation from the actual persisted read, excluded from public JSON. Rows made
+    /// from public data have none and cannot authorize acknowledgement of a newer result.
+    #[doc(hidden)]
+    pub acknowledgement: Option<crate::persistence::ObservationIdentity>,
     pub pane_id: String,
     pub agent: String,
     pub state: AgentState,
@@ -312,6 +316,7 @@ mod tests {
 
     fn row(session: &str, agent: &str, state: AgentState) -> AgentRow {
         AgentRow {
+            acknowledgement: None,
             pane_id: "%1".to_string(),
             agent: agent.to_string(),
             state,

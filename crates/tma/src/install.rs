@@ -654,8 +654,9 @@ impl TmuxHookState {
         match self {
             TmuxHookState::Present => None,
             TmuxHookState::Drifted => Some(format!(
-                "tmux hook {hook} is stale (it runs a different command than this build installs, \
-                 e.g. a tma binary that has moved); run `tma install-hooks <agent>` to repoint it"
+                "tmux hook {hook} is stale (its binary path or command differs); run \
+                 `tma install-hooks <agent>` to regenerate dispatch-time attention capture. \
+                 Older or custom commands without that capture do not protect delayed clears"
             )),
             TmuxHookState::Wiped => Some(format!(
                 "tmux hook {hook} installed but not present on this server, likely restarted \
@@ -1474,10 +1475,34 @@ mod tests {
                         clear-attention '#{pane_id}'; else tma clear-attention \
                         '#{pane_id}' 2>/dev/null; fi\"";
         assert!(hook_command_current(expected, expected), "same command");
-        // tmux re-serializes the stored command when printing it back, so quoting and spacing are
-        // its choice: normalization must absorb that without hiding a real change.
-        let requoted = expected.replace('\'', "\"").replace("; then", ";  then");
+        let payload = expected
+            .strip_prefix("run-shell \"")
+            .unwrap()
+            .strip_suffix('"')
+            .unwrap();
+        let requoted = format!(
+            "run-shell   {}",
+            tma_core::render::quote_tmux_argument(payload)
+        );
         assert!(hook_command_current(&requoted, expected), "{requoted}");
+        assert!(!hook_command_current(
+            &expected.replace("; then", ";  then"),
+            expected
+        ));
+        let escaped_payload = payload.replace("clear-attention", r"clear\-attention");
+        let escaped = format!(
+            "run-shell {}",
+            tma_core::render::quote_tmux_argument(&escaped_payload)
+        );
+        assert!(!hook_command_current(&escaped, expected));
+        assert!(!hook_command_current(
+            &format!("{expected}; display-message extra"),
+            expected
+        ));
+        assert!(!hook_command_current(
+            "run-shell \"unterminated",
+            "run-shell \"unterminated"
+        ));
 
         // A moved binary: still ours (removable), no longer current (rewritable).
         let moved = expected.replace("/opt/tma/tma", "/usr/local/bin/tma");

@@ -242,8 +242,11 @@ tma install-hooks pi --uninstall
 Caveat: pi has no JSON hook block. It auto-discovers extension modules from
 `~/.pi/agent/extensions/`, so `tma` drops a `tma.js` file there that subscribes to
 pi's events and shells out to `tma-hook` fire-and-forget. The extension is inert
-outside tmux and never blocks pi. pi auto-runs tools with no approval prompt, so
-there is no `blocked` state for it at all.
+outside tmux and never blocks pi. This extension has no `blocked` mapping.
+Pi 1.3.0's native confirmation UI reports `blocked/permission` in the
+[verified OSC configuration](run-the-daemon.md#use-native-pi-state); that
+daemon-dependent state coverage is separate from the extension's session and
+context callbacks.
 
 ## Verifying everything at once
 
@@ -275,13 +278,13 @@ separately ("installed but not present on this server, likely restarted"); see
 
 `tma install-hooks <agent>` also installs two tmux server hooks so a pane's
 attention flag clears the moment you look at it, and again when you look away.
-You do not add these yourself; they are shown here so you recognize them in
+Use the installer to generate their complete commands, then inspect them with
 `show-hooks`:
 
-```
-$ tmux show-hooks -g | grep clear-attention
-after-select-pane[0] run-shell "if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=after-select-pane '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=after-select-pane tma clear-attention '#{pane_id}' 2>/dev/null || true; fi"
-session-window-changed[0] run-shell "if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=session-window-changed '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=session-window-changed tma clear-attention '#{pane_id}' 2>/dev/null || true; fi"
+```sh
+tma install-hooks <agent>
+tmux show-hooks -g after-select-pane
+tmux show-hooks -g session-window-changed
 ```
 
 `session-window-changed` is the window half rather than the obvious
@@ -298,9 +301,17 @@ a dead hook behind. `tma install-hooks --check` compares each installed hook
 against the command this build would write and reports a mismatch as stale; the
 next `tma install-hooks <agent>` rewrites it in place.
 
-On every pane switch and every REAL window change, `tma clear-attention` drops
-`@agent_attention` on two panes: the one you just moved to, and the one you just
-left. So the `done`/blocked flag reverts to plain idle as soon as you jump to (or
+Each generated command captures the arrival and departure panes' session and
+attention presentation when tmux dispatches the hook. The handler acknowledges
+only matching observations, so a result published after capture stays marked.
+Capture starts when tmux expands the command; earlier hook work can delay it
+past the physical navigation event. A result already visible on arrival can be
+acknowledged even if a picker displayed an older result; the picker's own clear
+still refers to its displayed observation.
+
+On every pane switch and every real window change, `tma clear-attention` clears
+matching attention on the pane you just moved to and the one you just left.
+So the `done`/blocked flag reverts to plain idle as soon as you jump to (or
 manually switch to) that pane — and also when an agent finishes while you are
 sitting there watching it and you then move on, which is the case an arrival-only
 clear left marked for as long as you stayed away.
@@ -343,17 +354,22 @@ pane is on screen, or until you navigate off it*. Under a control-mode client
 (iTerm2's `-CC`) tmux freezes the client's input clock at attach, so there the
 hooks are the only clear you get.
 
-`TMA_HOOK_KIND` in the command is how `clear-attention` knows which of the two
-hooks fired, which is what tells it where the departed pane is: still in this
-window, or back in the window you left. It is an environment variable rather than
-an argument on purpose, so that a hook string written by a newer tma still works
-against an older binary on `$PATH` — the older one does not recognize it, ignores
-it, and clears the arrival pane as it always did.
+The commands carry their dispatch captures and `TMA_HOOK_KIND` in environment
+variables so older binaries can ignore them without an unknown-argument error.
+The delayed-clear guarantee requires the updated tma binary. Authoritative
+program state also requires upgrading all state producers; environment-variable
+compatibility does not make mixed-version writers safe.
+The departed target is captured at dispatch and is not resolved again after a
+delayed handler starts.
 
-**An existing install keeps the old behaviour until you re-run
-`tma install-hooks <agent>`.** The hooks live in tmux server state, not in tma, so
-upgrading the binary does not rewrite them; `tma install-hooks --check` reports the
-old command as stale, and the next install rewrites it in place.
+Upgrading the binary does not regenerate existing hook strings. Run
+`tma install-hooks <agent>` again; `tma install-hooks --check` and `tma doctor`
+report older commands as stale. A known older hook with `TMA_HOOK_KIND` but no
+dispatch capture still clears legacy attention, but cannot acknowledge
+program-owned state. Unmarked older or custom commands cannot be distinguished
+from direct manual clears and lack the delayed-clear guarantee until
+regenerated. An explicit direct `tma clear-attention` keeps its current-target
+behavior. These hooks are optional for OSC collection.
 
 If your tmux has `focus-events on`, you can also clear attention on terminal focus
 changes (switching into the tmux window from another app) by opting in:
@@ -370,34 +386,17 @@ anything, so it clears the arrival pane only.
 
 ### Making the tmux hooks survive a server restart
 
-`set-hook` writes *runtime* server state. A `kill-server`, a reboot, or the last
-client detaching from a server started with `exit-empty on` takes the hooks with
-it, and nothing reinstalls them: `tma install-hooks` is the only writer, and the
-next `tma` command does not re-run it. `tma install-hooks --check` and `tma doctor`
-name that state on its own ("installed but not present on this server, likely
-restarted") so it is not confused with never having installed them.
+`set-hook` writes runtime server state. A `kill-server`, reboot, or server exit
+takes the hooks with it. The daemon re-arms previously recorded missing hooks
+when it starts. Otherwise, run `tma install-hooks <agent>` again to generate and
+install the current commands. `tma install-hooks --check` and `tma doctor`
+distinguish missing recorded hooks from an installation that never existed.
 
-To make them durable, put the same commands in your tmux config, substituting your
-own `tma` path:
-
-```tmux
-set-hook -ga after-select-pane "run-shell \"if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=after-select-pane '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=after-select-pane tma clear-attention '#{pane_id}' 2>/dev/null || true; fi\""
-set-hook -ga session-window-changed "run-shell \"if [ -x '/usr/local/bin/tma' ]; then TMA_HOOK_KIND=session-window-changed '/usr/local/bin/tma' clear-attention '#{pane_id}' 2>/dev/null || true; else TMA_HOOK_KIND=session-window-changed tma clear-attention '#{pane_id}' 2>/dev/null || true; fi\""
-```
-
-Two things matter here:
-
-- Use `-ga`, not `-g`. An unindexed `set-hook -g` *replaces the whole hook array*,
-  so it deletes tma's entry (and anyone else's) on every `source-file`, the same
-  hazard `--check` reports as a wiped hook.
-- Keep the command byte-identical to what tma installs. Copy it out of
-  `tmux show-hooks -g | grep clear-attention` rather than retyping it: `--check`
-  compares against the command this build writes, so a hand-shortened variant is
-  reported as stale, and re-running install rewrites the runtime copy while your
-  conf line puts the old one back at the next restart.
-
-Alternatively, skip the conf entirely and re-run `tma install-hooks <agent>` after
-a server restart; `tma doctor` tells you when that is needed.
+If you maintain hook entries in your tmux config, copy the complete generated
+commands from `show-hooks` after reinstalling and preserve their shell quoting.
+Append with `set-hook -ga`; an unindexed `set-hook -g` replaces the entire hook
+array. A hand-shortened command can lose the dispatch capture, and an old config
+entry can put the obsolete command back at the next restart.
 
 ## What the last uninstall cleans up
 

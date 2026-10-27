@@ -2,6 +2,8 @@
 
 `tma` detects an agent's state from three kinds of evidence: hook events the
 agent fires, the pane's on-screen chrome, and the process running in the pane.
+The daemon collector also accepts native OSC 7501 reports for verified
+configurations, recorded separately below.
 This page documents, per agent, which hook events map to which states, which
 states the screen rules cover, and how each agent's pane is identified.
 
@@ -17,7 +19,7 @@ each table reflects events actually observed firing with a full payload.
 | OpenCode | JS plugin in `~/.config/opencode/plugin/` | working / idle / blocked / lifecycle (registration only); blocked, working and idle also screen-carried | — | No session-end or subagent hooks; deregistration rides the pid-change / pane-close path. `tma install-hooks opencode` writes the plugin. Answers `approve`/`deny` over its HTTP API rather than keystrokes (API lane, below). |
 | Gemini CLI | `settings.json` `hooks` object, native event names | working / idle / blocked / lifecycle, hook- and screen-carried | — (turn-granularity token counts only) | Reuses the Claude JSON editor over `~/.gemini/settings.json`. Local config is gated behind a per-folder trust prompt. |
 | Cursor CLI | user-level `~/.cursor/hooks.json` in cursor's own shape, plus a `statusLine` shim in `~/.cursor/cli-config.json` | working / idle / lifecycle via hooks; blocked screen-only | statusLine push shim: per-turn `context_window` (`total_input_tokens` / `context_window_size`), parsed by `cursor-statusline-json` (event channel). The `statusLine` mechanism works but is undocumented (highest churn risk) — a payload change degrades to an absent gauge | Cursor exposes no permission hook, so blocked rides a screen rule. `tma install-hooks cursor` writes cursor's own hooks JSON shape and the statusLine context shim. |
-| pi | extension module in `~/.pi/agent/extensions/` | working / idle / lifecycle via the extension; no blocked | `getContextUsage()` push shim: the extension forwards pi's `ctx.getContextUsage()` (a precomputed `percent` + absolute `contextWindow`) on the turn-settled event, parsed by `pi-context-json` (event channel) | pi auto-runs tools with no approval state, so there is no blocked signal at all. `tma install-hooks pi` drops the extension. |
+| pi | extension module in `~/.pi/agent/extensions/` | working / idle / lifecycle via the extension; no blocked mapping | `getContextUsage()` push shim: the extension forwards pi's `ctx.getContextUsage()` (a precomputed `percent` + absolute `contextWindow`) on the turn-settled event, parsed by `pi-context-json` (event channel) | The extension has no dialog-state mapping. Native OSC reports do cover Pi's confirmation dialog in the verified configuration below. `tma install-hooks pi` drops the extension. |
 
 The context-telemetry column records how tma obtains each agent's context-window
 utilization percent (`@agent_context_pct`), declared per agent by a
@@ -258,9 +260,9 @@ where a selection cursor is resting: that is why Codex approves with `y` (from
 `1. Yes, proceed (y)`) rather than `Enter`, and why Cursor, whose dialog has no
 digits at all, uses `y` and `n`.
 
-Two shapes are deliberately absent. **pi has no permission prompt**, so it
-carries no `approve` or `deny` row in any state; it has `interrupt` because it
-has a working state. **The always/session-wide options are never wired** (Claude's
+Two shapes are deliberately absent. Pi's shipped action mapping has no verified
+`approve` or `deny` sequence, including for native extension dialogs; it has
+`interrupt` because it has a working state. **The always/session-wide options are never wired** (Claude's
 `2`, Codex's `p`, Cursor's `tab` and `shift+tab`): each writes a persistent grant
 and `approve` answers one request. `compact` stays Claude-only until other
 agents' compact commands are captured.
@@ -284,6 +286,73 @@ tool call`). Gemini is excluded from both, permanently: it queues a mid-turn
 message and then returns it to the composer, unsent, when the turn is
 interrupted. OpenCode steers through its pane like the others here; its HTTP API
 carries a prompt too, but that lane is not what this action uses.
+
+## OSC 7501 rollout ledger
+
+Native reporting defaults to **prefer**. `[program_status] mode = "prefer"`
+uses eligible reports while process, stream and guarded-write coverage remain
+valid. `"observe"` collects diagnostics without publishing protocol state or
+effects, and `"off"` disables collection.
+[Run the daemon](../how-to/run-the-daemon.md#use-native-pi-state) gives the
+activation and disable steps. An app alias or capability query proves neither
+emission nor lifecycle coverage.
+
+All recognized agents accept their own manifest name automatically. Claude also
+accepts `claude-code`; no per-agent tma enable setting is required. This policy is
+separate from native coverage: Codex 0.164.0's installed implementation emits
+without negotiation on a terminal, while Claude requires a probe reply that stock
+tmux does not provide. Native Codex lifecycle coverage has not been executed here.
+The runtime tests exercise both bundled mappings with synthetic reports.
+
+| evidence | environment and activation | executed coverage | limits |
+|---|---|---|---|
+| Native Pi, production daemon | Pi 1.3.0, tmux 3.7b, Darwin 25.6 arm64; collector started first, `PI_PROGRAM_STATUS=1` per process; private empty home/project, fake-key loopback model, no tma state hooks or metadata-emitting extension | working, three successful completions, two real confirmation dialogs, restoration of a spent result, HTTP failure and cancellation; exact result/ACK and notification claims; shell survives Pi exit and authority is released | The test extension only opens Pi's real confirmation UI. Cancellation was a fresh Idle report with no result, attention or done effect while the model response stayed gated. Exit proves authority loss, not consumption of native Clear. Approve refused `wrong-agent` because Pi's shipped action manifest has no approval mapping. |
+| Native Claude probe | Claude Code 2.1.303, tmux 3.7b, Darwin 25.6 arm64; isolated home/settings/project and fake loopback credentials, bounded TUI probe | theme onboarding reached | Activation, model, dialog and completion coverage remain unverified. No local model request completed. Zero accepted cold-scanner events do not prove absent raw emission. The bundled manifest now accepts `claude-code`; baseline detection remains active until eligible reports arrive. |
+| Synthetic production and native adapter cases | tmux 3.7b, Darwin 25.6 arm64; controlled emitters through the real collector/daemon, hookless state and independent hook-metadata cases | gaps/reconnect, linked-session transfer, process replacement/birth checks, silent renewal, overflow and fresh-report recovery, reload/disable/shutdown, result dedup/ACK, guarded publication and request binding | These establish generic integration behavior, not native agent emission. Separate hook-request coverage proves action binding; protocol text cannot create a request. |
+| Redacted native protocol corpus | Pi 1.3.0, tmux 3.6a, macOS, 2026-10-26; per-process override, local model | eight preserved report bodies plus split transport framing, including Clear | Prototype evidence, not production collector acceptance. See fixture provenance in `crates/tma-core/fixtures/program_status/README.md`. |
+
+The accepted all-feature workspace gate returned 2,046 passing bodies, zero
+failures and 91 target summaries. Four bodies explicitly returned with live
+execution disabled. The native Pi gate ran separately, 1/1 in 23.94 seconds;
+the Claude probe above has its own unverified verdict.
+
+Native Pi blocked state arrived in 1,116 ms before its configured 10-second
+quiet-capture edge, with no fallback captures; daemon shutdown took 340 ms.
+A separate synthetic production workload observed 2,004 ms of silence and 200
+duplicate reports with zero publications in either phase. After 2,000 ms of
+ordinary output, blocked publication took 726 ms. That combined workload used
+32 process samples and 107 daemon tmux invocations, including reads and
+maintenance; shutdown took 499 ms. A 6,000-query workload caused five actual
+queue overflows and recovered only after a fresh valid report. These are timing
+samples, not hard latency guarantees or attached-client redraw measurements.
+
+Logical storage caps are 1,024 collector events, 1 MiB collector payload, 256
+records per pane and 32 MiB combined retained/pending runtime payload. They do
+not bound allocator overhead, peak RSS or total process-tree memory. Ordinary
+output is streamed rather than retained as a transcript. CPU/RSS samples from
+one daemon do not establish a fleet resource bound.
+
+Semantic I/O admission caps each pane at eight operations or two charged
+seconds per run, and the whole run at 32 operations or five seconds. Cleanup
+admits four cached owners or 250 ms per turn. An already admitted bounded
+adapter call can finish later, so these are admission limits rather than hard
+end-to-end deadlines. Budget loss releases the affected coverage and requires
+fresh evidence; collector-wide loss retires the exact lease before cleanup.
+
+macOS process birth identity uses kernel start seconds/microseconds; Linux uses
+`/proc` start ticks. Missing/unsupported identity stays on fallback. Native
+Linux and historical-tmux production coverage were not executed. PID reuse and
+known stream conflicts are rejected, but same-pane bytes have no authenticated
+emitter identity: buffered bytes during a process handoff cannot always be
+attributed. Identical terminal results without observed intervening work are
+treated as retransmissions because OSC supplies no completion event id.
+
+Stopping state-hook installation for an agent/version requires coverage of every
+formerly supported state path, recovery and resource evidence, and separated
+metadata/action callbacks. Removing daemonless operation is a separate
+compatibility migration. Removing remaining adapters requires replacement or
+explicit retirement of session, transcript, telemetry and action capabilities.
+None of those removals happens automatically.
 
 ## Per-agent hook mappings
 
@@ -578,8 +647,9 @@ extension reads `ctx.sessionManager.getSessionId()` and forwards `{session_id}`.
 | `session_shutdown` (`reason`="quit") | agent-end | session deregistered; the stamp is removed once the agent's process is gone |
 | `SubagentStart` / `SubagentStop` | subagent bookkeeping | wired but inert (no pi subagent events) |
 
-`blocked` is not a pi state: pi auto-runs tools with no per-tool permission
-prompt, so there is neither a hook nor a screen rule for it. Coverage:
+The installed extension has no `blocked` mapping or screen rule. Pi normally
+runs tools without per-tool approval, but its native confirmation UI emits
+`blocked/permission` in the OSC configuration verified above. Extension coverage:
 `[hooks].covers = ["working", "idle", "lifecycle"]` and `[capture].visible =
 ["working"]` (the `Working...` loader row). `idle` has a screen rule outside
 `visible`, requiring both a full-width composer rule line in column 0 and the

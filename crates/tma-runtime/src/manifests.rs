@@ -11,6 +11,7 @@
 
 use std::path::{Path, PathBuf};
 
+use tma_core::program_status::AppId;
 use tma_core::{Manifest, RuleEngine};
 
 use crate::config::AgentConfig;
@@ -120,6 +121,18 @@ pub enum LoadError {
 }
 
 impl LoadedManifest {
+    pub(crate) fn program_status_apps(&self) -> Vec<AppId> {
+        let mut apps: Vec<_> = AppId::parse(&self.name).into_iter().collect();
+        if let Some(declared) = &self.manifest.program_status {
+            for app in &declared.apps {
+                if !apps.contains(app) {
+                    apps.push(app.clone());
+                }
+            }
+        }
+        apps
+    }
+
     fn build(name: &str, source: &str, toml_src: &str) -> Result<LoadedManifest, LoadError> {
         let manifest = Manifest::parse(toml_src, source)?;
         let engine = RuleEngine::build(&manifest).map_err(|e| LoadError::Engine {
@@ -333,6 +346,59 @@ mod tests {
                 set.manifests.iter().any(|m| &m.name == name),
                 "bundled manifest {name} is missing from the loaded set"
             );
+        }
+    }
+
+    #[test]
+    fn program_aliases_are_validated_once_with_the_manifest_path() {
+        let manifest = LoadedManifest::build(
+            "pi",
+            "/agents/pi.toml",
+            &format!("{GOOD}\n[program_status]\napps = [\"pi\", \"pi\", \"Pi+tool\"]\n"),
+        )
+        .unwrap();
+        let aliases = &manifest.manifest.program_status.as_ref().unwrap().apps;
+        assert_eq!(aliases.len(), 2);
+        assert_eq!(aliases[0].as_ref().as_str(), "pi");
+        assert!(LoadedManifest::build("legacy", "legacy.toml", GOOD)
+            .unwrap()
+            .manifest
+            .program_status
+            .is_none());
+        for declaration in [
+            "apps = [\"bad app\"]",
+            "apps = [\"\"]",
+            "apps = [1]",
+            "mode = \"prefer\"",
+        ] {
+            let error = LoadedManifest::build(
+                "pi",
+                "/agents/pi.toml",
+                &format!("{GOOD}\n[program_status]\n{declaration}\n"),
+            )
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(error.contains("/agents/pi.toml"), "{error}");
+            assert!(
+                error.contains("apps") || error.contains("program_status"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn bundled_agents_accept_their_names_and_claude_code_alias() {
+        let set = load_raw(None).unwrap();
+        for manifest in &set.manifests {
+            let apps = manifest.program_status_apps();
+            let actual: Vec<_> = apps.iter().map(|app| app.as_ref().as_str()).collect();
+            let expected = if manifest.name == "claude" {
+                vec!["claude", "claude-code"]
+            } else {
+                vec![manifest.name.as_str()]
+            };
+            assert_eq!(actual, expected);
         }
     }
 

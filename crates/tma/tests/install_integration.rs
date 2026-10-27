@@ -8,7 +8,7 @@
 //! `--check` detects a deleted tmux hook.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use common::{scratch_tmux, unique_id};
 use tma_test_support as common;
@@ -144,7 +144,7 @@ impl Scratch {
             "--socket-name".into(),
             self.socket.clone(),
         ]);
-        let mut cmd = Command::new(env!("CARGO_BIN_EXE_tma"));
+        let mut cmd = common::isolated_tma_command(&self.workdir);
         cmd.args(&args)
             .env("TMA_BIN", env!("CARGO_BIN_EXE_tma"))
             .env("TMA_CONFIG", common::empty_config_path());
@@ -639,6 +639,53 @@ fn check_detects_a_moved_binary_and_install_repoints_the_hook() {
     );
 }
 
+/// The literal separators are shell syntax inside tmux's serialized argument. Removing their
+/// quotes must be diagnosed and repaired, even though the remaining characters are identical.
+#[test]
+fn check_preserves_the_generated_hooks_literal_capture_separators() {
+    if !common::tmux_available() {
+        return;
+    }
+    let s = Scratch::new();
+    assert!(s
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
+        .status
+        .success());
+    std::fs::write(s.settings(), "{}\n").unwrap();
+    let install = s.install_hooks(&["claude", "--yes"]);
+    assert!(
+        install.status.success(),
+        "install: {}",
+        String::from_utf8_lossy(&install.stderr)
+    );
+    assert!(s.install_hooks(&["--check"]).status.success());
+
+    let tmux =
+        tma_tmux::tmux::Tmux::connect(&tma_tmux::tmux::Server::named(Some(s.socket.clone())));
+    let entries = tmux.show_global_hook("after-select-pane").unwrap();
+    let (index, installed) = entries
+        .iter()
+        .find(|(_, command)| command.contains("clear-attention"))
+        .unwrap();
+    assert!(installed.contains("'|'"), "tmux serialization: {installed}");
+    let broken = installed.replacen("'|'", "|", 1);
+    tmux.set_global_hook_index("after-select-pane", *index, &broken)
+        .unwrap();
+    let out = s.install_hooks(&["--check"]);
+    let report = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && report.contains("stale") && report.contains("dispatch-time"),
+        "unquoting a capture separator creates a shell pipeline: {broken}\ncheck: {report}"
+    );
+    assert!(s.install_hooks(&["claude", "--yes"]).status.success());
+    assert!(s.install_hooks(&["--check"]).status.success());
+    let repaired = tmux.show_global_hook("after-select-pane").unwrap();
+    assert_eq!(
+        repaired, entries,
+        "repair retains the original slot and payload"
+    );
+}
+
 /// `install-hooks <agent> --check` scopes the drift report (and exit code) to the named agent: a
 /// sibling's stale wiring fails the bare global `--check` but must NOT fail a scoped, correct one.
 #[test]
@@ -847,7 +894,7 @@ fn hooks_state_is_keyed_per_server() {
             "--socket-name".into(),
             s.socket.clone(),
         ]);
-        Command::new(env!("CARGO_BIN_EXE_tma"))
+        common::isolated_tma_command(&s.workdir)
             .args(&args)
             .env("TMA_BIN", env!("CARGO_BIN_EXE_tma"))
             // Bare is the default reference, so the spawned install must resolve `tma-hook` off

@@ -1,7 +1,7 @@
 # Pane options and JSON contracts
 
-`tma` keeps all shared state in tmux pane options (user options, pane-scoped). There is no socket and none
-is needed: any `tmux show-options -p` or `#{@agent_state}` format string reads
+`tma` keeps its shared agent projection in tmux user options. There is no socket
+needed for a direct read: any `tmux show-options -p` or `#{@agent_state}` format string reads
 the current verdict straight from tmux's own option store, and `tma ls --json`
 gives the same data as a stable structured document. This page is the contract
 for both: the pane-option schema and the JSON schemas.
@@ -28,7 +28,9 @@ emit today:
 | `rate_limit` | `working` **or** `blocked` | a usage-limit wait. The state is the whole point of the pair: `working/rate_limit` is the agent waiting out its own limit and resuming by itself, `blocked/rate_limit` is a wait that halted and needs you (a keypress, or a fresh prompt). A `wait --until blocked` that also reads the detail can tell "needs the clock" from "needs permission" |
 
 `tma-core` additionally declares `error`, `background` and `compacting` as
-constants; no bundled manifest emits those three yet.
+constants; no bundled manifest emits those three yet. Native program reports
+can emit `auth` on blocked and `error` on a fresh failure result projected to
+idle. An idle failure is not a permission request.
 
 Every `@agent_*_at` value is epoch **milliseconds** (13 digits today), not
 seconds. Millisecond resolution is what keeps two episodes opening in the same
@@ -37,7 +39,9 @@ wall-clock second distinguishable.
 `@agent_attention` is a presence flag: the literal value `1` when set, and the
 option is absent otherwise. It is compared against `@agent_since` by the
 ordered-input clear, which is why the raise instant has to stay write-once.
-Writers order a chained stamp so `@agent_stamped_at` is written last; a reader
+Writers put `@agent_stamped_at` after public state fields; private commit and
+receipt fields can follow it. Independent metadata/ACK writes need not refresh
+it. A reader
 that sees `stamped_at` older than `since` or `evidence_at` caught a chained write
 mid-flight and should treat the tuple as in-progress.
 
@@ -60,16 +64,16 @@ options carry rollups and hints.
 |---|---|---|
 | `@agent_name`, `@agent_pid` | pane | identity (pid: the outermost matching process the walk finds, so an agent wins over a child that shares its name) |
 | `@agent_state`, `@agent_detail` | pane | the verdict (state) and its detail token. A tool other than tma that writes these on the same pane implements [the `@agent_state` contract](agent-state-contract.md), which is what the two producers have to agree on |
-| `@agent_source` | pane | provenance of the current state: `hook` / `capture` / `process`. `activity` is a legacy value still accepted on read; nothing produces it any more (a viewport hash change stopped being state evidence) |
+| `@agent_source` | pane | provenance of the current state: `hook` / `capture` / `process`. `hook` includes validated native program reports as direct application evidence. `activity` is a legacy value still accepted on read; nothing produces it any more (a viewport hash change stopped being state evidence) |
 | `@agent_evidence_at` | pane | epoch **ms** of the evidence behind the current state |
 | `@agent_since` | pane | epoch **ms** of the state transition, written once by the first producer to record it and never rewritten while state is unchanged (the one exception is a value stranded ahead of `@agent_stamped_at` by a backward clock step) |
-| `@agent_stamped_at` | pane | per-pane freshness marker, written last in a chained stamp |
+| `@agent_stamped_at` | pane | state freshness marker, written after the public state fields; private commit/receipt writes may follow |
 | `@agent_hash` | pane | scheduling only, and **its value is not interpreted**: a hash of the last captured viewport whose PRESENCE means "this pane's screen has been read at least once", which is all any reader checks before reusing a stored stamp. Nothing compares two hashes, a changed one makes no claim about state, and the algorithm is not part of this contract. Treat it as a boolean; absent on a pane detected purely from hooks |
 | `@agent_attention` | pane | presentation flag: value `1` when set, option absent otherwise. Cleared by the focus hooks (the pane arrived at, the pane departed) and by the poll cycle when a client displaying the pane was typed into after `@agent_since` |
 | `@agent_notified_at` | pane | notification-episode marker, written only by the notifier |
-| `@agent_turn_at` | pane | epoch **ms** of the last hook event that meant "a turn ended" and raised the done marker (`Stop`, codex's `notify`, pi's `agent_settled`). It exists because `@agent_since` is write-once per state run and so cannot move when a second completion lands on a pane that never left `idle`; the notify dedup and `wait --since` compare against the later of the two. Written only by the hook intake, and only when the marker was down, so one turn end reported on two channels records one turn. Absent on a pane that has never had one, which leaves both comparisons reading `@agent_since` alone |
+| `@agent_turn_at` | pane | epoch **ms** of the last presented turn result. Hook turn-end events (`Stop`, codex's `notify`, pi's `agent_settled`) raise it when the done mark was down; native results advance it under exact result-generation guards, including idle-to-idle results. Notify dedup and `wait --since` compare against the later of this and `@agent_since`. Absent before any result, leaving those comparisons on `@agent_since` alone |
 | `@agent_session` | pane | owning agent session id from hook registration; the subagent guard compares incoming event session ids against this |
-| `@agent_transcript` | pane | path to the agent's own transcript file, as the hook payload's `transcript_path` named it (Claude Code, Codex, Gemini and Cursor carry one; OpenCode and pi do not, and a pane detected from the screen alone never gets one). Stamped beside `@agent_session` under the same guard, rewritten only when a payload names a different file, never cleared on an ordinary edge, and removed with the rest of the tuple on session end. Claude's `SubagentStop` `agent_transcript_path` is deliberately not read: one session spawns many subagents and one option cannot hold them |
+| `@agent_transcript` | pane | path to the agent's own transcript file, as the hook payload's `transcript_path` named it (Claude Code, Codex, Gemini and Cursor carry one; OpenCode and pi do not, and a pane detected from the screen alone never gets one). Stamped beside `@agent_session` under the same guard, rewritten only when a payload names a different file, never cleared on an ordinary edge, and cleared with this session's metadata on SessionEnd while live program state is preserved. Claude's `SubagentStop` `agent_transcript_path` is deliberately not read: one session spawns many subagents and one option cannot hold them |
 | `@agent_subagents` | pane | space-separated live subagent session ids; SubagentStart appends, SubagentStop removes; bookkeeping only, never top-level state. While it is non-empty, only an event whose session matches `@agent_session` may write state; an event that cannot be attributed (either side missing) is ignored |
 | `@agent_context_pct` | pane | context-utilization metric percent (integer `0`–`100`), or absent when the agent has no telemetry coverage or the channel reported no window (a null-clear); written only by the context intake under the evidence-time write guard, never part of the state tuple |
 | `@agent_context_at` | pane | epoch **ms** of the evidence behind `@agent_context_pct`; written last in the context mini-chain and advanced even by a null-clear, so a reordered stale push cannot walk the gauge backward (`not older` acceptance) |
@@ -85,7 +89,7 @@ options carry rollups and hints.
 | `@agent_model` | pane | best-effort model-name label the context intake reads from the payload it already has: the Codex rollout window's model record, or the Claude statusline's `model.id` (an object, so the registration path's top-level-string read cannot reach it); never load-bearing for a gauge, it only feeds `tma doctor`'s recognized-model line (a model no `[telemetry.windows]` entry names). Plain-set, cleared on deregister, absent when no model record sat in the tail |
 | `@agent_permission_request` | pane | the id of the permission decision the pane is waiting on. Two producers write it: OpenCode's plugin publishes the server's own request id on a `permission.asked` edge (ownership-filtered against `@agent_session`), and a claude pane whose [hook reply lane](agent-coverage.md#claude-code-mapping) is on **mints** one in the `PermissionRequest` hook, the same 16 hex digits `@agent_pending_call` carries, since claude's payload names no request of its own. Cleared on the edges that end the prompt (a working/idle transition, or a `permission.replied`); the action broker reads it to answer an `[api]` `permission-reply` op or to find the parked hook request, and an empty value refuses the API op `requires-unmet`. The broker also clears it itself once its own reply lands (a 2xx, or a written hook verdict), so a spent id does not read as a pending request until the agent's next event; it leaves the option alone on a 404, which may already name a newer request |
 | `@agent_question_request` | pane | the id of the mid-turn **question** the pane is waiting on: OpenCode's `que_*`, published by its plugin on a `question.asked` edge (ownership-filtered against `@agent_session`) and cleared on the edges that end it (a working/idle transition, or a `question.replied` / `question.answered` / `question.rejected`). Its own option rather than a second use of `@agent_permission_request`, because the two are different channels with different endpoints: a `permission-reply` POSTed at a question id would quote a request the server is not holding, and the reverse. The broker reads it to answer a `question-reply` or `question-reject` op, refuses `requires-unmet` on an empty value, and clears it itself once its own 2xx lands |
-| `@agent_pending_tool`, `@agent_pending_call` | pane | the tool name and call id of the permission decision a `blocked` pane is waiting on, stamped from Claude Code's `PermissionRequest` hook (`tool_name` / `tool_use_id`). Set together with `@agent_pending_summary` and cleared together on every edge that ends the prompt: the pane leaving `blocked` (a `PostToolUse`/`Stop` working-or-idle stamp), and `SessionEnd`, which removes the whole tuple. Absent on an agent with no such hook. On a build whose payload omits `tool_use_id` (Claude Code 2.1.261 does, while its `PreToolUse` and `PostToolUse` for the same call still send one) the call id is **minted** instead: 16 hex digits over the session id, the prompt id, the tool name and the tool input, so it stays the same across repeated fires of one call and differs for the next call. A minted id is a value to compare, not a handle to give back to the agent |
+| `@agent_pending_tool`, `@agent_pending_call` | pane | the tool name and call id of the permission decision a `blocked` pane is waiting on, stamped from Claude Code's `PermissionRequest` hook (`tool_name` / `tool_use_id`). Set together with `@agent_pending_summary` and cleared together on every edge that ends the prompt: the pane leaving `blocked` (a `PostToolUse`/`Stop` working-or-idle stamp), and `SessionEnd`, which clears this session’s metadata and requests while preserving live program state. Absent on an agent with no such hook. On a build whose payload omits `tool_use_id` (Claude Code 2.1.261 does, while its `PreToolUse` and `PostToolUse` for the same call still send one) the call id is **minted** instead: 16 hex digits over the session id, the prompt id, the tool name and the tool input, so it stays the same across repeated fires of one call and differs for the next call. A minted id is a value to compare, not a handle to give back to the agent |
 | `@agent_pending_summary` | pane | a one-line summary of that call, derived from the hook's `tool_input`: the command for `Bash`, the file path for `Edit`/`Write`/`Read`, otherwise the first string-valued field. **Agent-supplied text**, capped at 120 bytes with control characters stripped and a `…` marking a truncation. Treat it the way you treat a pane title: it is not a machine token, and tma deliberately keeps it out of the notification payload, the notify audit line, and every `TMA_*` env var, so a summary can never reach a `[notify] command` sink or a third-party push carrier. It is here and on the JSON rows, both of which stay on your machine |
 | `@agent_api_endpoint` | pane | the OpenCode server base URL, stamped at registration by the plugin from its serving address; the broker's `permission-reply` endpoint, with a `[api.opencode] api_base` config fallback (neither present refuses `requires-unmet`) |
 | `@agent_ignore` | pane | **you set this one.** Any non-empty value takes the pane out of detection: no identity, no capture, no row, and a stamp left from before it was set is cleared on the next cycle. `tmux set-option -p @agent_ignore 1` in the pane (add `-t <pane>` from elsewhere), `tmux set-option -pu @agent_ignore` to undo. tma never writes or clears it; `tma doctor` lists every pane carrying it |
@@ -94,19 +98,59 @@ options carry rollups and hints.
 | `@agent_act_repeat` | pane | consecutive-fire run for the act audit log: value `<episode_ms>:<action>:<count>`, written by the action broker under the held `@agent_action` lock on the path that is about to have an effect. A new episode or a different action restarts the run; the third consecutive fire warns on stderr and lands as `repeat` in the [act audit log](cli.md#the-act-audit-log). Never read by the gate |
 | `@agent_summary` | window | rollup, a pure function of the sibling panes' options; space-separated `<state>:<count>` in the fixed order `blocked working idle unknown`, zero-count states omitted, empty or absent when the window has no agents (e.g. `blocked:1 working:2`) |
 | `@agent_session_summary` | session | the same rollup grammar over every agent pane in the session, written by the same writers under the same guards. A distinct key rather than `@agent_summary` at session scope because a pane-context format read falls back pane → window → session: one shared name would make an agentless window render its session's counts |
-| `@tma_last_poll` | server | hint only; the per-pane `@agent_stamped_at` is authoritative for freshness |
+| `@tma_last_poll` | server | scheduling hint only; per-pane `@agent_stamped_at` supplies baseline freshness, while native authority also requires a live lease and matching owner |
 | `@tma_watch_pid` | pane (on the watcher's own pane) | the focus-nudge target; `tma watch` advertises its pid here on its own `$TMUX_PANE` at startup and unsets it on every quit path, so it dies with the pane |
 | `@tma_window_name_orig` | window | the window's name before `[daemon] window_names` first renamed it. Present exactly while tma owns the name, and its presence is what licenses the restore |
 | `@tma_window_autorename_orig` | window | the window-scope `automatic-rename` saved beside it, since `rename-window` turns that option off. The sentinel `-` records "was not set at window scope", so the restore unsets rather than pinning an inherited value |
 | `@tma_window_name_last` | window | the last name tma wrote. A current `#{window_name}` that differs means you renamed the window yourself, and tma stops renaming it until the next restore |
 
-Values that depend on a previous value (the write-once `@agent_since`, the
-notification dedup, the hook-versus-capture arbitration) are governed by
-server-side conditional writes (`set-option -pF`), which expand formats in the
-target pane's context atomically at write time. Everything else is
-last-writer-wins over deterministic values, which converges.
+State and dependent fields obey private ownership as well as evidence-time
+arbitration. Frozen guarded command bodies and commit/readback verification
+provide the write contract; tmux does not offer an atomic tuple transaction.
+See [the producer contract](agent-state-contract.md#writing-without-clobbering)
+before writing these options from another tool.
+Rollups are bounded hints; the [scope-snapshot limit](agent-state-contract.md#the-rollups-are-tmas)
+can leave an oversized scope's previous summary standing.
 
-Reading these from your own bar, prompt, or script is a supported first-class use;
+### Private program ownership and result history
+
+These keys explain internal diagnostics. They are not a public write API and
+must not be edited by consumers.
+
+| private keys | scope | purpose |
+|---|---|---|
+| `@tma_program_collector` | server | collector token and lease expiry; renew at most every 5 seconds, expire after 15 seconds, reject expiry beyond the reader's 17-second future horizon |
+| `@tma_program_origin`, `@tma_program_owner`, `@tma_program_commit` | pane | distinguish actual program origin from public `source=hook`; bind publication to collector, process birth chain, episode and stream epoch |
+| `@tma_program_result`, `@tma_program_ack`, `@tma_program_notified` | pane | normalized terminal result identity and exact acknowledgement/notification disposition |
+| `@tma_blocked_history`, `@tma_result_invalidated` | pane | blocked/result history and invalidation across recovery boundaries |
+| `@tma_write_receipt` | pane | unique transaction receipt used with complete readback; replacement can prevent confirmation after a body executed |
+| `@tma_attention_episode`, `@tma_episode_notified`, `@tma_marker_claim` | pane | state-dependent presentation and exact effect claims |
+| `@tma_metadata_owner`, `@tma_metadata_update` | pane | independent process/session metadata binding and update identity |
+
+The lease proves collector liveness, not record eligibility. Each pane must
+also have a current matching owner and valid stream/process coverage. Known
+loss revokes authority promptly; a crash can require lease expiry. Silent
+renewal leaves report evidence time unchanged. A stale private commit can
+survive uncertain readback or bounded shutdown cleanup without live authority.
+
+Full bounded raw records live only in daemon memory. Persisted history is a
+normalized projection, not a raw-event checkpoint or a transcript. Restart/gap
+recovery requires fresh framing/reporting and full process-birth validation
+before matching historical spent results. History alone never revives state.
+An exact ACK applies only to the result observed; absence of attention during
+working/blocked cannot acknowledge a deferred child result.
+
+The protocol parser admits at most a 4,096-byte frame, 2,048 decoded message
+bytes, 192 decoded title bytes and 256 retained records per pane. Collector
+queues cap events and payload separately (1,024 events, 1 MiB); the runtime's
+32 MiB retained/pending payload budget excludes allocator and process overhead.
+RIS clears records; DECSTR and primary/alternate-screen changes preserve them.
+An observed shell prompt or attached-process exit removes active records and
+releases authority, retaining terminal results only as history. Same-pane
+buffered bytes lack authenticated emitter identity, so process/stream checks
+cannot prove their precise sender during a handoff.
+
+Reading the public options from your own bar, prompt, or script is supported;
 [Read agent state from a status bar or
 script](../how-to/read-agent-state-from-a-status-bar-or-script.md) covers
 the read forms and the freshness rule that goes with them.
@@ -132,7 +176,7 @@ A versioned, additive-only document. The top level is `{ "schema": 1, "agents":
 | `session` | string or null | owning agent session id, `null` when the pane never registered one |
 | `transcript` | string or null | path to the agent's transcript file (`@agent_transcript`), `null` when no hook payload ever named one |
 | `permission_request` | string or null | the id of the permission decision the pane is waiting on (`@agent_permission_request`), `null` when none is outstanding or nothing on that pane publishes an id (OpenCode's plugin does; a claude pane does while its hook reply lane is on). A consumer answering the prompt must quote this id, but a match is necessary and not sufficient: it is no proof the request is still open, since the agent's next event and tma's own successful reply both clear the option |
-| `stamped_at_ms` | number or null | epoch **ms** of this pane's last stamp (`@agent_stamped_at`), the freshness anchor for the whole tuple: compare it against your own clock to decide whether the row is stale before acting on it. `null` for a pane nothing has stamped yet |
+| `stamped_at_ms` | number or null | epoch **ms** of this pane's last state stamp (`@agent_stamped_at`), a baseline freshness anchor. Native authority also requires live lease/owner validation; healthy silent reports do not expire by stamp age alone. `null` for a pane nothing has stamped yet |
 | `context` | number or null | context-utilization percent (`0`–`100`), `null` when the agent has no telemetry coverage or the channel reported no window |
 | `context_at_ms` | number or null | epoch **ms** of the evidence behind `context`, `null` when `context` is |
 | `muted` | boolean | `true` when the pane's `@agent_mute_until` is still ahead of the clock, so its notifications are suppressed ([`tma mute`](cli.md#tma-mute)). A resolved boolean, not the deadline: the row is rendered at a known instant, and this is the only question a consumer asks |

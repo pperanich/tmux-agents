@@ -57,6 +57,7 @@ mod tests {
 
     fn row() -> AgentRow {
         AgentRow {
+            acknowledgement: None,
             pane_id: "%5".to_string(),
             agent: "claude".to_string(),
             state: AgentState::Blocked,

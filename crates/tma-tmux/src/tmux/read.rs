@@ -45,6 +45,21 @@ const AGENT_OPTIONS: &[&str] = &[
 /// read by the action broker and `tma doctor`). Appended after [`AGENT_OPTIONS`] (order fixed by
 /// [`parse_pane_line`]).
 const EXTRA_PANE_OPTIONS: &[&str] = &[
+    tma_core::persistence::opt::COLLECTOR,
+    tma_core::persistence::opt::ORIGIN,
+    tma_core::persistence::opt::OWNER,
+    tma_core::persistence::opt::COMMIT,
+    tma_core::persistence::opt::RESULT,
+    tma_core::persistence::opt::INVALIDATED,
+    tma_core::persistence::opt::BLOCKED_HISTORY,
+    tma_core::persistence::opt::ACK,
+    tma_core::persistence::opt::NOTIFIED,
+    tma_core::persistence::opt::RECEIPT,
+    tma_core::persistence::opt::METADATA_OWNER,
+    tma_core::persistence::opt::ATTENTION_EPISODE,
+    tma_core::persistence::opt::EPISODE_NOTIFIED,
+    tma_core::persistence::opt::MARKER_CLAIM,
+    tma_core::persistence::opt::METADATA_UPDATE,
     opt::TITLE_MATCH_PID,
     opt::REG_DEAD_SINCE,
     opt::IGNORE,
@@ -76,6 +91,10 @@ const EXTRA_PANE_OPTIONS: &[&str] = &[
     // The hook payload's transcript path, read back for the `ls --json` `transcript` key.
     opt::TRANSCRIPT,
 ];
+
+pub(crate) fn pane_option_keys() -> impl Iterator<Item = &'static str> {
+    AGENT_OPTIONS.iter().chain(EXTRA_PANE_OPTIONS).copied()
+}
 
 /// Which focus hook is asking [`Tmux::departed_pane`], which decides where "the pane I just left"
 /// lives: still in this window (a pane switch) or back in the previous window (a window switch).
@@ -135,10 +154,21 @@ impl DepartureKind {
     /// verified on tmux 3.6a, key-driven and out-of-band: tmux updates `pane_last` /
     /// `window_last_flag` before it dispatches the hook, so these already name the pane left behind.
     /// Formats, not target aliases — `-t '{last}'` is not reliable at hook time.
-    fn format(self) -> &'static str {
+    fn format(self) -> String {
+        self.format_with("#{pane_id}")
+    }
+
+    /// Capture the departed presentation in the same dispatch-time loop that resolves its pane.
+    pub fn attention_revision_format(self) -> String {
+        self.format_with(&tma_core::persistence::AttentionRevision::capture_shell_format())
+    }
+
+    fn format_with(self, value: &str) -> String {
         match self {
-            Self::SelectPane => "#{P:#{?pane_last,#{pane_id},}}",
-            Self::WindowChange => "#{W:#{?window_last_flag,#{P:#{?pane_active,#{pane_id},}},}}",
+            Self::SelectPane => format!("#{{P:#{{?pane_last,{value},}}}}"),
+            Self::WindowChange => {
+                format!("#{{W:#{{?window_last_flag,#{{P:#{{?pane_active,{value},}}}},}}}}")
+            }
         }
     }
 }
@@ -203,6 +233,33 @@ impl Tmux {
             });
         }
         Ok(sessions)
+    }
+
+    /// Stable topology including each linked-window occurrence. No session-name
+    /// join: a rename between attach and seed cannot strand a pane.
+    pub fn control_topology(
+        &self,
+    ) -> Result<
+        Vec<(
+            tma_core::program_status::SessionId,
+            tma_core::program_status::PaneId,
+        )>,
+        TmuxError,
+    > {
+        use tma_core::program_status::{PaneId, SessionId};
+        let out = self.run(&["list-panes", "-a", "-F", "#{session_id} #{pane_id}"])?;
+        out.lines()
+            .filter(|line| !line.is_empty())
+            .map(|line| {
+                let parsed = line.split_once(' ').and_then(|(session, pane)| {
+                    Some((SessionId::parse(session).ok()?, PaneId::parse(pane).ok()?))
+                });
+                parsed.ok_or_else(|| TmuxError::Parse {
+                    cmd: "list-panes control topology".into(),
+                    reason: "invalid stable session/pane IDs".into(),
+                })
+            })
+            .collect()
     }
 
     /// Enumerate every pane in every session.
@@ -313,7 +370,7 @@ impl Tmux {
         arrival: &str,
         kind: DepartureKind,
     ) -> Result<Option<String>, TmuxError> {
-        let out = self.run(&["display-message", "-p", "-t", arrival, kind.format()])?;
+        let out = self.run(&["display-message", "-p", "-t", arrival, &kind.format()])?;
         let pane = out.trim();
         Ok((!pane.is_empty()).then(|| pane.to_string()))
     }

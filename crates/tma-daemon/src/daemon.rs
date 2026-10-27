@@ -22,10 +22,11 @@ use std::process::ExitCode;
 
 use tma_runtime::config::Config;
 use tma_runtime::ipc;
-use tma_tmux::tmux::Tmux;
+use tma_tmux::tmux::{Tmux, TmuxError};
 
 mod lifecycle;
 mod pending;
+mod program;
 mod serve;
 mod subscribers;
 mod sys;
@@ -122,10 +123,16 @@ pub fn run_cli(opts: DaemonOpts) -> ExitCode {
         return run_intermediate(&opts);
     }
     let tmux = Tmux::connect(&opts.server);
-    let Some(socket_path) = ipc::resolve_socket_path(&tmux) else {
-        // No server to serve, nothing to do. `--ensure` from outside tmux is a clean no-op
-        // rather than an error.
-        return ExitCode::SUCCESS;
+    let socket_path = match tmux.socket_path() {
+        Ok(path) if !path.is_empty() => path,
+        Ok(_) | Err(TmuxError::ServerGone) => return ExitCode::SUCCESS,
+        Err(_) if opts.ensure => return ExitCode::SUCCESS,
+        Err(error) => {
+            if !opts.quiet {
+                eprintln!("tma: cannot resolve daemon socket: {error}");
+            }
+            return ExitCode::FAILURE;
+        }
     };
     let paths = ipc::paths_for(&socket_path);
     if let Err(err) = ensure_dir(&paths.dir) {

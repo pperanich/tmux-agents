@@ -630,7 +630,8 @@ fn latency_hook_path_under_1s() {
     }
     let s = Scratch::new_daemon("t21");
     let (pane, pid) = new_shell_session(&s, "s1");
-    write_manifest(&s, &manifest(&process_names_toml(&s, "s1", pid)));
+    let names = process_names_toml(&s, "s1", pid);
+    write_manifest(&s, &manifest(&names));
     let _daemon = spawn_daemon(&s, &sink_cmd(&s, ""), &[]);
     s.expect_status("clients", "1");
     wait_quiescent(&s);
@@ -649,7 +650,14 @@ fn latency_hook_path_under_1s() {
     let start = Instant::now();
     let got = wait_sink_lines(&s, 1, Duration::from_secs(5));
     let elapsed = start.elapsed();
-    assert_eq!(got, 1, "hook blocked notified{}", s.forensics(&[&pane]));
+    assert_eq!(
+        got,
+        1,
+        "hook blocked notified; expected process names [{names}], root comm {}, pane command {}{}",
+        comm_of(pid),
+        s.get(&pane, "#{pane_current_command}"),
+        s.forensics(&[&pane])
+    );
     eprintln!(
         "hook-path daemon-dispatch latency: {} ms",
         elapsed.as_millis()
@@ -662,6 +670,197 @@ fn latency_hook_path_under_1s() {
         elapsed.as_millis(),
         s.forensics(&[&pane])
     );
+}
+
+/// Force the real 500ms IPC fallback, then let its duplicate publication overlap either side
+/// of notification admission. The wrappers keep the production three-second command bound.
+fn ack_timeout_overlaps_notification_claim(claim_written: bool) {
+    use std::os::unix::fs::PermissionsExt;
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        return;
+    }
+    let s = Scratch::new_daemon("cold_claim");
+    let pane = s.new_pane();
+    let pid = s.get(&pane, "#{pane_pid}").parse().unwrap();
+    write_manifest(&s, &manifest(&process_names_toml(&s, "s1", pid)));
+    let arm = s.workdir.join("arm");
+    let delayed = s.workdir.join("intake-delayed");
+    let ready = s.workdir.join("claim-ready");
+    let release = s.workdir.join("claim-release");
+    let fallback = s.workdir.join("fallback-writing");
+    let receipt = s.workdir.join("captured-receipt");
+    let claim = s.workdir.join("captured-claim");
+    let view = s.workdir.join("captured-presentation");
+    let view_format = [
+        tma_core::persistence::opt::ORIGIN,
+        tma_core::persistence::opt::OWNER,
+        tma_core::persistence::opt::COMMIT,
+        tma_core::persistence::opt::METADATA_OWNER,
+        tma_core::persistence::opt::ATTENTION_EPISODE,
+        tma_core::persistence::opt::BLOCKED_HISTORY,
+        "@agent_pid",
+        "@agent_state",
+        "@agent_source",
+        "@agent_since",
+        "@agent_turn_at",
+        "@agent_attention",
+    ]
+    .map(|key| format!("#{{{key}}}"))
+    .join("|");
+    let daemon_bin = s.workdir.join("daemon-tmux");
+    let cli_bin = s.workdir.join("cli-tmux");
+    let daemon_script = format!(
+        r##"#!/bin/sh
+set -eu
+if [ -e '{arm}' ] && [ ! -e '{delayed}' ]; then
+    for arg do
+        if [ "$arg" = list-panes ]; then
+            touch '{delayed}'
+            sleep 0.65
+            break
+        fi
+    done
+fi
+for arg do
+    case "$arg" in
+        *'@tma_episode_notified'*'|legacy|'*)
+            if [ -e '{arm}' ] && [ ! -e '{ready}' ]; then
+                {write_first}
+                tmux -L '{socket}' display-message -p -t '{pane}' '#{{{receipt_key}}}' > '{receipt}'
+                tmux -L '{socket}' display-message -p -t '{pane}' '#{{@tma_episode_notified}}' > '{claim}'
+                tmux -L '{socket}' display-message -p -t '{pane}' '{view_format}' > '{view}'
+                touch '{ready}'
+                i=0
+                while [ ! -e '{release}' ] && [ "$i" -lt 150 ]; do sleep 0.01; i=$((i+1)); done
+                {finish}
+            fi
+            ;;
+    esac
+done
+exec tmux "$@"
+"##,
+        arm = arm.display(),
+        delayed = delayed.display(),
+        ready = ready.display(),
+        release = release.display(),
+        receipt = receipt.display(),
+        receipt_key = tma_core::persistence::opt::RECEIPT,
+        claim = claim.display(),
+        view = view.display(),
+        view_format = view_format,
+        pane = pane,
+        socket = s.socket,
+        write_first = if claim_written { "tmux \"$@\"" } else { "" },
+        finish = if claim_written {
+            "exit 0"
+        } else {
+            "exec tmux \"$@\""
+        },
+    );
+    std::fs::write(&daemon_bin, daemon_script).unwrap();
+    std::fs::write(
+        &cli_bin,
+        format!(
+            r##"#!/bin/sh
+set -eu
+for arg do
+    case "$arg" in
+        *set-option*)
+            if [ ! -e '{fallback}' ]; then
+                touch '{fallback}'
+                i=0
+                while [ ! -e '{ready}' ] && [ "$i" -lt 150 ]; do sleep 0.01; i=$((i+1)); done
+            fi
+            ;;
+    esac
+done
+exec tmux "$@"
+"##,
+            fallback = fallback.display(),
+            ready = ready.display(),
+        ),
+    )
+    .unwrap();
+    for path in [&daemon_bin, &cli_bin] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    }
+    let config = s.workdir.join("daemon-config.conf");
+    std::fs::write(&config, format!("[tmux]\nbin = {:?}\n", daemon_bin)).unwrap();
+    let _daemon = spawn_daemon_with_config(&s, &sink_cmd(&s, ""), &config, &[]);
+    s.expect_status("clients", "1");
+    wait_quiescent(&s);
+    std::fs::write(&arm, "armed").unwrap();
+    let payload = s.workdir.join("hook.json");
+    std::fs::write(&payload, r#"{"session_id":"sess-1"}"#).unwrap();
+    let started = Instant::now();
+    let mut child = s
+        .command()
+        .args([
+            "--socket-name",
+            &s.socket,
+            "event",
+            "--agent",
+            "agent",
+            "--kind",
+            "Block",
+        ])
+        .args([
+            "--manifest-dir",
+            s.workdir.to_str().unwrap(),
+            "--payload",
+            payload.to_str().unwrap(),
+        ])
+        .env("TMUX_PANE", &pane)
+        .env("TMA_TMUX_BIN", &cli_bin)
+        .env("TMA_NOTIFY_FROM_EVENT", "0")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    common::poll_until("daemon captured the notification admission", || {
+        ready.exists()
+    });
+    assert!(child.wait().unwrap().success());
+    assert!(
+        fallback.exists(),
+        "the client must take its actual IPC fallback"
+    );
+    assert!(started.elapsed() >= Duration::from_millis(500));
+    let captured_receipt = std::fs::read_to_string(&receipt).unwrap();
+    let captured_claim = std::fs::read_to_string(&claim).unwrap();
+    assert_eq!(!captured_claim.trim().is_empty(), claim_written);
+    assert_ne!(
+        s.pane_option(&pane, tma_core::persistence::opt::RECEIPT),
+        captured_receipt.trim()
+    );
+    assert_eq!(
+        s.pane_option(&pane, "@tma_episode_notified"),
+        captured_claim.trim()
+    );
+    assert_eq!(
+        s.get(&pane, &view_format),
+        std::fs::read_to_string(&view).unwrap().trim()
+    );
+    eprintln!("500ms fallback confirmed; unique claim already written={claim_written}; receipt changed while complete presentation/owner stayed equal");
+    std::fs::write(&release, "resume").unwrap();
+    assert_eq!(
+        wait_sink_lines(&s, 1, Duration::from_secs(5)),
+        1,
+        "ACK fallback must preserve notification (claim already written: {claim_written}){}",
+        s.forensics(&[&pane])
+    );
+    assert_eq!(sink_lines(&s).len(), 1);
+}
+
+#[test]
+fn ack_timeout_fallback_before_notification_claim_does_not_drop_the_effect() {
+    ack_timeout_overlaps_notification_claim(false);
+}
+
+#[test]
+fn ack_timeout_fallback_after_notification_claim_does_not_spend_a_silent_effect() {
+    ack_timeout_overlaps_notification_claim(true);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -1347,12 +1546,12 @@ fn stall_fires_once_per_working_run_and_rearms_when_the_run_ends() {
         "leaving `working` rearmed the flag (marker cleared)"
     );
 
-    // The next long run fires exactly one more.
+    // Another turn in the same process/session fires exactly one more.
     fire(
         &s,
         "UserPromptSubmit",
         &pane,
-        r#"{"session_id":"sess-2"}"#,
+        r#"{"session_id":"sess-1"}"#,
         false,
         None,
     );

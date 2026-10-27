@@ -24,8 +24,9 @@ use crate::notify::NotifyState;
 use crate::window_names::WindowNames;
 
 use super::pending::{self, Advance, Pending};
+use super::program::ProgramService;
 use super::subscribers::{push_subscribers, reap_closed_subscribers, register_subscriber};
-use super::sys::drain_signal;
+use super::sys::{drain_signal, shutdown_requested};
 use super::{log_manifest_failures, SignalAction};
 
 /// A `poll(2)` timeout as rustix 1.x wants it: `Some(&Timespec)` (was a `c_int` ms in 0.38).
@@ -57,6 +58,7 @@ pub(super) fn serve(
     // Daemon knobs (quiet threshold, fold tuning + demotion, sweep cadence, zero-member recheck)
     // all come from `[daemon]`/`[fold]` config, defaulting to the shipped consts.
     let mut pool = ControlPool::new(config.daemon.quiet_threshold());
+    let mut program = ProgramService::new(config.program_status.mode, &mut pool);
     // On-demand capture + reconciliation sweep + demotion state. Daemon-only.
     let mut capture = CaptureState::new(config.fold_config(), config.daemon.demote_edges);
     // Notification dispatch + transition history: the one place blocked notifications fire, fed by
@@ -125,13 +127,20 @@ pub(super) fn serve(
     let _ = pool.reconcile(tmux);
     // Cold-start notification pass: a pane already `blocked` with `notified_at >= since` does NOT
     // re-fire (safe restarts). Seeds the transition ring with panes present at boot.
-    let _ = notify.reconcile(tmux);
+    let _ = dispatch_notify(&mut notify, tmux, &mut program, &mut pool);
     if let Some(p) = status_file {
         pool.write_status(
             p,
             probe,
             sweep,
-            &status_extra(&capture, &notify, &window_names, subscribers.len()),
+            &status_extra(
+                &capture,
+                &notify,
+                &window_names,
+                subscribers.len(),
+                program.as_ref(),
+                &pool,
+            ),
         );
     }
 
@@ -139,7 +148,32 @@ pub(super) fn serve(
     // The first sweep is one interval out, so a fresh daemon does not fan-out captures on boot.
     let mut last_sweep = Instant::now();
 
-    loop {
+    'serve: loop {
+        if shutdown_requested() {
+            break;
+        }
+        let program_work = program.as_ref().is_some_and(|service| service.due(&pool));
+        if program_work && server_restarted(tmux, server_id.as_deref()) {
+            break;
+        }
+        if let Some(service) = program.as_mut() {
+            if matches!(
+                service.run(
+                    tmux,
+                    &mut pool,
+                    &manifests,
+                    &mut notify,
+                    &mut subscribers,
+                    false
+                ),
+                Err(TmuxError::ServerGone)
+            ) {
+                break;
+            }
+        }
+        if shutdown_requested() {
+            break;
+        }
         // Emit due quiet edges and compute the poll timeout. Surface a new edge count immediately
         // (before the possibly-long sweep poll) so a freshly-quiet pane's edge is promptly observable.
         let edges_before = pool.edges_emitted();
@@ -156,6 +190,9 @@ pub(super) fn serve(
         // stamped onto any edge emitted this wake.
         let mut timeout =
             control::tick(&mut pool, Instant::now(), tma_runtime::now_ms(), iter_sweep);
+        if let Some(service) = program.as_ref() {
+            timeout = timeout.min(service.timeout());
+        }
 
         // On-demand capture: drain this iteration's active→quiet edges and capture the ONE pane each
         // fired for (never a fan-out); where hookless `blocked` is caught. Server-gone ends the loop.
@@ -178,6 +215,7 @@ pub(super) fn serve(
             probe,
             sweep,
             edges_before,
+            &mut program,
         ) {
             break;
         }
@@ -218,10 +256,11 @@ pub(super) fn serve(
 
         // Shrink the poll timeout to the nearest parked-connection deadline when one is due sooner
         // than the tick timeout, so a stalled peer sending no further bytes is still dropped on time.
-        let poll_to = match pending::nearest_deadline(&pending, Instant::now()) {
-            Some(d) => timeout.min(d),
-            None => timeout,
-        };
+        let poll_to = bounded_poll_timeout(
+            timeout,
+            pending::nearest_deadline(&pending, Instant::now()),
+            program.as_ref().map(ProgramService::timeout),
+        );
         let ts = poll_timeout(poll_to);
         let rc = match poll(&mut fds, Some(&ts)) {
             Ok(n) => n,
@@ -248,7 +287,37 @@ pub(super) fn serve(
                 SignalAction::Shutdown => break,
                 SignalAction::None => {}
                 SignalAction::Reload => {
+                    let old_mode = config.program_status.mode;
+                    let old_eligibility: Vec<_> = manifests
+                        .iter()
+                        .map(|manifest| {
+                            (
+                                manifest.name.clone(),
+                                manifest.manifest.identity.clone(),
+                                manifest.manifest.program_status.clone(),
+                            )
+                        })
+                        .collect();
                     if reload_state(&mut config, &mut manifests, config_path, manifest_dir) {
+                        let eligibility: Vec<_> = manifests
+                            .iter()
+                            .map(|manifest| {
+                                (
+                                    manifest.name.clone(),
+                                    manifest.manifest.identity.clone(),
+                                    manifest.manifest.program_status.clone(),
+                                )
+                            })
+                            .collect();
+                        if old_mode != config.program_status.mode || old_eligibility != eligibility
+                        {
+                            if let Some(service) = program.as_mut() {
+                                service.stop(tmux, &mut pool);
+                            }
+                            program = ProgramService::new(config.program_status.mode, &mut pool);
+                            let _ = pool.reconcile(tmux);
+                            let _ = push_subscribers(&mut subscribers);
+                        }
                         // Re-derive every config-dependent knob from the new config. Each holder
                         // keeps its runtime state (control clients, demotion map, notify history).
                         pool.set_quiet_threshold(config.daemon.quiet_threshold());
@@ -266,7 +335,7 @@ pub(super) fn serve(
                         eprintln!("tma: reloaded config + manifests (SIGHUP)");
                         // Re-evaluate notifications now: a reload is a cold-start for `notify.on`, so
                         // a completion newly in scope fires once (the marker still dedups otherwise).
-                        if dispatch_notify(&mut notify, tmux) {
+                        if dispatch_notify(&mut notify, tmux, &mut program, &mut pool) {
                             break;
                         }
                         if let Some(p) = status_file {
@@ -274,7 +343,14 @@ pub(super) fn serve(
                                 p,
                                 probe,
                                 sweep,
-                                &status_extra(&capture, &notify, &window_names, subscribers.len()),
+                                &status_extra(
+                                    &capture,
+                                    &notify,
+                                    &window_names,
+                                    subscribers.len(),
+                                    program.as_ref(),
+                                    &pool,
+                                ),
                             );
                         }
                     }
@@ -282,73 +358,8 @@ pub(super) fn serve(
             }
         }
 
-        let mut status_dirty = reaped > 0;
-
-        // Parked connections: advance any that became readable or whose deadline passed. A frame that
-        // only now completes dispatches through the SAME apply/subscribe/ACK path as an inline accept,
-        // and strictly AFTER this iteration's edge drain (top of loop), so the DEMOTION ORDERING
-        // INVARIANT holds even for a frame parked across earlier iterations. This runs BEFORE the
-        // accept block mutates `pending`, so `revents[pend_base + i]` still lines up with the snapshot.
-        if !pending.is_empty() {
-            let now = Instant::now();
-            let readable = PollFlags::IN | PollFlags::HUP | PollFlags::ERR;
-            let mut kept: Vec<Pending> = Vec::with_capacity(pending.len());
-            for (i, mut conn) in std::mem::take(&mut pending).into_iter().enumerate() {
-                let due = conn.is_due(now);
-                if !revents[pend_base + i].intersects(readable) && !due {
-                    kept.push(conn); // neither readable nor expired: still parked
-                    continue;
-                }
-                match conn.advance() {
-                    Advance::Complete(inbound) => {
-                        dispatch_inbound(
-                            tmux,
-                            &manifests,
-                            &mut capture,
-                            &mut subscribers,
-                            &notify,
-                            conn.into_stream(),
-                            inbound,
-                        );
-                        status_dirty = true;
-                    }
-                    Advance::Park if !due => kept.push(conn),
-                    _ => conn.nak_and_drop(), // Drop, or still-partial past its deadline
-                }
-            }
-            pending = kept;
-        }
-
-        // Inbound socket connection(s): drain the accept queue (non-blocking accept). A client's whole
-        // frame is usually already in the socket buffer, so the read+parse completes inline here and
-        // the connection never parks; only a would-block/partial frame joins `pending` (bounded,
-        // kill-oldest). A completed hook event can clear a pane's demotion, so flush the status.
-        if revents[0].contains(PollFlags::IN) {
-            let now = Instant::now();
-            loop {
-                match listener.accept() {
-                    Ok((stream, _addr)) => match Pending::accept(stream, now) {
-                        Some((conn, Advance::Complete(inbound))) => {
-                            dispatch_inbound(
-                                tmux,
-                                &manifests,
-                                &mut capture,
-                                &mut subscribers,
-                                &notify,
-                                conn.into_stream(),
-                                inbound,
-                            );
-                            status_dirty = true;
-                        }
-                        Some((conn, Advance::Park)) => pending::admit(&mut pending, conn),
-                        Some((conn, Advance::Drop)) => conn.nak_and_drop(),
-                        None => {} // could not set the accepted stream non-blocking: dropped
-                    },
-                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
-                    Err(_) => break,
-                }
-            }
-        }
+        let mut status_dirty = reaped > 0 || program_work;
+        let mut outward_dirty = false;
 
         // Control-mode clients: which fds became readable (POLLIN) or hung up (POLLHUP/ERR)?
         let closed = PollFlags::IN | PollFlags::HUP | PollFlags::ERR;
@@ -359,6 +370,9 @@ pub(super) fn serve(
             }
         }
 
+        if let Some(service) = program.as_ref() {
+            service.prepare(&mut pool);
+        }
         let fx = control::dispatch_ready(&mut pool, &ready, Instant::now());
         if !ready.is_empty() {
             status_dirty = true;
@@ -378,6 +392,7 @@ pub(super) fn serve(
         // A pane/window lifecycle event ⇒ recompute the window and session summaries so a closed
         // agent pane's rollups clear promptly, even with no `SessionEnd`. Server-gone ends the loop.
         if fx.need_summary {
+            outward_dirty = true;
             if let Err(TmuxError::ServerGone) = control::reconcile_summaries(tmux) {
                 break;
             }
@@ -398,11 +413,145 @@ pub(super) fn serve(
             }
         }
 
+        // Ready control data and every ordered program effect precede hook IPC.
+        // The quiet fold above still precedes both, preserving demotion ordering.
+        if let Some(service) = program.as_mut() {
+            let due = service.due(&pool);
+            if matches!(
+                service.run(
+                    tmux,
+                    &mut pool,
+                    &manifests,
+                    &mut notify,
+                    &mut subscribers,
+                    false
+                ),
+                Err(TmuxError::ServerGone)
+            ) {
+                break;
+            }
+            status_dirty |= due;
+        }
+
+        if shutdown_requested() {
+            break;
+        }
+        // Parked connections: advance any that became readable or whose deadline passed. A frame that
+        // only now completes dispatches through the SAME apply/subscribe/ACK path as an inline accept,
+        // and strictly AFTER this iteration's edge drain (top of loop), so the DEMOTION ORDERING
+        // INVARIANT holds even for a frame parked across earlier iterations. This runs BEFORE the
+        // accept block mutates `pending`, so `revents[pend_base + i]` still lines up with the snapshot.
+        let mut hook_budget = 1usize;
+        if !pending.is_empty() {
+            let now = Instant::now();
+            let readable = PollFlags::IN | PollFlags::HUP | PollFlags::ERR;
+            let mut kept: Vec<Pending> = Vec::with_capacity(pending.len());
+            for (i, mut conn) in std::mem::take(&mut pending).into_iter().enumerate() {
+                let due = conn.is_due(now);
+                if hook_budget == 0 {
+                    if due {
+                        conn.nak_and_drop();
+                    } else {
+                        kept.push(conn);
+                    }
+                    continue;
+                }
+                if !revents[pend_base + i].intersects(readable) && !due {
+                    kept.push(conn); // neither readable nor expired: still parked
+                    continue;
+                }
+                match conn.advance() {
+                    Advance::Complete(inbound) => {
+                        dispatch_inbound(
+                            tmux,
+                            &manifests,
+                            &mut capture,
+                            &mut subscribers,
+                            &notify,
+                            conn.into_stream(),
+                            inbound,
+                        );
+                        status_dirty = true;
+                        outward_dirty = true;
+                        hook_budget -= 1;
+                        if let Some(service) = program.as_mut() {
+                            let _ = service.run(
+                                tmux,
+                                &mut pool,
+                                &manifests,
+                                &mut notify,
+                                &mut subscribers,
+                                false,
+                            );
+                            if shutdown_requested() {
+                                break 'serve;
+                            }
+                        }
+                    }
+                    Advance::Park if !due => kept.push(conn),
+                    _ => conn.nak_and_drop(), // Drop, or still-partial past its deadline
+                }
+            }
+            pending = kept;
+        }
+
+        // Inbound socket connection(s): drain the accept queue (non-blocking accept). A client's whole
+        // frame is usually already in the socket buffer, so the read+parse completes inline here and
+        // the connection never parks; only a would-block/partial frame joins `pending` (bounded,
+        // kill-oldest). A completed hook event can clear a pane's demotion, so flush the status.
+        if revents[0].contains(PollFlags::IN) {
+            let now = Instant::now();
+            for _ in 0..32 {
+                if hook_budget == 0 {
+                    break;
+                }
+                match listener.accept() {
+                    Ok((stream, _addr)) => match Pending::accept(stream, now) {
+                        Some((conn, Advance::Complete(inbound))) => {
+                            dispatch_inbound(
+                                tmux,
+                                &manifests,
+                                &mut capture,
+                                &mut subscribers,
+                                &notify,
+                                conn.into_stream(),
+                                inbound,
+                            );
+                            status_dirty = true;
+                            outward_dirty = true;
+                            hook_budget -= 1;
+                            if let Some(service) = program.as_mut() {
+                                let _ = service.run(
+                                    tmux,
+                                    &mut pool,
+                                    &manifests,
+                                    &mut notify,
+                                    &mut subscribers,
+                                    false,
+                                );
+                                if shutdown_requested() {
+                                    break 'serve;
+                                }
+                            }
+                        }
+                        Some((conn, Advance::Park)) => pending::admit(&mut pending, conn),
+                        Some((conn, Advance::Drop)) => conn.nak_and_drop(),
+                        None => {} // could not set the accepted stream non-blocking: dropped
+                    },
+                    Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(_) => break,
+                }
+            }
+        }
+
         // Reconciliation sweep: the full phase-1 cycle every `sweep`, the ONLY multi-`capture-pane`
         // fan-out. Self-healing: discovers unannounced agents, clears dead processes, fixes hook drift.
         if sweep_due(last_sweep, Instant::now(), sweep) {
             match capture.run_sweep(tmux, &manifests) {
-                Ok(()) => status_dirty = true,
+                Ok(()) => {
+                    status_dirty = true;
+                    outward_dirty = true;
+                }
                 Err(TmuxError::ServerGone) => break,
                 Err(_) => {} // transient read/capture error: retry next cadence
             }
@@ -411,14 +560,14 @@ pub(super) fn serve(
 
         // Notification dispatch: the ONE place blocked notifications fire, keyed on the persisted
         // marker so it fires once per episode whatever producer drove `blocked` (redundant passes are no-ops).
-        if status_dirty && dispatch_notify(&mut notify, tmux) {
+        if outward_dirty && dispatch_notify(&mut notify, tmux, &mut program, &mut pool) {
             break;
         }
 
         // State-derived window names, after the dispatch so a pass reads the same settled stamps a
         // notification just fired on. A no-op when the feature is off, and one read with no writes
         // when nothing's rollup moved.
-        if status_dirty && window_names.enabled() {
+        if outward_dirty && window_names.enabled() {
             if let Err(TmuxError::ServerGone) = window_names.reconcile(tmux) {
                 break;
             }
@@ -441,7 +590,7 @@ pub(super) fn serve(
         // and drops it, so writing the gauge first records a subscriber that is gone by the end of this
         // iteration — and nothing dirties the status again until the 45 s sweep, since the hangup this
         // path consumed is exactly what `reap_closed_subscribers` would have counted.
-        if status_dirty && !subscribers.is_empty() {
+        if outward_dirty && !subscribers.is_empty() {
             // Folded back in so the gauge is right even if this is ever reordered after the write.
             status_dirty |= push_subscribers(&mut subscribers) > 0;
         }
@@ -452,10 +601,20 @@ pub(super) fn serve(
                     p,
                     probe,
                     sweep,
-                    &status_extra(&capture, &notify, &window_names, subscribers.len()),
+                    &status_extra(
+                        &capture,
+                        &notify,
+                        &window_names,
+                        subscribers.len(),
+                        program.as_ref(),
+                        &pool,
+                    ),
                 );
             }
         }
+    }
+    if let Some(service) = program.as_mut() {
+        service.stop(tmux, &mut pool);
     }
     // Take down any OSC 9;4 progress indicator this daemon lit: it is state the emulator keeps, so
     // nothing else would ever clear it once the daemon that raised it is gone.
@@ -476,20 +635,36 @@ fn status_extra(
     notify: &NotifyState,
     window_names: &WindowNames,
     n_subscribers: usize,
+    program: Option<&ProgramService>,
+    pool: &ControlPool,
 ) -> String {
     format!(
-        "{}{}{}wait_subscribers={}\n",
+        "{}{}{}wait_subscribers={}\n{}",
         capture.status_lines(),
         notify.status_lines(),
         window_names.status_lines(),
-        n_subscribers
+        n_subscribers,
+        program.map_or_else(
+            || "program_mode=off\nprogram_stores=0\nprogram_retained_bytes=0\nprogram_lease=none\n"
+                .into(),
+            |service| service.status(pool)
+        )
     )
 }
 
 /// Run the notification dispatch pass; returns `true` if the server is gone (the caller ends the
 /// loop). A transient read error is swallowed: the next pass retries from the persisted marker.
-fn dispatch_notify(notify: &mut NotifyState, tmux: &Tmux) -> bool {
-    matches!(notify.reconcile(tmux), Err(TmuxError::ServerGone))
+fn dispatch_notify(
+    notify: &mut NotifyState,
+    tmux: &Tmux,
+    program: &mut Option<ProgramService>,
+    pool: &mut ControlPool,
+) -> bool {
+    let result = match program.as_mut() {
+        Some(service) => service.notify(tmux, pool, notify),
+        None => notify.reconcile_checked(tmux, |read| !read.program.program_origin),
+    };
+    matches!(result, Err(TmuxError::ServerGone))
 }
 
 /// The FOLD half of the DEMOTION ORDERING INVARIANT: drain this iteration's active→quiet edges and
@@ -512,18 +687,20 @@ fn drain_and_fold_edges(
     probe: ProbeOutcome,
     sweep: Duration,
     edges_before: u64,
+    program: &mut Option<ProgramService>,
 ) -> bool {
     let edges = pool.drain_edges();
     let had_edges = !edges.is_empty();
+    let mut changed = false;
     if had_edges {
-        match capture.handle_edges(tmux, manifests, edges) {
-            Ok(()) => {}
+        changed = match capture.handle_edges_with_changes(tmux, manifests, edges) {
+            Ok(changed) => changed,
             Err(TmuxError::ServerGone) => return true,
-            Err(_) => {} // transient read/capture error: the sweep repairs it
-        }
+            Err(_) => true, // earlier edges may already have changed truth
+        };
         // Fire any `blocked` the capture just produced BEFORE the possibly-long poll block, so
         // hookless blocked→notification latency stays at the quiet-edge cadence (<5 s).
-        if dispatch_notify(notify, tmux) {
+        if changed && dispatch_notify(notify, tmux, program, pool) {
             return true;
         }
     }
@@ -531,7 +708,7 @@ fn drain_and_fold_edges(
     // hookless waiter's blocked latency tracks the quiet edge, not the next fallback cycle. The push
     // comes before the status write because it can DROP a subscriber whose peer has already exited,
     // and the `wait_subscribers` gauge must report the set that survived it.
-    let dropped = if had_edges && !subscribers.is_empty() {
+    let dropped = if changed && !subscribers.is_empty() {
         push_subscribers(subscribers)
     } else {
         0
@@ -542,7 +719,14 @@ fn drain_and_fold_edges(
                 p,
                 probe,
                 sweep,
-                &status_extra(capture, notify, window_names, subscribers.len()),
+                &status_extra(
+                    capture,
+                    notify,
+                    window_names,
+                    subscribers.len(),
+                    program.as_ref(),
+                    pool,
+                ),
             );
         }
     }
@@ -603,6 +787,7 @@ fn apply_hook_event(
     let now = tma_runtime::now_ms();
     // Applies the stamp only (same guarded write + summary recompute as the direct path). The daemon
     // never inline-fires; all dispatch runs in `NotifyState::reconcile`.
+    let started = Instant::now();
     let outcome = tma_runtime::event::apply_event(
         tmux,
         lm,
@@ -617,6 +802,13 @@ fn apply_hook_event(
         },
         now,
     );
+    if started.elapsed() >= Duration::from_secs(1) {
+        eprintln!(
+            "tma: hook application for {} took {}ms",
+            ev.pane,
+            started.elapsed().as_millis()
+        );
+    }
     outcome == EventOutcome::Applied
 }
 
@@ -664,6 +856,17 @@ fn reload_state(
     }
 }
 
+fn bounded_poll_timeout(
+    control: Duration,
+    pending: Option<Duration>,
+    program: Option<Duration>,
+) -> Duration {
+    pending
+        .into_iter()
+        .chain(program)
+        .fold(control, Duration::min)
+}
+
 /// The effective sweep cadence: the probe verdict picks the base (config normal cadence when push is
 /// available, else the degraded const), and `--sweep-ms` overrides. Pure so startup and reload agree.
 fn resolve_sweep(probe: ProbeOutcome, config: &Config, sweep_ms: Option<u64>) -> Duration {
@@ -706,6 +909,27 @@ fn sweep_due(last_sweep: Instant, now: Instant, sweep: Duration) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn final_poll_timeout_keeps_program_deadline_after_capture_recheck() {
+        let recomputed_control = Duration::from_secs(60);
+        assert_eq!(
+            bounded_poll_timeout(recomputed_control, None, Some(Duration::from_secs(1))),
+            Duration::from_secs(1)
+        );
+        assert_eq!(
+            bounded_poll_timeout(
+                recomputed_control,
+                Some(Duration::from_millis(100)),
+                Some(Duration::from_secs(1))
+            ),
+            Duration::from_millis(100)
+        );
+        assert_eq!(
+            bounded_poll_timeout(recomputed_control, None, None),
+            recomputed_control
+        );
+    }
 
     /// Reload derivation: the sweep cadence follows the probe verdict + reloaded config, and the
     /// `--sweep-ms` test override still wins, so a SIGHUP reload recomputes it consistently.

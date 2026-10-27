@@ -55,16 +55,23 @@ fn new_shell_session(s: &Scratch, name: &str) -> (String, u32) {
     assert!(pane.starts_with('%'), "got pane {pane:?}");
     // The shell must be up before its name is read or keys are sent to it: a just-created pane can
     // still report the pre-exec command under load, which would author a manifest matching nothing.
-    // Its own echo of the marker proves the shell reached its prompt and is reading input.
+    // Require the executed output line. The tty can echo the queued printf command before exec,
+    // which would let the fixture author process names for the spawning shell instead.
     s.tmux(&[
         "send-keys",
         "-t",
         &pane,
-        "printf 'tma-shell-ready\\n'",
+        "printf '\\ntma-shell-ready\\n'",
         "Enter",
     ]);
     assert!(
-        common::wait_capture_contains(&s.socket, &pane, "tma-shell-ready", common::POLL_CEILING),
+        common::wait_until(common::POLL_CEILING, || {
+            let capture = s.tmux(&["capture-pane", "-p", "-t", &pane]);
+            capture.status.success()
+                && String::from_utf8_lossy(&capture.stdout)
+                    .lines()
+                    .any(|line| line.trim() == "tma-shell-ready")
+        }),
         "the pane shell never reached its prompt"
     );
     let pid: u32 = s.get(name, "#{pane_pid}").parse().unwrap();
@@ -430,7 +437,10 @@ fn foreground_capped_hook_claim_owes_a_follow_up_look() {
     let looks = wait_status_ge(&s, "recheck_looks", looks_baseline + 1);
     assert!(
         looks > looks_baseline,
-        "a capped capture that held the hook claim must still schedule its follow-up look{}",
+        "a capped capture that held the hook claim must still schedule its follow-up look \
+         (root pid {pid}, process_names=[{names}], current_command={:?}, root comm={:?}){}",
+        s.get("s1", "#{pane_current_command}"),
+        comm_of(pid),
         s.forensics(&[&pane])
     );
     // The premise, so the assertion above cannot pass for the wrong reason: the cap really did
@@ -1163,10 +1173,13 @@ fn a_quit_agent_is_cleared_by_the_quiet_edge_not_the_sweep() {
         "quit agent's stamp cleared {} ms after the exit",
         quit.elapsed().as_millis()
     );
+    common::poll_until("the separate persisted-truth rollup reconciliation", || {
+        s.get(&pane, "#{@agent_summary}").is_empty()
+    });
     assert_eq!(
         s.get(&pane, "#{@agent_summary}"),
         "",
-        "the window rollup comes down in the same invocation as the stamp"
+        "the rollup follows pane removal"
     );
     assert_eq!(
         s.status_u64("sweeps"),

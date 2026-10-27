@@ -15,17 +15,21 @@ use std::sync::{Arc, Mutex};
 use common::{scratch_tmux, unique_id};
 use tma_test_support as common;
 
-// Deliberately NOT folded onto the shared `tma-test-support::Scratch`: this harness is socket-only
-// (no workdir) and its `tma` carries NO `--manifest-dir`, which the shared type would both add.
+// This harness retains its own command shape: `tma` carries no `--manifest-dir`,
+// while the owned workdir isolates child home/configuration.
 struct Scratch {
     socket: String,
+    workdir: std::path::PathBuf,
 }
 
 impl Scratch {
     fn new(tag: &str) -> Scratch {
         common::reap_orphan_scratch_servers();
         let unique = unique_id();
+        let workdir = std::env::temp_dir().join(format!("tma_stamp_{unique}"));
+        std::fs::create_dir_all(&workdir).unwrap();
         Scratch {
+            workdir,
             socket: format!("tma_test_{tag}_{unique}"),
         }
     }
@@ -46,7 +50,7 @@ impl Scratch {
     }
 
     fn tma(&self, args: &[&str]) -> std::process::Output {
-        Command::new(common::tma_bin())
+        common::isolated_tma_command(&self.workdir)
             .args(args)
             .arg("--socket-name")
             .arg(&self.socket)
@@ -70,6 +74,7 @@ impl Scratch {
 
 impl Drop for Scratch {
     fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.workdir);
         // The non-panicking kill: this runs while a failed assertion is unwinding, where a panic
         // would abort the binary and leave every other scratch server behind.
         common::kill_scratch_server(&self.socket);
@@ -157,11 +162,11 @@ fn trace_a_hook_blocked_survives_capture_working_write() {
         "permission",
         "detail unchanged"
     );
-    // Freshness still refreshes (writes-on-hold semantics for the tuple).
+    // A losing producer cannot advance any part of the winning tuple, including freshness.
     assert_eq!(
         s.get(&pane, "#{@agent_stamped_at}"),
-        "2000",
-        "stamped_at refreshes"
+        "1000",
+        "losing stamped_at is suppressed"
     );
 }
 
@@ -420,8 +425,7 @@ fn cross_chain_guard_tear_atomicity_under_concurrent_writers() {
     const W1_ITERS: u64 = 200;
     const W2_ITERS: u64 = 400;
 
-    let bin_owned = common::tma_bin();
-    let bin = bin_owned.as_str();
+    let workdir = &s.workdir;
     let cfg = common::empty_config_path();
     let socket = s.socket.clone();
 
@@ -436,8 +440,8 @@ fn cross_chain_guard_tear_atomicity_under_concurrent_writers() {
 
     // One guarded `set-option` chain via the internal write adapter. Returns false on a spawn
     // that did not exit 0 (a killed server during teardown), which the writers treat as "stop".
-    fn stamp(bin: &str, socket: &str, cfg: &Path, pane: &str, extra: &[&str]) -> bool {
-        Command::new(bin)
+    fn stamp(workdir: &Path, socket: &str, cfg: &Path, pane: &str, extra: &[&str]) -> bool {
+        common::isolated_tma_command(workdir)
             .args(["debug", "stamp", pane])
             .args(extra)
             .args(["--socket-name", socket])
@@ -451,7 +455,7 @@ fn cross_chain_guard_tear_atomicity_under_concurrent_writers() {
     let n = clock.fetch_add(1, Ordering::Relaxed).to_string();
     assert!(
         stamp(
-            bin,
+            workdir,
             &socket,
             cfg,
             &pane,
@@ -534,7 +538,7 @@ fn cross_chain_guard_tear_atomicity_under_concurrent_writers() {
                 }
                 let n = clock.fetch_add(1, Ordering::Relaxed).to_string();
                 if !stamp(
-                    bin,
+                    workdir,
                     &socket,
                     cfg,
                     &pane,
@@ -560,7 +564,7 @@ fn cross_chain_guard_tear_atomicity_under_concurrent_writers() {
                 chains += 1;
                 let n = clock.fetch_add(1, Ordering::Relaxed).to_string();
                 if !stamp(
-                    bin,
+                    workdir,
                     &socket,
                     cfg,
                     &pane,
@@ -598,7 +602,7 @@ fn cross_chain_guard_tear_atomicity_under_concurrent_writers() {
                 let (state, detail) = HOOK_PAIRS[(i % 2) as usize];
                 let n = clock.fetch_add(1, Ordering::Relaxed).to_string();
                 if !stamp(
-                    bin,
+                    workdir,
                     &socket,
                     cfg,
                     &pane,

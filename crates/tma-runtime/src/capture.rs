@@ -95,12 +95,11 @@ pub struct CaptureState {
     clock: u64,
     /// `-F` conditional-write support, resolved once and cached (see [`stamp`]).
     guarded: Option<bool>,
-    /// The last sweep's deferred ordered-input clear: `(pane_id, @agent_since)` for every pane still
-    /// carrying `@agent_attention` whose raise instant is known — a row reading `since == 0` is
+    /// The last sweep's exact deferred acknowledgement observations. An unknown raise instant is
     /// deliberately left out, since every client's activity postdates zero. Drained by the serve
     /// loop AFTER notification dispatch, which reads the same persisted flag (see
     /// [`cycle::SeenClear`]).
-    deferred_seen: Vec<(String, u64)>,
+    deferred_seen: Vec<tma_tmux::persistence::AttentionObservation>,
 
     // ---- introspection counters (status file; tests + operators) ----
     /// Total on-demand single-pane captures (quiet edge + contradiction).
@@ -193,8 +192,20 @@ impl CaptureState {
         manifests: &[LoadedManifest],
         edges: Vec<ActivityEdge>,
     ) -> Result<(), TmuxError> {
+        self.handle_edges_with_changes(tmux, manifests, edges)
+            .map(|_| ())
+    }
+
+    /// Whether fallback work may have changed persisted truth. Live program
+    /// edges do not schedule another notification or subscriber reconciliation.
+    pub fn handle_edges_with_changes(
+        &mut self,
+        tmux: &Tmux,
+        manifests: &[LoadedManifest],
+        edges: Vec<ActivityEdge>,
+    ) -> Result<bool, TmuxError> {
         if edges.is_empty() {
-            return Ok(());
+            return Ok(false);
         }
         // One read for the whole batch (not a per-edge fan-out). It is a `tmux` one-shot under the
         // 3 s `TMUX_TIMEOUT`, so on a saturated box it can fail; the batch is then abandoned and
@@ -209,6 +220,7 @@ impl CaptureState {
         let now = crate::now_ms();
         let mut procs = None; // parsed once, lazily, only if an edge reaches an agent pane
 
+        let mut changed = false;
         let mut remaining = edges.len() as u64;
         for edge in edges {
             remaining -= 1;
@@ -225,10 +237,17 @@ impl CaptureState {
                 continue;
             }
 
-            let prev = StampedState::from_options(&rec.options)
+            let prev = tma_core::persistence::current_stamp(&rec.options, now)
                 .ok()
                 .flatten()
                 .map(ReadResult::into_inner);
+
+            if matches!(
+                tma_core::persistence::read_projection(&rec.options, now),
+                Ok(tma_core::persistence::ProjectionRead::Live { .. })
+            ) {
+                continue;
+            }
 
             // Identify honouring a stored hook registration, as the poll cycle does, so a live
             // registered agent the ps walk momentarily misses is not mistaken for an exit.
@@ -274,8 +293,9 @@ impl CaptureState {
                 // the status line for a whole sweep cadence. The sweep stays the backstop for a
                 // pane no edge arrives on.
                 if prev.is_some() {
+                    changed = true;
                     match stamp::apply(tmux, &panes, &rec.pane_id, &StampPlan::Remove, true) {
-                        Ok(()) => {}
+                        Ok(_) => {}
                         // The pane died before its own removal: moot, and the sweep clears residue.
                         Err(e) if cycle::is_dead_pane(&e) => {
                             self.forget_pane(&edge.pane);
@@ -287,15 +307,6 @@ impl CaptureState {
                             return Err(e);
                         }
                     }
-                }
-                // Clear a stale title anchor so a lost title-narrowed match leaves nothing behind
-                // for a future coincidence. No-op when the pane never had one.
-                if let Some(cmd) = identity::title_anchor_command(
-                    &rec.pane_id,
-                    stored_title_anchor.map(String::as_str),
-                    None,
-                ) {
-                    let _ = tmux.apply(&[cmd]);
                 }
                 self.forget_pane(&edge.pane);
                 continue;
@@ -344,6 +355,7 @@ impl CaptureState {
                 continue;
             }
 
+            changed = true;
             let landed = match self.capture_one(tmux, &panes, rec, prev.as_ref(), &id, demoted, now)
             {
                 Ok(landed) => landed,
@@ -363,17 +375,6 @@ impl CaptureState {
             // The verdict that no later edge can correct: schedule (or retire) this pane's bounded
             // follow-up look before anything else can return early.
             self.note_foreground_cap(&rec.pane_id, landed == Landed::ForegroundCapped);
-            // Persist the flicker anchor for a title-narrowed match (parity with the poll cycle), so
-            // an unregistered cursor pane holds identity through the flicker. Registered panes carry none.
-            if id.title_anchor.is_some() {
-                if let Some(cmd) = identity::title_anchor_command(
-                    &rec.pane_id,
-                    stored_title_anchor.map(String::as_str),
-                    id.title_anchor,
-                ) {
-                    let _ = tmux.apply(&[cmd]);
-                }
-            }
             self.on_demand_captures += 1;
             if contradiction {
                 self.contradiction_captures += 1;
@@ -381,7 +382,7 @@ impl CaptureState {
                 self.quiet_captures += 1;
             }
         }
-        Ok(())
+        Ok(changed)
     }
 
     /// Capture, fold, and guarded-stamp exactly one pane (the on-demand producer core, reusing
@@ -479,7 +480,7 @@ impl CaptureState {
 
     /// Take the sweep's deferred ordered-input-clear candidates, leaving none behind: the caller
     /// owns the pass and a candidate must never be replayed against a later sweep's flags.
-    pub fn take_deferred_seen(&mut self) -> Vec<(String, u64)> {
+    pub fn take_deferred_seen(&mut self) -> Vec<tma_tmux::persistence::AttentionObservation> {
         std::mem::take(&mut self.deferred_seen)
     }
 
@@ -637,10 +638,27 @@ pub(crate) fn stamp_from_capture(
         tail_hash,
         now,
     );
-    stamp::apply(tmux, all_panes, &rec.pane_id, &plan, guarded)?;
+    let companions: Vec<_> = id
+        .title_anchor
+        .map(|anchor| tma_tmux::persistence::OptionEdit::set(opt::TITLE_MATCH_PID, anchor.render()))
+        .into_iter()
+        .collect();
+    let applied = stamp::apply_with_edits(
+        tmux,
+        all_panes,
+        &rec.pane_id,
+        &plan,
+        guarded,
+        &[],
+        &companions,
+    )?;
+    let winner_is_program = matches!(
+        applied.read.projection(crate::now_ms()),
+        Ok(tma_core::persistence::ProjectionRead::Live { .. })
+    );
     // The cap turns on this fact, and it has two verdicts: `unknown`/process with no live hook
     // claim, that claim HELD with one. Reading the fact owes a follow-up look to both.
-    Ok(if facts.foreground_is_agent {
+    Ok(if winner_is_program || facts.foreground_is_agent {
         Landed::Settled
     } else {
         Landed::ForegroundCapped

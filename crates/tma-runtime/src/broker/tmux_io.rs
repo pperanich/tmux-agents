@@ -1,6 +1,5 @@
-use tma_core::render;
 use tma_core::stamp::opt;
-use tma_core::{AgentState, FoldConfig, HookVerdict, ReadResult, StampedState};
+use tma_core::{AgentState, FoldConfig, HookVerdict, ReadResult};
 
 use tma_tmux::lock::{self, Acquire, LockError};
 use tma_tmux::stamp;
@@ -41,6 +40,17 @@ impl BrokerIo for TmuxBroker<'_> {
         let Some(rec) = panes.iter().find(|r| r.pane_id == pane_id) else {
             return Ok(None);
         };
+        let mut checked = rec.clone();
+        if !program_action_current(rec) {
+            checked.options.remove(opt::STATE);
+            checked.options.remove(opt::PID);
+        }
+        if !crate::metadata::live_for_actions(&checked.options) {
+            for key in tma_core::persistence::METADATA_KEYS {
+                checked.options.remove(*key);
+            }
+        }
+        let rec = &checked;
         // `#{pane_current_path}` is a live read; a failure degrades to empty (TMA_CWD unset), never
         // an act failure.
         let cwd = self
@@ -115,26 +125,38 @@ impl BrokerIo for TmuxBroker<'_> {
         hook_lane::write_verdict(request_id, verdict)
     }
 
-    fn set_act_repeat(&self, pane_id: &str, value: &str) {
-        // Discarded like the permission-request clear below: the counter is a signal, and a pane
-        // that went away between the effect and this write has nothing left to count.
-        let _ = self
-            .tmux
-            .apply(&[render::set_pane_option(pane_id, opt::ACT_REPEAT, value)]);
+    fn set_act_repeat(&self, pane_id: &str, facts: &PaneFacts, value: &str) {
+        update_action_metadata(
+            self.tmux,
+            pane_id,
+            facts,
+            &[tma_tmux::persistence::OptionEdit::set(
+                opt::ACT_REPEAT,
+                value,
+            )],
+        );
     }
 
-    fn clear_permission_request(&self, pane_id: &str) {
-        // Discarded like the event path's own clear (`event::permission`): a pane that went away
-        // between the reply and this write has nothing left to unset.
-        let _ = self
-            .tmux
-            .apply(&[render::unset_pane_option(pane_id, opt::PERMISSION_REQUEST)]);
+    fn clear_permission_request(&self, pane_id: &str, facts: &PaneFacts) {
+        update_action_metadata(
+            self.tmux,
+            pane_id,
+            facts,
+            &[tma_tmux::persistence::OptionEdit::unset(
+                opt::PERMISSION_REQUEST,
+            )],
+        );
     }
 
-    fn clear_question_request(&self, pane_id: &str) {
-        let _ = self
-            .tmux
-            .apply(&[render::unset_pane_option(pane_id, opt::QUESTION_REQUEST)]);
+    fn clear_question_request(&self, pane_id: &str, facts: &PaneFacts) {
+        update_action_metadata(
+            self.tmux,
+            pane_id,
+            facts,
+            &[tma_tmux::persistence::OptionEdit::unset(
+                opt::QUESTION_REQUEST,
+            )],
+        );
     }
 
     fn acquire(
@@ -174,6 +196,47 @@ impl BrokerIo for TmuxBroker<'_> {
     }
 }
 
+fn program_action_current(rec: &PaneRecord) -> bool {
+    let metadata = tma_core::persistence::ProgramMetadata::from_options(&rec.options);
+    if !metadata.program_origin {
+        return true;
+    }
+    let Some(owner) = metadata.owner else {
+        return false;
+    };
+    if identity::program_out_of_scope(&rec.current_command).is_some() {
+        return false;
+    }
+    tma_tmux::tmux::sample_process_chain(rec.pane_pid, owner.processes.agent().pid)
+        .is_ok_and(|chain| chain == owner.processes.as_slice())
+}
+
+fn update_action_metadata(
+    tmux: &Tmux,
+    pane: &str,
+    facts: &PaneFacts,
+    edits: &[tma_tmux::persistence::OptionEdit],
+) {
+    let Some(binding) = crate::metadata::bind(tmux, pane, facts.session.as_deref(), false) else {
+        return;
+    };
+    let options = &binding.read.options;
+    let value = |key| options.get(key).map(String::as_str);
+    let epoch = |key| {
+        value(key)
+            .and_then(|value| value.parse::<u64>().ok())
+            .unwrap_or(0)
+    };
+    if value(opt::PID).filter(|pid| *pid != "0") != facts.pid.as_deref()
+        || epoch(opt::SINCE).max(epoch(opt::TURN_AT)) != facts.episode_ms
+        || value(opt::PERMISSION_REQUEST) != facts.permission_request.as_deref()
+        || value(opt::QUESTION_REQUEST) != facts.question_request.as_deref()
+    {
+        return;
+    }
+    crate::metadata::write(tmux, &binding, edits, false);
+}
+
 /// Assemble [`PaneFacts`] from a pane record and its live cwd. Session is charset-validated at
 /// read: a value outside the safe env charset is treated as absent, so a corrupt/hostile stamp
 /// never reaches `TMA_SESSION_ID` or satisfies `requires = ["session"]`.
@@ -185,17 +248,27 @@ fn build_facts(
 ) -> PaneFacts {
     let opt = |k: &str| rec.options.get(k).filter(|v| !v.is_empty()).cloned();
     let num = |k: &str| opt(k).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0);
+    let current = tma_core::persistence::current_stamp(&rec.options, crate::now_ms())
+        .ok()
+        .flatten()
+        .map(ReadResult::into_inner);
+    let usable = current.is_some() && !identity::is_ignored(&rec.options);
     PaneFacts {
-        agent: opt(opt::NAME),
-        state: opt(opt::STATE)
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(AgentState::Unknown),
+        agent: opt(opt::NAME).filter(|_| {
+            usable
+                || !tma_core::persistence::ProgramMetadata::from_options(&rec.options)
+                    .program_origin
+        }),
+        state: current
+            .as_ref()
+            .filter(|_| usable)
+            .map_or(AgentState::Unknown, |stamp| stamp.state),
         detail: opt(opt::DETAIL),
         session: opt(opt::SESSION).filter(|s| valid_session(s)),
         cwd,
         // The pid-less sentinel `0` is not a process-group leader, so it does not satisfy the `pid`
         // requirement and yields an empty `TMA_PID`.
-        pid: opt(opt::PID).filter(|v| v != "0"),
+        pid: opt(opt::PID).filter(|v| usable && v != "0"),
         title: rec.title.clone(),
         locator: rec.locator(),
         stamped_at: opt(opt::STAMPED_AT)
@@ -257,7 +330,7 @@ fn reverify_pane(
     rec: &PaneRecord,
     now: u64,
 ) -> Result<(), TmuxError> {
-    let prev = StampedState::from_options(&rec.options)
+    let prev = tma_core::persistence::current_stamp(&rec.options, now)
         .ok()
         .flatten()
         .map(ReadResult::into_inner);
@@ -292,6 +365,12 @@ fn reverify_pane(
         return Ok(()); // pid-less registered agent: hold the existing stamp (poll-cycle parity)
     }
 
+    if matches!(
+        tma_core::persistence::read_projection(&rec.options, now),
+        Ok(tma_core::persistence::ProjectionRead::Live { .. })
+    ) {
+        return Ok(());
+    }
     let guarded = stamp::guarded_writes_supported(tmux, panes);
     crate::capture::stamp_from_capture(
         tmux,

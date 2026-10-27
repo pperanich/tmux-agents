@@ -12,7 +12,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 use std::time::Duration;
 
-use tma_core::render::{self, Guard, Publish};
+use tma_core::render::{Guard, Publish};
 use tma_core::stamp::opt;
 use tma_core::{Provenance, ReadResult, StampedState};
 
@@ -31,7 +31,10 @@ use context::run_context;
 use mapping::{decide, parse_session_id, transcript_stamp, EventPlan};
 pub(crate) use mapping::{json_object_field, json_string_field};
 pub use mapping::{map_event, Mapped};
-use permission::{apply_pending_call, apply_permission_request, apply_question_request};
+use permission::{
+    pending_call_effect, permission_request_effect, question_request_effect, PendingCall, PermReq,
+};
+use tma_tmux::persistence::{self, AttentionObservation, OptionEdit};
 
 /// Parsed `tma event` arguments (internal, unstable — the wrapper builds this).
 pub struct EventArgs {
@@ -189,11 +192,23 @@ fn hold_for_reply(tmux: &Tmux, pane: &str, payload: &str, hold_ms: u64) -> ExitC
     // `@agent_permission_request` is the field the binder quotes, so the lane mints into it
     // rather than inventing a second one. Claude's payload carries no `request_id` of its own, so
     // this is the only writer for a claude pane and nothing is being overwritten.
-    let _ = tmux.apply(&[render::set_pane_option(pane, opt::PERMISSION_REQUEST, &id)]);
+    let session = parse_session_id(payload);
+    let Some(binding) = crate::metadata::bind(tmux, pane, session.as_deref(), false) else {
+        return ExitCode::SUCCESS;
+    };
     let record =
         hook_lane::RequestRecord::from_payload(&id, pane, payload, episode_ms(tmux, pane), now);
     if hook_lane::write_request(&record).is_err() {
-        // Nothing to hold on: the reply half would have nothing to find, so fall straight through.
+        return ExitCode::SUCCESS;
+    }
+    // The binder's option is published only after its request record is ready. A losing metadata
+    // binding never publishes the id into a replacement session.
+    if !crate::metadata::write(
+        tmux,
+        &binding,
+        &[OptionEdit::set(opt::PERMISSION_REQUEST, &id)],
+        false,
+    ) {
         return ExitCode::SUCCESS;
     }
     if let Some(decision) = hook_lane::hold_for_verdict(&id, Duration::from_millis(hold_ms)) {
@@ -264,10 +279,14 @@ pub fn apply_event(
         // Server gone or unreadable: nothing was applied, so a relaying peer should try itself.
         Err(_) => return EventOutcome::Declined,
     };
-    let Some(rec) = panes.iter().find(|r| r.pane_id == pane) else {
+    let actual_pane = tmux.pane_format(pane, "#{pane_id}").unwrap_or_default();
+    let Some(rec) = panes.iter().find(|record| record.pane_id == actual_pane) else {
         return EventOutcome::Declined;
     };
-    let stored = StampedState::from_options(&rec.options)
+    if crate::identity::is_ignored(&rec.options) {
+        return EventOutcome::Applied;
+    }
+    let stored = tma_core::persistence::current_stamp(&rec.options, now)
         .ok()
         .flatten()
         .map(ReadResult::into_inner);
@@ -282,8 +301,7 @@ pub fn apply_event(
     let mapped = map_event(kind, payload, &manifest.manifest);
     // Model identity: registration-class payloads carry the agent's model as a top-level
     // string (Claude `SessionStart`, Codex/Cursor session-start). Stamp `@agent_model` last-write-wins
-    // — a pane's model changes only via the agent's own switcher — as a plain unguarded write, the same
-    // one the Codex rollout tail uses (rollout.rs), so hook and tail writing the same value never fight.
+    // through the independently owned metadata lane, shared with the Codex rollout tail.
     let register_model = matches!(mapped, Mapped::Register)
         .then(|| tma_core::hook_payload_model(payload))
         .flatten();
@@ -300,6 +318,91 @@ pub fn apply_event(
         notify.on,
         now,
     );
+    let subagent = matches!(plan, EventPlan::Subagents(_));
+    let mut observation =
+        persistence::PaneRead::from_options(rec.pane_id.clone(), rec.options.clone());
+    observation.target = pane.to_owned();
+    let Some(binding) = crate::metadata::bind_observed(
+        tmux,
+        observation,
+        event_session.as_deref(),
+        subagent,
+        Some(manifest),
+    ) else {
+        return EventOutcome::Applied;
+    };
+    if matches!(plan, EventPlan::Ignore) {
+        return EventOutcome::Applied;
+    }
+    let mut metadata = Vec::new();
+    if let EventPlan::Stamp {
+        register_session, ..
+    } = &plan
+    {
+        if let Some(session) = register_session {
+            metadata.push(OptionEdit::set(opt::SESSION, session));
+        }
+        if let Some(path) = event_transcript {
+            metadata.push(OptionEdit::set(opt::TRANSCRIPT, path));
+        }
+    }
+    if let Some(model) = register_model {
+        metadata.push(OptionEdit::set(opt::MODEL, model));
+    }
+    if let Some(endpoint) = register_endpoint {
+        metadata.push(OptionEdit::set(opt::API_ENDPOINT, endpoint));
+    }
+    if let EventPlan::Subagents(ids) = &plan {
+        metadata.push(if ids.is_empty() {
+            OptionEdit::unset(opt::SUBAGENTS)
+        } else {
+            OptionEdit::set(opt::SUBAGENTS, ids.join(" "))
+        });
+    }
+    let owner = stored.as_ref().and_then(|stamp| stamp.session.as_deref());
+    for (key, effect) in [
+        (
+            opt::PERMISSION_REQUEST,
+            permission_request_effect(kind, &plan, owner, event_session.as_deref(), payload),
+        ),
+        (
+            opt::QUESTION_REQUEST,
+            question_request_effect(kind, &plan, owner, event_session.as_deref(), payload),
+        ),
+    ] {
+        match effect {
+            PermReq::Set(id) => metadata.push(OptionEdit::set(key, id)),
+            PermReq::Clear => metadata.push(OptionEdit::unset(key)),
+            PermReq::None => {}
+        }
+    }
+    match pending_call_effect(kind, &plan, owner, event_session.as_deref(), payload) {
+        PendingCall::Set {
+            tool,
+            call,
+            summary,
+        } => metadata.extend([
+            OptionEdit::set(opt::PENDING_TOOL, tool),
+            OptionEdit::set(opt::PENDING_CALL, call),
+            OptionEdit::set(opt::PENDING_SUMMARY, summary),
+        ]),
+        PendingCall::Clear => metadata.extend([
+            OptionEdit::unset(opt::PENDING_TOOL),
+            OptionEdit::unset(opt::PENDING_CALL),
+            OptionEdit::unset(opt::PENDING_SUMMARY),
+        ]),
+        PendingCall::None => {}
+    }
+    let metadata_wrote = if matches!(plan, EventPlan::Deregister) {
+        crate::metadata::release(tmux, &binding)
+    } else if !metadata.is_empty()
+        || (matches!(plan, EventPlan::Stamp { .. })
+            && binding.expected.as_ref() != Some(&binding.next))
+    {
+        crate::metadata::write(tmux, &binding, &metadata, false)
+    } else {
+        false
+    };
     execute(
         tmux,
         &panes,
@@ -307,58 +410,11 @@ pub fn apply_event(
         manifest,
         stored.as_ref(),
         &plan,
-        event_transcript.as_deref(),
         notify,
         now,
+        (!matches!(plan, EventPlan::Deregister)).then_some(&binding.next),
     );
-    // Gated on the plan: a registration `decide` ignored (a foreign session's SessionStart under the
-    // subagent ownership guard) must not stamp its model over the owner's either.
-    if let Some(model) = register_model {
-        if plan.commits() {
-            let _ = tmux.apply(&[render::set_pane_option(pane, opt::MODEL, &model)]);
-        }
-    }
-    // The endpoint stamp, gated the same way as the model.
-    if let Some(endpoint) = register_endpoint {
-        if plan.commits() {
-            let _ = tmux.apply(&[render::set_pane_option(pane, opt::API_ENDPOINT, &endpoint)]);
-        }
-    }
-    // Permission-request tracking: stamp the pending id when a permission prompt opens, clear
-    // it on the edges that end the prompt (a working/idle transition, or a `permission.replied`).
-    // `permission.replied` maps to nothing yet still writes, so its clear counts as work applied.
-    let permission_wrote = apply_permission_request(
-        tmux,
-        pane,
-        kind,
-        &plan,
-        stored.as_ref(),
-        event_session.as_deref(),
-        payload,
-    );
-    // The question channel, the same shape over `@agent_question_request`: OpenCode's `que_*` id,
-    // kept apart from the permission id because they answer different endpoints.
-    let question_wrote = apply_question_request(
-        tmux,
-        pane,
-        kind,
-        &plan,
-        stored.as_ref(),
-        event_session.as_deref(),
-        payload,
-    );
-    // The pending-call trio (`@agent_pending_tool`/`_call`/`_summary`): stamped from Claude's
-    // `PermissionRequest` payload on the same edges, cleared on the same ones.
-    let pending_wrote = apply_pending_call(
-        tmux,
-        pane,
-        kind,
-        &plan,
-        stored.as_ref(),
-        event_session.as_deref(),
-        payload,
-    );
-    if plan.is_verdict() || permission_wrote || question_wrote || pending_wrote {
+    if plan.is_verdict() || metadata_wrote {
         EventOutcome::Applied
     } else {
         EventOutcome::Declined
@@ -368,8 +424,14 @@ pub fn apply_event(
 /// Is the agent's own process still in the pane's tree? The deregister carve-out's liveness test:
 /// one `ps` on a lifecycle-end event, never on the hot path. An unreadable process table (or a pane
 /// that vanished) answers "gone", which keeps the historical full-removal behavior.
-fn agent_still_running(panes: &[PaneRecord], pane: &str, manifest: &LoadedManifest) -> bool {
-    let Some(rec) = panes.iter().find(|r| r.pane_id == pane) else {
+fn agent_still_running(
+    tmux: &Tmux,
+    panes: &[PaneRecord],
+    pane: &str,
+    manifest: &LoadedManifest,
+) -> bool {
+    let actual = tmux.pane_format(pane, "#{pane_id}").unwrap_or_default();
+    let Some(rec) = panes.iter().find(|r| r.pane_id == actual) else {
         return false;
     };
     let Ok(procs) = tma_tmux::tmux::ps_all() else {
@@ -392,181 +454,113 @@ fn execute(
     manifest: &LoadedManifest,
     stored: Option<&StampedState>,
     plan: &EventPlan,
-    transcript: Option<&str>,
     policy: &NotifyPolicy<'_>,
     now: u64,
+    metadata_owner: Option<&tma_core::persistence::MetadataOwner>,
 ) {
-    let agent = manifest.name.as_str();
     match plan {
-        EventPlan::Unmapped | EventPlan::Ignore => {}
+        EventPlan::Unmapped | EventPlan::Ignore | EventPlan::Subagents(_) => {}
         EventPlan::Deregister => {
-            // A session ending is not proof the agent exited. pi runs a workflow's sub-sessions
-            // inside the live process and claude fires SessionEnd on `/clear`, so wiping the whole
-            // stamp here dropped a pane whose agent was still sitting there to the `unknown` floor
-            // (no prior stamp + no matching screen rule = nothing to publish) until the next event
-            // re-registered it. Remove the stamp only when nothing the manifest would claim is left
-            // in the pane's tree; otherwise end the session lane alone and leave the state tuple to
-            // the poll cycle, which removes the stamp the moment the pane stops being an agent pane.
-            let plan = if agent_still_running(panes, pane, manifest) {
-                StampPlan::EndSession
-            } else {
-                StampPlan::Remove
-            };
-            let _ = stamp::apply(tmux, panes, pane, &plan, true);
-        }
-        EventPlan::Subagents(ids) => {
-            // Bookkeeping only: no state, no summary recompute (state is unchanged).
-            let cmd = if ids.is_empty() {
-                render::unset_pane_option(pane, opt::SUBAGENTS)
-            } else {
-                render::set_pane_option(pane, opt::SUBAGENTS, &ids.join(" "))
-            };
-            let _ = tmux.apply(&[cmd]);
+            if !agent_still_running(tmux, panes, pane, manifest) {
+                let _ = stamp::apply_for_metadata(tmux, pane, &StampPlan::Remove, None, &[]);
+            }
         }
         EventPlan::Stamp {
             state,
             detail,
             set_attention,
-            register_session,
             record_turn,
             notify,
+            ..
         } => {
             let publish = Publish {
-                pane_id: pane.to_string(),
+                pane_id: pane.into(),
                 state: *state,
                 detail: detail.clone(),
                 source: Provenance::Hook,
                 evidence_at: now,
                 since: now,
                 stamped_at: now,
-                hash: stored.and_then(|s| s.hash),
-                pid: stored.map(|s| s.pid).unwrap_or(0),
-                name: agent.to_string(),
+                hash: stored.and_then(|stamp| stamp.hash),
+                pid: stored.map_or(0, |stamp| stamp.pid),
+                name: manifest.name.clone(),
                 set_attention: *set_attention,
                 episode_reset: false,
-                // A fresh hook event normally writes; the arbitration guard resolves races (two
-                // daemonless hooks, or a late ack-timeout direct-stamp trailing a newer daemon
-                // event) by evidence time, not finish order, so an older-fired event cannot clobber
-                // a strictly-newer stored one. A first or equal-age event still writes.
                 guard: Guard::HookArbitrate { evidence_at: now },
             };
-            let mut cmds = render::render_publish(&publish);
-            // Store-chain rule: the companions ride the same suppression guard as the state tuple,
-            // so an event that loses arbitration commits none of them. Appended unguarded, a loser
-            // would overwrite the winner's session, re-arm the notify marker, and roll a summary
-            // from a state that never committed.
-            if let Some(sess) = register_session {
-                cmds.push(render::set_pane_option_guarded(
-                    pane,
-                    opt::SESSION,
-                    publish.guard,
-                    sess,
-                ));
+            let companions: Vec<_> = record_turn
+                .then(|| OptionEdit::set(opt::TURN_AT, now.to_string()))
+                .into_iter()
+                .collect();
+            let Ok(applied) = stamp::apply_for_metadata(
+                tmux,
+                pane,
+                &StampPlan::Publish(publish),
+                metadata_owner,
+                &companions,
+            ) else {
+                return;
+            };
+            if !*notify {
+                return;
             }
-            // The transcript path rides that same guard: an event that loses arbitration must not
-            // point the pane at its own session's file. Set only when the payload carried a new one.
-            if let Some(path) = transcript {
-                cmds.push(render::set_pane_option_guarded(
-                    pane,
-                    opt::TRANSCRIPT,
-                    publish.guard,
-                    path,
-                ));
+            if !applied.committed
+                && !matches!(applied.read.projection(crate::now_ms()),
+                Ok(tma_core::persistence::ProjectionRead::Legacy(Some(ref current)))
+                    if current.clone().into_inner().state == *state
+                        && current.clone().into_inner().evidence_at == now)
+            {
+                return;
             }
-            // The turn-end instant, on the same guard as the state tuple: `@agent_since` is
-            // write-once per state run and cannot move on the idle→idle edge a second completion
-            // draws, so this is what the notify dedup and `wait --since` compare against
-            // (`StampedState::episode_at`). Written only when the turn end raised the marker.
-            if *record_turn {
-                cmds.push(render::set_pane_option_guarded(
-                    pane,
-                    opt::TURN_AT,
-                    publish.guard,
-                    &now.to_string(),
-                ));
+            let Some(observation) = AttentionObservation::from_read(applied.read, crate::now_ms())
+            else {
+                return;
+            };
+            let Some(trigger) = crate::notify::trigger_for(*state, *set_attention) else {
+                return;
+            };
+            let Ok(claim) = persistence::claim_observation(tmux, &observation, crate::now_ms)
+            else {
+                return;
+            };
+            if !claim.claimed() {
+                return;
             }
-            // Clamp the marker past the episode instant so a backward wall-clock step never writes
-            // a marker that predates the episode it dedups (which would re-fire). Under a monotone
-            // clock this is exactly `now`, so tested dedup is unchanged.
-            let mark_at = now.max(
-                stored
-                    .filter(|s| s.state == *state)
-                    .map_or(now, StampedState::episode_at),
+            let Some(mut rec) = panes
+                .iter()
+                .find(|record| record.pane_id == observation.read.pane_id)
+                .cloned()
+            else {
+                return;
+            };
+            rec.options = claim.winner().options.clone();
+            if crate::notify::muted(&rec, now) {
+                return;
+            }
+            let Some(current) = tma_core::persistence::current_stamp(&rec.options, crate::now_ms())
+                .ok()
+                .flatten()
+            else {
+                return;
+            };
+            let current = current.into_inner();
+            let n = crate::notify::notification_for(
+                &rec,
+                &manifest.name,
+                trigger.word(),
+                current
+                    .detail
+                    .as_ref()
+                    .map(|detail| detail.as_str().to_string()),
+                current.session,
+                current.since.max(current.turn_at),
+                now,
             );
-            // Write-before-fire: the guarded marker commits strictly before the display below, so a
-            // crash between them drops at most one notification. It commits iff the state write won.
-            if *notify {
-                cmds.push(render::set_pane_option_guarded(
-                    pane,
-                    opt::NOTIFIED_AT,
-                    publish.guard,
-                    &mark_at.to_string(),
-                ));
-            }
-            // Recompute the window and session rollups off the post-write state, guarded so a
-            // suppressed stamp holds the winner's summaries rather than clobbering them.
-            cmds.push(stamp::window_summary_command_guarded(
-                panes,
-                pane,
-                Some(*state),
-                publish.guard,
-            ));
-            cmds.push(stamp::session_summary_command_guarded(
-                panes,
-                pane,
-                Some(*state),
-                publish.guard,
-            ));
-            let _ = tmux.apply(&cmds);
-
-            // Fire iff the guarded marker committed (this event won arbitration). The guard is a
-            // server-side `-F` conditional, so "did the write win" is only knowable by reading back
-            // the store (one extra round-trip on the notify path). This matches the daemon's dispatch
-            // for at-most-once: a loser reads the winner's older value (`!= mark_at`) and stays
-            // silent. Compare against the clamped `mark_at`, not raw `now`.
-            let marker_won = *notify
-                && tmux
-                    .get_pane_option(pane, opt::NOTIFIED_AT)
-                    .ok()
-                    .flatten()
-                    .is_some_and(|m| m == mark_at.to_string());
-
-            // The caller resolved this pane out of the same `panes` read, so the lookup holds.
-            let rec = panes.iter().find(|r| r.pane_id == pane);
-            // `tma mute` suppresses the fire, never the write above: the episode is stamped and
-            // marked notified exactly as it would be unmuted, so nothing replays when the mute ends.
-            if let (true, Some(rec)) = (marker_won, rec.filter(|r| !crate::notify::muted(r, now))) {
-                // Daemonless direct-fire: the same [`crate::notify::fire`] the daemon uses
-                // (`display-message` + the resolved `notify.command`), strictly after the marker.
-                // The payload carries the trigger word (`blocked`/`done`), not the landing token
-                // (`idle` for a done fire); `notify` is only set for a notifiable transition.
-                let trigger = crate::notify::trigger_for(*state, *set_attention);
-                let word = trigger.map(|t| t.word()).unwrap_or_else(|| state.token());
-                // The trigger picks the command, so a `[notify.blocked]`/`[notify.done]` override
-                // routes here exactly as it does in the daemon's dispatch.
-                let command = trigger.and_then(|t| policy.commands.for_trigger(t));
-                // `since` is this event's own `now`, and that is also the correct ABSOLUTE
-                // `episode_ms`: the hook fires on the transition it just wrote, so the episode it
-                // belongs to starts at `now`. The row settles to the same instant — a state change
-                // writes `@agent_since = now`, and a turn end writes `@agent_turn_at = now` — so
-                // `max(@agent_since, @agent_turn_at)` reads `now` either way. The stale pre-write
-                // `rec`/`stored` values must NOT be used here; they name the previous episode.
-                let n = crate::notify::notification_for(
-                    rec,
-                    agent,
-                    word,
-                    detail.as_ref().map(|d| d.as_str().to_string()),
-                    stored.and_then(|s| s.session.clone()),
-                    now,
-                    now,
-                );
-                if let Some(mut child) = crate::notify::fire(tmux, &n, command, policy.sinks) {
-                    // Wait so the notification is delivered before the one-shot process exits. The
-                    // status is already in hand here, so record a failing sink rather than discard it.
-                    if let Ok(status) = child.wait() {
-                        if let Some(cmd) = command {
-                            crate::notify::failure::record_exit(cmd, &status, now);
-                        }
+            let command = policy.commands.for_trigger(trigger);
+            if let Some(mut child) = crate::notify::fire(tmux, &n, command, policy.sinks) {
+                if let Ok(status) = child.wait() {
+                    if let Some(command) = command {
+                        crate::notify::failure::record_exit(command, &status, now);
                     }
                 }
             }
@@ -608,6 +602,7 @@ mod tests {
     };
     use super::*;
     use tma_core::manifest::Manifest;
+    use tma_core::render;
     use tma_core::{AgentState, Detail};
     // The drift assertion cross-checks the relocated hook-event vocabulary.
     use crate::config::NotifyTrigger;

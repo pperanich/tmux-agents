@@ -30,7 +30,7 @@ fn stamp_blocked_claude(s: &Scratch, pane: &str) {
     s.set_opt(pane, "@agent_detail", "permission");
     s.set_opt(pane, "@agent_stamped_at", &now);
     s.set_opt(pane, "@agent_source", "capture");
-    s.set_opt(pane, "@agent_pid", "4242");
+    s.set_opt(pane, "@agent_pid", &s.get(pane, "#{pane_pid}"));
 }
 
 /// Stamp `pane` as a fresh `blocked/permission` opencode agent with a pending request id and an
@@ -83,7 +83,7 @@ fn stamp_idle_claude(s: &Scratch, pane: &str) {
     s.set_opt(pane, "@agent_state", "idle");
     s.set_opt(pane, "@agent_stamped_at", &now);
     s.set_opt(pane, "@agent_source", "capture");
-    s.set_opt(pane, "@agent_pid", "4242");
+    s.set_opt(pane, "@agent_pid", &s.get(pane, "#{pane_pid}"));
 }
 
 /// A user action with no `when`, so nothing but target resolution can decide the exit code: the
@@ -110,7 +110,7 @@ fn act(s: &Scratch, args: &[&str]) -> Output {
     } else {
         empty_config_path().to_path_buf()
     };
-    Command::new(s.bin())
+    s.command()
         .arg("act")
         .args(args)
         .arg("--socket-name")
@@ -852,7 +852,7 @@ fn the_menu_source_rides_the_env_and_nothing_else_does() {
     stamp_blocked_claude(&s, &pane);
 
     let run = |value: &str| {
-        Command::new(s.bin())
+        s.command()
             .args(["act", "approve", "--pane", &pane])
             .arg("--socket-name")
             .arg(&s.socket)
@@ -1152,7 +1152,7 @@ fn park_request(s: &Scratch, pane: &str, id: &str) -> std::path::PathBuf {
 /// A stand-in for the holding hook: poll the verdict file, append what it saw and when to
 /// `log`, then consume both files exactly as the real hold loop does. Runs until `stop` appears,
 /// so a SECOND verdict against the same request is observed rather than missed.
-fn spawn_fake_hook(s: &Scratch, id: &str, log: &std::path::Path) -> std::process::Child {
+fn spawn_fake_hook(s: &Scratch, id: &str, log: &std::path::Path) -> tma_test_support::DaemonGuard {
     let script = s.workdir.join("fake-hook.sh");
     std::fs::write(
         &script,
@@ -1172,13 +1172,15 @@ fn spawn_fake_hook(s: &Scratch, id: &str, log: &std::path::Path) -> std::process
         ),
     )
     .unwrap();
-    Command::new("sh")
-        .arg(&script)
-        .arg(&s.workdir)
-        .arg(log)
-        .arg(s.workdir.join("stop"))
-        .spawn()
-        .expect("spawn the fake hook")
+    tma_test_support::DaemonGuard::new(
+        Command::new("sh")
+            .arg(&script)
+            .arg(&s.workdir)
+            .arg(log)
+            .arg(s.workdir.join("stop"))
+            .spawn()
+            .expect("spawn the fake hook"),
+    )
 }
 
 /// The hook verdict is written under the held pane lock, once.
@@ -1255,7 +1257,7 @@ fn the_hook_verdict_is_written_once_under_the_lock() {
     // Give a second write time to land before counting; the hook polls every 50 ms.
     std::thread::sleep(std::time::Duration::from_millis(400));
     std::fs::write(s.workdir.join("stop"), b"").unwrap();
-    let _ = hook.wait();
+    assert!(hook.wait_exit(std::time::Duration::from_secs(5)));
     let observed = std::fs::read_to_string(&log).unwrap();
     let lines: Vec<&str> = observed.lines().collect();
     assert_eq!(

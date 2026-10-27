@@ -15,6 +15,7 @@
 
 pub mod control;
 pub mod lock;
+pub mod persistence;
 pub mod stamp;
 pub mod tmux;
 pub mod window_name;

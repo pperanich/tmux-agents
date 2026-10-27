@@ -70,7 +70,8 @@ run, on a machine you own, answered from wherever you are.
 
 Six agents ship with detection out of the box. `tma` reads state from three
 kinds of evidence: hook events the agent fires, its on-screen chrome, and the
-process in the pane. The table below is the shipped coverage; the full,
+process in the pane. Daemon OSC 7501 collection adds verified native Pi
+reporting. The table below separates that from hook coverage; the full,
 evidence-backed record is in
 [docs/reference/agent-coverage.md](docs/reference/agent-coverage.md).
 
@@ -81,11 +82,16 @@ evidence-backed record is in
 | OpenCode | working / idle / blocked (registers on start; no end hook) | hook + screen | blocked | process `opencode` |
 | Gemini CLI | working / idle / blocked / lifecycle | hook + screen | working, blocked | process `node`, narrowed by title |
 | Cursor CLI | working / idle / lifecycle | screen only | working, blocked | process `node`/`agent`, title `Cursor Agent` |
-| pi | working / idle / lifecycle | none (pi auto-approves tools) | working | process `node`/`pi`, title `π …` |
+| pi | working / idle / lifecycle | native OSC dialog signal when enabled; no hook/screen mapping | working | process `node`/`pi`, title `π …` |
 
 `blocked` is hook-covered for four agents and rides a screen rule for Cursor
-(which exposes no permission hook). pi has no blocked state at all: it runs
-tools without a permission prompt, so there is nothing to detect. Agents that
+(which exposes no permission hook). Pi's extension has no blocked mapping, but
+native Pi 1.3.0 confirmation dialogs report it with per-process
+`PI_PROGRAM_STATUS=1` and daemon `[program_status] mode = "prefer"`.
+The mode defaults to prefer. Every recognized agent accepts its own OSC app name
+automatically; Claude also accepts `claude-code`. See [activation and limits](docs/how-to/run-the-daemon.md#use-native-agent-state).
+Codex needs no emission override; Claude still needs a capability reply that
+stock tmux does not provide. Native lifecycle coverage for both remains unverified. Agents that
 run under a generic process name (`node`) are disambiguated by their pane title.
 
 Adding an agent `tma` does not ship is one TOML manifest, no code: identity,

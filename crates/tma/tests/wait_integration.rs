@@ -5,11 +5,9 @@
 //! shell pane idle → blocked mid-wait via `send-keys`. Scratch `tmux -L` server, killed on drop.
 
 use std::io::{Read, Write};
-use std::os::unix::net::UnixListener;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::OnceLock;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use tma_test_support::{
@@ -77,6 +75,18 @@ const BLOCKED_CHROME: &str = "\\n\\n\\n\\n\
     │ ❯ 1. Yes                 │\\n\
     ╰──────────────────────────╯\\n";
 
+fn flip_to_blocked(s: &Scratch, target: &str) {
+    // macOS sh's C-locale line editor treats Unicode keystrokes as editing commands.
+    // Source the prompt from a file so only ASCII travels through that line editor.
+    let script = s.workdir.join("blocked.sh");
+    std::fs::write(&script, format!("printf '{BLOCKED_CHROME}'\n")).unwrap();
+    let command = format!(". '{}'", script.display());
+    assert!(s
+        .tmux(&["send-keys", "-t", target, &command, "Enter"])
+        .status
+        .success());
+}
+
 /// Launch a static detached agent pane (`chrome`, then a long-lived `sleep`) and return its pane id.
 /// The marker (`READY` or the prompt text) proves the chrome rendered and the shell reached `exec`.
 fn static_agent(s: &Scratch, sess: &str, chrome: &str, marker: &str) -> String {
@@ -116,7 +126,7 @@ fn spawn_staged_wait(s: &Scratch, args: &[&str]) -> Child {
 }
 
 fn spawn_wait_with_config(s: &Scratch, config: &Path, args: &[&str]) -> Child {
-    Command::new(s.bin())
+    s.command()
         .arg("wait")
         .args(args)
         .arg("--socket-name")
@@ -391,10 +401,7 @@ fn transition_idle_to_blocked_unblocks() {
         return;
     }
     let s = Scratch::new("wait-transition");
-    assert!(s
-        .tmux(&["new-session", "-d", "-s", "work", "-x", "100", "-y", "24"])
-        .status
-        .success());
+    s.new_shell_session("work", 100, 24);
     // Show idle chrome and let it render, then discover the (shell) process names.
     s.tmux(&["send-keys", "-t", "work", "printf 'READY\\n'", "Enter"]);
     assert!(
@@ -423,11 +430,11 @@ fn transition_idle_to_blocked_unblocks() {
         "the waiter never got through its entry cycle"
     );
 
-    let flip = format!("printf '{BLOCKED_CHROME}'");
-    s.tmux(&["send-keys", "-t", "work", &flip, "Enter"]);
+    flip_to_blocked(&s, "work");
     assert!(
         wait_capture_contains(&s.socket, "work", "Do you want to proceed?", POLL_CEILING),
-        "blocked chrome did not render after the flip"
+        "blocked chrome did not render after the flip{}",
+        s.forensics(&[&pane])
     );
 
     let code = await_exit(&mut child, POLL_CEILING);
@@ -544,10 +551,7 @@ fn agent_pins_to_first_observed_ignoring_a_later_second_pane() {
     }
     let s = Scratch::new("wait-pin");
     // Pane A: an interactive shell (so it can be flipped to blocked mid-wait) showing idle chrome.
-    assert!(s
-        .tmux(&["new-session", "-d", "-s", "a", "-x", "100", "-y", "24"])
-        .status
-        .success());
+    s.new_shell_session("a", 100, 24);
     s.tmux(&["send-keys", "-t", "a", "printf 'READY\\n'", "Enter"]);
     assert!(
         wait_capture_contains(&s.socket, "a", "READY", POLL_CEILING),
@@ -576,10 +580,7 @@ fn agent_pins_to_first_observed_ignoring_a_later_second_pane() {
 
     // Pane B: a second interactive shell (same shell ⇒ same agent name), also idle. Now `--agent
     // agent` matches TWO panes; a non-pinned waiter would exit 1 on its next cycle.
-    assert!(s
-        .tmux(&["new-session", "-d", "-s", "b", "-x", "100", "-y", "24"])
-        .status
-        .success());
+    s.new_shell_session("b", 100, 24);
     s.tmux(&["send-keys", "-t", "b", "printf 'READY\\n'", "Enter"]);
     assert!(
         wait_capture_contains(&s.socket, "b", "READY", POLL_CEILING),
@@ -605,11 +606,11 @@ fn agent_pins_to_first_observed_ignoring_a_later_second_pane() {
     );
 
     // Flip the PINNED pane A to blocked; the waiter returns on it, naming A, not B.
-    let flip = format!("printf '{BLOCKED_CHROME}'");
-    s.tmux(&["send-keys", "-t", "a", &flip, "Enter"]);
+    flip_to_blocked(&s, "a");
     assert!(
         wait_capture_contains(&s.socket, "a", "Do you want to proceed?", POLL_CEILING),
-        "pane A blocked chrome did not render after the flip"
+        "pane A blocked chrome did not render after the flip{}",
+        s.forensics(&[&pane_a, &pane_b])
     );
 
     let code = await_exit(&mut child, POLL_CEILING);
@@ -761,10 +762,7 @@ fn agent_death_under_a_live_pane_exits_4() {
         return;
     }
     let s = Scratch::new("wait-crash");
-    assert!(s
-        .tmux(&["new-session", "-d", "-s", "work", "-x", "100", "-y", "24"])
-        .status
-        .success());
+    s.new_shell_session("work", 100, 24);
     s.tmux(&[
         "send-keys",
         "-t",
@@ -1064,7 +1062,8 @@ impl Drop for DaemonChild {
 /// `clients` (daemon up) and `wait_subscribers` (push mode active). It shares the scratch's socket +
 /// manifest-dir, so it keys the SAME per-server socket the wait client probes.
 fn spawn_daemon(s: &Scratch, status: &std::path::Path) -> DaemonChild {
-    let child = Command::new(s.bin())
+    let child = s
+        .command()
         .arg("daemon")
         .args(["--socket-name", &s.socket])
         .arg("--manifest-dir")
@@ -1107,7 +1106,8 @@ fn write_hook_manifest(s: &Scratch, names: &[String]) {
 /// Fire `tma event --agent agent --kind Block` at the daemon (as a hook would), delivering the frame
 /// over the per-server socket. The daemon applies the `blocked` stamp and pushes its subscribers.
 fn fire_block(s: &Scratch, pane: &str) {
-    let mut child = Command::new(s.bin())
+    let mut child = s
+        .command()
         .args([
             "event",
             "--agent",
@@ -1150,7 +1150,7 @@ fn push_edge_returns_well_under_the_poll_tick() {
     if !have_tmux() {
         return;
     }
-    let s = Scratch::new("wait-push");
+    let s = Scratch::new_daemon("wait-push");
     let pane = static_agent(&s, "work", "READY\\n", "READY");
     write_hook_manifest(&s, &pane_process_names(&s, "work"));
     let status = s.workdir.join("daemon-status");
@@ -1159,7 +1159,8 @@ fn push_edge_returns_well_under_the_poll_tick() {
     // client), unrelated to the latency proof, which only starts its clock after the push fires below.
     assert!(
         wait_status_eq(&status, "clients", "1", POLL_CEILING),
-        "daemon came up with one control client"
+        "daemon came up with one control client{}",
+        s.forensics(&[&pane])
     );
 
     // A 60 s `--timeout` (belt-floor unaffected: the push-fallback cap is min(5 s, remaining)) so a
@@ -1212,14 +1213,18 @@ fn daemon_killed_mid_wait_degrades_and_still_times_out() {
     if !have_tmux() {
         return;
     }
-    let s = Scratch::new("wait-daemon-die");
+    let s = Scratch::new_daemon("wait-daemon-die");
     let pane = static_agent(&s, "work", "READY\\n", "READY");
     // Capture-only manifest: the pane stays idle and never reaches blocked, so the ONLY way the wait
     // ends is the timeout, which must still fire after the daemon dies.
     write_manifest(&s, &pane_process_names(&s, "work"));
     let status = s.workdir.join("daemon-status");
     let mut daemon = spawn_daemon(&s, &status);
-    assert!(wait_status_eq(&status, "clients", "1", POLL_CEILING));
+    assert!(
+        wait_status_eq(&status, "clients", "1", POLL_CEILING),
+        "daemon came up with one control client{}",
+        s.forensics(&[&pane])
+    );
 
     let mut child = spawn_wait(
         &s,
@@ -1251,7 +1256,7 @@ fn version_skew_subscribe_falls_back_to_poll() {
     if !have_tmux() {
         return;
     }
-    let s = Scratch::new("wait-skew");
+    let s = Scratch::new_daemon("wait-skew");
     let pane = static_agent(&s, "work", "READY\\n", "READY");
     write_manifest(&s, &pane_process_names(&s, "work"));
     assert!(s.tma(&["ls"]).status.success()); // populate stamps (pane is idle)
@@ -1261,34 +1266,11 @@ fn version_skew_subscribe_falls_back_to_poll() {
     // macOS `/tmp` vs `/private/tmp`), then derive the keyed path so both land on one socket.
     let socket_path = s.display("work", "#{socket_path}");
     assert!(!socket_path.is_empty(), "resolved a server socket path");
-    let keyed = tma_runtime::ipc::paths_for(&socket_path);
-    std::fs::create_dir_all(&keyed.dir).unwrap();
-    let _ = std::fs::remove_file(&keyed.socket);
-    let listener = UnixListener::bind(&keyed.socket).unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let stop = Arc::new(AtomicBool::new(false));
-    let hits = Arc::new(AtomicUsize::new(0));
-    let (stop2, hits2) = (stop.clone(), hits.clone());
-    let fake = std::thread::spawn(move || {
-        // Hold every accepted connection OPEN for the thread's life: dropping `c` would
-        // let EOF, not just the NAK, drive the client's degrade.
-        let mut held: Vec<_> = Vec::new();
-        while !stop2.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((mut c, _)) => {
-                    hits2.fetch_add(1, Ordering::Relaxed);
-                    let mut buf = [0u8; 8];
-                    let _ = c.read(&mut buf); // consume the subscribe frame
-                    let _ = c.write_all(&[0x15]); // NAK: an old daemon rejects the unknown magic
-                    held.push(c); // keep the socket open; do NOT close it
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(_) => break,
-            }
-        }
-    });
+    let socket = s.workdir.join("tma").join(format!(
+        "{}.sock",
+        tma_runtime::ipc::socket_key(&socket_path)
+    ));
+    let fake = tma_test_support::NakServer::new(socket);
 
     let start = Instant::now();
     let out = s.tma(&[
@@ -1315,12 +1297,10 @@ fn version_skew_subscribe_falls_back_to_poll() {
     // Exactly one accept: the NAK degraded the ONE subscribe attempt to the poll loop, and a poll
     // loop never reconnects. `>= 1` would also admit a reconnect storm; `== 1` pins the honest path.
     assert_eq!(
-        hits.load(Ordering::Relaxed),
+        fake.hits(),
         1,
         "the wait subscribed exactly once and was NAKed (no reconnect, no vacuous absent-socket pass)"
     );
 
-    stop.store(true, Ordering::Relaxed);
-    let _ = fake.join();
-    let _ = std::fs::remove_file(&keyed.socket);
+    drop(fake);
 }

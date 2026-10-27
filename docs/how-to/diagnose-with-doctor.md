@@ -123,6 +123,46 @@ context channel would have to size its gauge from that table. No shipped channel
 does, so on a normal install that line is the model name and nothing else.
 `api:` flags a pending permission request with no reachable endpoint.
 
+## Check native program coverage
+
+Doctor's `program: off|observe|prefer` line is the configured mode. It is not an
+agent coverage verdict. In prefer mode a covered pane gets a separate
+`program: observed report with live authority` line and state hooks are optional
+there. The public source still says `hook` for compatibility, so that token
+alone cannot distinguish a native report from a hook event.
+
+If the line is absent, confirm the daemon is running, launch verified Pi with
+`PI_PROGRAM_STATUS=1`, and request work after collection starts. A manifest
+alias or capability query is insufficient. After attach, restart, a gap or a
+mode/eligibility transition, a fresh complete report must follow a safe framing
+boundary. A silent application may remain on fallback. Claude's tested probe
+only reached theme onboarding and supplies no native coverage claim.
+
+`tma debug explain %0` shows the persisted program-status evidence when live
+authority validates (use your pane id). It does not expose the daemon's full
+raw record store. Missing process birth identity, ignored/remote/nested panes,
+stream loss and unsupported guarded writes all prevent native authority.
+An effective nonempty `after-set-option` hook disables this capability for
+that target; tma preserves the user's hook and uses protected fallback.
+
+Internal test status fields distinguish `program_reports` from
+`program_queries`, and report per-pane coverage/recovery, owner/epoch,
+last-report time, rejection/overflow counts, work-budget loss, capability/lease
+loss and cleanup uncertainty. Those hidden status fields are an unstable test
+interface, not additions to the public doctor JSON schema. A growing duplicate
+counter with no publication growth can be healthy. Recovery needs fresh
+evidence; increasing report age during healthy silence is not a timeout.
+
+For attention that remains after navigation, run `tma install-hooks pi --check`
+and `tma doctor` to check generated focus-hook drift. Use
+`tma install-hooks pi` to review and apply regeneration if needed. It also
+installs Pi's agent extension; hookless native coverage itself does not require
+this step. Captured revision mismatch can deliberately leave attention standing
+after a newer result or an independent metadata refresh. Unmarked/custom older
+focus strings must be regenerated to gain dispatch-time capture protection.
+See [the hook guide](install-agent-hooks.md) for the capture boundary and
+manual-clear behavior.
+
 ## A pane that is not listed at all
 
 If the pane you care about has no line under `panes`, doctor has already told you

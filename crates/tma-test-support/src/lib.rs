@@ -335,6 +335,20 @@ fn without_ambient_tmux(cmd: &mut Command) -> &mut Command {
     cmd.env_remove("TMUX").env_remove("TMUX_PANE")
 }
 
+/// A tma child with owned home/config, even if a scratch-server startup probe recreates
+/// its server. Socket selection remains the caller's responsibility. Later overrides win.
+pub fn isolated_tma_command(workdir: &Path) -> Command {
+    let home = workdir.join("home");
+    let config = home.join(".config");
+    std::fs::create_dir_all(&config).expect("create isolated test home");
+    let mut cmd = Command::new(tma_bin());
+    without_ambient_tmux(&mut cmd);
+    cmd.env("HOME", home)
+        .env("XDG_CONFIG_HOME", config)
+        .env("TMA_CONFIG", empty_config_path());
+    cmd
+}
+
 /// Run a tmux command against the scratch `-L` socket with `-f /dev/null` (isolates the server: no
 /// config loaded). The server-spawning `new-session` retries once on a transient parallel-startup fail.
 pub fn scratch_tmux(socket: &str, args: &[&str]) -> std::process::Output {
@@ -797,12 +811,11 @@ impl Scratch {
     }
 
     /// A `tma` [`Command`] pre-wired for the daemon suites: the on-demand binary, the workdir as private
-    /// `XDG_RUNTIME_DIR` (daemon socket/lock never touch a real `~/tma`), `TMA_CONFIG` pinned empty.
+    /// `HOME`/`XDG_CONFIG_HOME` and `XDG_RUNTIME_DIR` are isolated; `TMA_CONFIG` is pinned empty.
+    /// Explicit environment overrides added by the caller take precedence.
     pub fn command(&self) -> Command {
-        let mut cmd = Command::new(self.bin());
-        without_ambient_tmux(&mut cmd);
+        let mut cmd = isolated_tma_command(&self.workdir);
         cmd.env("XDG_RUNTIME_DIR", &self.workdir);
-        cmd.env("TMA_CONFIG", empty_config_path());
         cmd
     }
 
@@ -946,7 +959,7 @@ impl Scratch {
     /// Run `tma <args>` against the scratch server + this suite's manifest dir (the workdir),
     /// with the real user config pinned out via `TMA_CONFIG`.
     pub fn tma(&self, args: &[&str]) -> Output {
-        without_ambient_tmux(&mut Command::new(self.bin()))
+        self.command()
             .args(args)
             .arg("--socket-name")
             .arg(&self.socket)
@@ -992,16 +1005,31 @@ impl Scratch {
     /// The pane is returned only once that prompt is on screen: the shell is then reading input, so
     /// a caller's keys land in it rather than in the pty buffer of a process still starting up.
     pub fn new_shell_pane(&self) -> String {
+        self.new_shell_pane_with(None, 80, 24)
+    }
+
+    /// The isolated interactive shell of [`Scratch::new_shell_pane`], in a named, sized session.
+    pub fn new_shell_session(&self, name: &str, width: u16, height: u16) -> String {
+        self.new_shell_pane_with(Some(name), width, height)
+    }
+
+    fn new_shell_pane_with(&self, name: Option<&str>, width: u16, height: u16) -> String {
         let path = std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+        // Expanded by the fresh pane's shell, after tmux supplies its owned pane id. TUI PID
+        // advertisements need that context even though the parent command scrubs ambient tmux.
         let shell = format!(
-            "exec env -i PATH={path} HOME={home} TERM=xterm-256color PS1='{SHELL_PROMPT}' sh -i",
+            "exec env -i PATH={path} HOME={home} TMUX_PANE=\"$TMUX_PANE\" TERM=xterm-256color PS1='{SHELL_PROMPT}' sh -i",
             home = self.workdir.display()
         );
-        assert!(self
-            .tmux(&["new-session", "-d", "-x", "80", "-y", "24", &shell])
-            .status
-            .success());
-        let pane = self.get("", "#{pane_id}");
+        let width = width.to_string();
+        let height = height.to_string();
+        let mut args = vec!["new-session", "-d", "-x", &width, "-y", &height];
+        if let Some(name) = name {
+            args.extend(["-s", name]);
+        }
+        args.push(&shell);
+        assert!(self.tmux(&args).status.success());
+        let pane = self.get(name.unwrap_or(""), "#{pane_id}");
         assert!(pane.starts_with('%'), "unexpected pane id {pane:?}");
         // `capture-pane` right-trims every line, so an empty prompt reads without its trailing
         // space; match the trimmed form. (With a keystroke echoed after it the space is preserved,
@@ -1019,7 +1047,7 @@ impl Scratch {
     pub fn event(&self, agent: &str, kind: &str, pane: &str, payload: &str) -> Output {
         let path = self.workdir.join(format!("payload_{kind}_{pane}"));
         std::fs::write(&path, payload).unwrap();
-        without_ambient_tmux(&mut Command::new(self.bin()))
+        self.command()
             .args(["event", "--agent", agent, "--kind", kind])
             .args(["--socket-name", &self.socket])
             .arg("--manifest-dir")
@@ -1035,7 +1063,8 @@ impl Scratch {
 
     /// Run `tma ls --json` against this scratch server + `agents/` manifest dir, returning stdout.
     pub fn ls_json(&self) -> String {
-        let out = without_ambient_tmux(&mut Command::new(self.bin()))
+        let out = self
+            .command()
             .args(["ls", "--json"])
             .args(["--socket-name", &self.socket])
             .arg("--manifest-dir")
@@ -1257,6 +1286,78 @@ pub struct DaemonGuard {
     child: Child,
 }
 
+/// A bounded old-daemon fixture which NAKs real subscribe frames while keeping the peer open.
+/// The caller supplies its owned child-runtime socket path.
+pub struct NakServer {
+    stop: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    hits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    thread: Option<std::thread::JoinHandle<()>>,
+    socket: PathBuf,
+}
+
+impl NakServer {
+    pub fn new(socket: PathBuf) -> Self {
+        use std::io::{Read, Write};
+        use std::sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            Arc,
+        };
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(&socket).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let hits = Arc::new(AtomicUsize::new(0));
+        let (stopped, accepted) = (Arc::clone(&stop), Arc::clone(&hits));
+        let thread = std::thread::spawn(move || {
+            let mut held = Vec::new();
+            while !stopped.load(Ordering::Relaxed) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        assert!(held.len() < 32, "bounded subscribe connections");
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(200)))
+                            .unwrap();
+                        stream
+                            .set_write_timeout(Some(Duration::from_millis(200)))
+                            .unwrap();
+                        let mut magic = [0; 4];
+                        stream.read_exact(&mut magic).expect("subscribe frame");
+                        assert_eq!(&magic, b"TMAS");
+                        stream.write_all(&[0x15]).unwrap();
+                        accepted.fetch_add(1, Ordering::Relaxed);
+                        held.push(stream);
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("fake daemon accept: {e}"),
+                }
+            }
+        });
+        Self {
+            stop,
+            hits,
+            thread: Some(thread),
+            socket,
+        }
+    }
+
+    pub fn hits(&self) -> usize {
+        self.hits.load(std::sync::atomic::Ordering::Relaxed)
+    }
+}
+
+impl Drop for NakServer {
+    fn drop(&mut self) {
+        self.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        let result = self.thread.take().unwrap().join();
+        let _ = std::fs::remove_file(&self.socket);
+        if !std::thread::panicking() {
+            result.unwrap();
+        }
+    }
+}
+
 impl DaemonGuard {
     /// Wrap an already-spawned daemon child so it is reaped on drop.
     pub fn new(child: Child) -> DaemonGuard {
@@ -1266,6 +1367,11 @@ impl DaemonGuard {
     /// The daemon process id (for tests that inspect or compare the running instance).
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Capture actual child liveness/exit status before failure teardown reaps it.
+    pub fn child_status(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+        self.child.try_wait()
     }
 
     /// Wait up to `timeout` for the daemon to exit on its own, reaping it. `true` if it exited.
@@ -1312,6 +1418,77 @@ impl Drop for Scratch {
 mod tests {
     use super::*;
 
+    #[test]
+    fn scratch_commands_isolate_home_even_when_tmux_reads_default_configuration() {
+        let _gate = DaemonTestGuard::acquire();
+        if !tmux_available() {
+            return;
+        }
+        let scratch = Scratch::new_daemon("home_isolation");
+        let mut template = scratch.command();
+        let child_home = scratch.workdir.join("home");
+        let child_config = child_home.join(".config");
+        let env: BTreeMap<_, _> = template
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(std::ffi::OsStr::to_owned)))
+            .collect();
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("HOME")),
+            Some(&Some(child_home.clone().into_os_string()))
+        );
+        assert_eq!(
+            env.get(std::ffi::OsStr::new("XDG_CONFIG_HOME")),
+            Some(&Some(child_config.into_os_string()))
+        );
+        let sentinel = scratch.workdir.join("owned-default-config-loaded");
+        std::fs::write(
+            child_home.join(".tmux.conf"),
+            format!("run-shell 'touch {}'\n", sentinel.display()),
+        )
+        .unwrap();
+        let mut child = Command::new("tmux");
+        for (key, value) in template.get_envs() {
+            match value {
+                Some(value) => {
+                    child.env(key, value);
+                }
+                None => {
+                    child.env_remove(key);
+                }
+            }
+        }
+        // Deliberately omit -f to model a startup probe recreating its server.
+        // Both the socket and the default config are explicitly fixture-owned.
+        let output = child
+            .args([
+                "-L",
+                &scratch.socket,
+                "new-session",
+                "-d",
+                "-s",
+                "sentinel",
+                "exec sleep 60",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        poll_until("owned default tmux config sentinel", || sentinel.exists());
+        let override_home = scratch.workdir.join("explicit-override");
+        template.env("HOME", &override_home);
+        assert_eq!(
+            template
+                .get_envs()
+                .find(|(key, _)| *key == "HOME")
+                .unwrap()
+                .1,
+            Some(override_home.as_os_str())
+        );
+    }
+
     /// The daemon-test gate cannot cross the `Command::spawn` exec boundary. This pins the property
     /// H1 depends on instead of relying on an undocumented assumption about `OpenOptions`.
     #[test]
@@ -1354,7 +1531,15 @@ mod tests {
     fn cleanup_spares_the_socket_of_a_live_holder() {
         let s = Scratch::new("cleanup_live");
         assert!(s
-            .tmux(&["new-session", "-d", "-x", "80", "-y", "24"])
+            .tmux(&[
+                "new-session",
+                "-d",
+                "-x",
+                "80",
+                "-y",
+                "24",
+                "exec sleep 100000",
+            ])
             .status
             .success());
         let path = scratch_socket_path(&s.socket);

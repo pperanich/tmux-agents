@@ -232,7 +232,7 @@ fn run_stamp(args: StampArgs, server: &tmux::Server) -> ExitCode {
     // The debug harness exercises the guarded write path explicitly (guards are passed on the
     // command line); it never degrades. The advisory path is driven by the poll cycle.
     match stamp::apply(&tmux, &panes, &args.pane, &plan, true) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(_) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("tma: {err}");
             ExitCode::FAILURE

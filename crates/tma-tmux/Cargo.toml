@@ -18,5 +18,10 @@ thiserror.workspace = true
 # no std equivalent; rustix is the workspace's safe syscall layer.
 rustix = { workspace = true }
 
+[target.'cfg(target_os = "macos")'.dependencies]
+# Safe coherent Darwin process metadata and microsecond creation time. Its
+# generated bindings need libclang/SDK headers; no workspace libc or unsafe.
+libproc = "=0.14.11"
+
 [dev-dependencies]
 tma-test-support = { path = "../tma-test-support" }

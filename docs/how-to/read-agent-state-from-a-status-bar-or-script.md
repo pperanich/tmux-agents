@@ -101,6 +101,13 @@ polls, `tma doctor` says so:
 ambient: NOT polling — nothing invokes `tma status`; add `#(tma status)` to status-right (required ambient driver)
 ```
 
+Native OSC 7501 state adds a separate validity check: an old evidence/stamp
+timestamp can still describe a healthy silent agent while its daemon renews
+the collector lease. Direct option reads do not validate that lease or the
+process/stream owner. Use `tma ls` for the resolved current row and `tma doctor`
+to distinguish live native authority from fallback. Polling cannot replace
+the daemon's observation of native reports.
+
 See [Drive an external bar](drive-an-external-bar.md)
-for the driver recipes, and [Run the daemon](run-the-daemon.md) for the two setups
-where a driver alone is not enough.
+for the driver recipes, and [Run the daemon](run-the-daemon.md) for resident
+collection and detached/status-off operation.

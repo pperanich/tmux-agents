@@ -21,6 +21,16 @@ on = ["blocked", "done"]
 `blocked` covers "an agent is waiting on you"; `done` covers "an agent finished
 while you were elsewhere". These are the two moments worth interrupting for.
 
+With native OSC 7501 authority, `done` also carries a stopped failure result as
+`state = "done", detail = "error"` in the notification payload (the pane state
+is `idle`). The displayed message names
+failure. Check `detail` in your own command before calling it a success. This
+does not add an `error` state or notification trigger, and a failure result
+cannot authorize approval. Exact result-generation claims keep a repeated
+report or a restored spent result from firing again; external delivery remains
+at-most-once admission rather than exactly-once delivery. Observe mode produces
+no protocol notifications.
+
 ## Ring the terminal bell
 
 The simplest signal needs no external tooling. It rings the bell of the pane the

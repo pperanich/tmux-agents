@@ -61,13 +61,17 @@ onto two other axes so the state token stays stable:
   it comes down on your first keystroke back inside it. A
   finished agent is `idle` with attention still set, which
   the surfaces render as the distinct **done** glyph. A mark that came down goes
-  back up on the NEXT completion, and it has to be raised by the hook that reports
-  the turn ending, not by the fold: the fold sees only states, and the second
+  back up on the NEXT completion. In baseline detection it is raised by the hook
+  that reports the turn ending: the fold sees only states, and the second
   completion of a pane that never visibly worked in between is an `idle`→`idle`
   edge it cannot tell from a quiet idle pane. The manifest names that hook
   (`turn_end`), the intake stamps `@agent_turn_at` when it raises, and one turn
   end reported on two channels (codex sends both `Stop` and `notify`) still marks
-  one completion, because the second finds the mark already standing.
+  one completion, because the second finds the mark already standing. Native
+  program results carry their own record/work-generation identity and can also
+  distinguish an idle-to-idle completion. Their exact result acknowledgement
+  prevents a repeated result, or a dialog restoring a spent result, from
+  re-arming attention.
   Keeping **done** on this
   separate flag rather than making it a fifth state token is deliberate: the
   closed `state` vocabulary stays four tokens, and a script reading `state` never
@@ -92,6 +96,17 @@ onto two other axes so the state token stays stable:
   output without touching the keyboard looks exactly like a person who is not
   there, so their mark stands until they type or move.
 
+For program-owned results, picker/watch acknowledgement keeps the observation
+shown in that row. Independently, a focus hook can mark a result already visible
+on arrival as seen. Generated hooks capture the session, pane and bounded
+revision/presentation at tmux hook dispatch and format expansion. Delayed
+handling must still match those facts. Earlier queued hooks can delay capture
+beyond physical navigation, and a metadata/notification receipt refresh can
+safely leave attention standing. Known hook contexts without capture cannot
+acknowledge program state; unmarked/custom old commands need regeneration.
+See [install and repair the focus hooks](../how-to/install-agent-hooks.md).
+Hookless native activation does not require installing these hooks.
+
 ### The same four distinctions, arrived at independently
 
 The strongest evidence that these are the natural cuts is that an agent vendor
@@ -107,19 +122,61 @@ the case that argues for the axis split rather than against it: an error is a
 reason, so it belongs on the detail axis, and it is the declared `error` detail
 token rather than a fifth state.
 
-The two flag names line up with tma's detail tokens, though only one of them
-exactly. `waitingOnApproval` is `permission`, the same distinction under another
-name. `waitingOnUserInput` has no exact counterpart: the nearest token is
-`question`, declared in `tma-core` and not yet emitted by any bundled manifest,
-so the honest statement is that the two vocabularies agree on the distinction and
-not on the word. Publishing the token set as something another tool can write to
+The two flag names line up with tma's detail tokens. `waitingOnApproval` maps to
+`permission`; `waitingOnUserInput` maps to `question`, which OpenCode's bundled
+manifest emits for its question dialog and hook event. Native blocked reports
+can also carry `question`. Publishing the token set as something another tool
+can write to
 follows from all of this, and is written down as [the `@agent_state`
 contract](../reference/agent-state-contract.md).
 
-## Three evidence sources, one ranking
+## Native authority, then baseline evidence
 
-`tma` learns a pane's state from three kinds of evidence, in descending
-fidelity:
+With `[program_status] mode = "prefer"`, the daemon can use a selected OSC 7501
+report before the baseline fold. This is direct application evidence, bound to
+the current process birth chain, stream epoch and live collector lease. Its
+authority wins over hook timestamps, screen chrome, dwell/decay, history view
+and a temporary foreground editor or pager. The public source remains `hook`
+for compatibility; private ownership distinguishes the actual origin.
+
+Every independently recognized local agent is eligible without a per-agent
+opt-in. Reports match the manifest's filename stem automatically; optional
+manifest aliases cover different emitter names, such as `claude-code` for
+`claude`. App filtering keeps a child tool's completion from completing the
+agent's turn. Since every process in a pane shares its output stream, the name
+is collision avoidance, not emitter authentication. A first anonymous report
+cannot establish ownership; later records can inherit an established lineage.
+
+Authority is conditional on observation coverage, not report age. A silent
+agent keeps its state while the daemon renews the collector lease. Clear removes
+the named record subtree; another eligible record can still supply state. If
+none remains, authority is released. Process departure/replacement, an
+observation gap, incompatible mode/eligibility changes or loss of guarded
+writes revoke that authority before fallback. A
+fresh stream starts with unknown framing, so the first ST-terminated sequence
+may only synchronize it. Reattach, resume or a query cannot revive old reports;
+the collector needs a subsequent complete eligible report. Persisted normalized
+result history can suppress a duplicate effect after a fresh process-validated
+report, but cannot supply present authority on its own.
+
+The reducer retains typed protocol records in memory and selects eligible
+blocked, working, error, done, then idle records in that order. An active child
+can therefore keep an idle root from declaring the pane settled. Acknowledged
+or superseded terminal results contribute a settled baseline. `done` projects
+to `idle`; a fresh `error` projects to `idle/error` and means execution stopped,
+not that a permission prompt exists. Result attention and notification claims
+use record/work-generation identity independently of projected state equality.
+OSC has no completion event id, so identical results without intervening
+observed work are idempotent.
+
+Pi's configuration in the [coverage ledger](../reference/agent-coverage.md#osc-7501-rollout-ledger)
+has verified native lifecycle coverage. Codex and Claude reports are accepted,
+but enabling their names does not establish native emission or lifecycle
+coverage. The default is prefer; observe mode collects diagnostics while
+leaving publication with baseline detection.
+
+Without eligible native authority, `tma` learns a pane's state from three kinds
+of baseline evidence, in descending fidelity:
 
 1. **Agent hooks.** A cooperating agent runs a command at each lifecycle point,
    so it *tells* `tma` it just blocked, at the instant it blocks, with zero
@@ -253,7 +310,8 @@ nothing changes: an outer nested-tmux pane is as invisible as it always was.
 
 The same detection runs at three tiers. Each is a strict upgrade in latency or
 coverage, and consumers see no difference between them because they all read the
-same stamped options.
+same stamped options. This baseline remains available without a daemon. Native
+OSC collection is a daemon feature and has no polling-only equivalent.
 
 - **Polling floor.** Any one-shot invocation refreshes stale panes when it runs.
   This is the only tier a hookless agent gets with no daemon, and it has no
@@ -321,7 +379,7 @@ the next cycle re-asks the same question against a later clock and captures the
 moment either window closes. `--debug-timing` reports the skips as
 `capture-skipped` next to the captures.
 
-## Why concurrent producers are safe
+## How concurrent producers preserve ownership
 
 Several producers stamp the same pane options at once: a status poll in one
 client, another client's poll, a hook firing, the daemon. tmux options have no
@@ -329,17 +387,26 @@ transactions, no compare-and-set, and no writer identity, so an uncoordinated
 read-then-write loses races exactly on the transitions that matter, because
 hooks fire *inside* the read-to-write window.
 
-The fix is to never decide client-side. Every guarded write is a server-side
-conditional (`set-option -pF`), which tmux expands in the target pane's context
-atomically at write time. A capture producer's state write carries a guard that
-says, in effect, "only commit if a hook has not already claimed this pane with
-newer evidence". The whole chained write, state, provenance, timestamps, detail,
-and the write-once transition marker, carries the *same* suppression condition,
-so the tuple commits together or holds together. A losing producer changes
-nothing, including the notification marker, so it cannot fire a stray alert
-either. Everything that is not guarded this way is last-writer-wins over
-deterministic values (the same fold, the same persisted inputs), which
-converges.
+Current tma producers combine evidence-time rules with private ownership.
+A guarded `if-shell -F` admits a frozen body of literal, explicitly targeted
+option writes. Dependent fields use that one admission decision, rather than
+re-evaluating a changing predicate per field. Commit markers and full readback
+confirm whether the caller won. tmux still has no atomic tuple transaction.
+
+Failed admission writes nothing. A body that executed can lose client readback
+to a later writer, so a Lost result does not prove nothing was written. The
+advisory poll hint can remain in that case; it grants no state or effect
+permission. Notifications and result acknowledgements have separate exact
+claims and at-most-once admission, not exactly-once delivery. Independent
+session, transcript, telemetry and request metadata retain their own validated
+process/session ownership even when accompanying state loses.
+
+An effective nonempty `after-set-option` hook can yield between mutations, so
+that target loses protocol capability and uses protected fallback. Healthy
+targets can remain covered; tma never clears the user's hook. Old tma writers
+and third-party direct option writers do not implement these ownership rules
+and are not guaranteed safe alongside an authoritative pane. See the
+[writer contract](../reference/agent-state-contract.md).
 
 ## Honest margins
 
@@ -354,7 +421,7 @@ evidence is genuinely ambiguous the fold leans toward blocked. It stops short of
 guessing, though, because a false blocked flag is expensive in its own currency:
 flags that turn out to be nothing teach you to ignore the flag, and then the real
 one goes unanswered too. So `blocked` is asserted only from direct evidence, a
-blocked-class hook event or blocker chrome on the live viewport, and never
+blocked-class hook event, a validated native blocked report, or blocker chrome on the live viewport, and never
 inferred from silence, from the pane title, or from a lull in output.
 
 The daemon triggers a hookless capture on an activity-*quiet* edge, the moment a

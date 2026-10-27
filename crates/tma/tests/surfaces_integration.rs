@@ -21,7 +21,7 @@ fn server_opt(s: &Scratch, key: &str) -> String {
 /// pinned into the scratch (SAFETY, and hermeticity): the developer's own `~/.config/tma` must
 /// never be read, still less written, by a test run.
 fn tma(s: &Scratch, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tma"))
+    s.command()
         .args(args)
         .arg("--socket-name")
         .arg(&s.socket)
@@ -35,8 +35,8 @@ fn tma(s: &Scratch, args: &[&str]) -> std::process::Output {
 
 /// Invoke tma with exactly the given argv — no auto-appended flags. Lets a test control where
 /// `--socket-name` sits relative to the subcommand.
-fn tma_raw(args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_tma"))
+fn tma_raw(s: &Scratch, args: &[&str]) -> std::process::Output {
+    s.command()
         .args(args)
         .env("TMA_CONFIG", common::empty_config_path())
         .output()
@@ -706,14 +706,17 @@ fn socket_name_targets_scratch_server_in_either_position() {
     let pane = setup_agent(&s, "READY\\n", rules);
 
     // Ordering 1: globals BEFORE the subcommand (the ordering that regressed).
-    let before = tma_raw(&[
-        "--socket-name",
-        &s.socket,
-        "--manifest-dir",
-        &s.workdir.to_string_lossy(),
-        "ls",
-        "--json",
-    ]);
+    let before = tma_raw(
+        &s,
+        &[
+            "--socket-name",
+            &s.socket,
+            "--manifest-dir",
+            &s.workdir.to_string_lossy(),
+            "ls",
+            "--json",
+        ],
+    );
     assert!(
         before.status.success(),
         "ls (globals first) failed: {}",
@@ -730,14 +733,17 @@ fn socket_name_targets_scratch_server_in_either_position() {
     );
 
     // Ordering 2: globals AFTER the subcommand — same canonical field, same server.
-    let after = tma_raw(&[
-        "ls",
-        "--json",
-        "--socket-name",
-        &s.socket,
-        "--manifest-dir",
-        &s.workdir.to_string_lossy(),
-    ]);
+    let after = tma_raw(
+        &s,
+        &[
+            "ls",
+            "--json",
+            "--socket-name",
+            &s.socket,
+            "--manifest-dir",
+            &s.workdir.to_string_lossy(),
+        ],
+    );
     assert!(
         after.status.success(),
         "ls (globals last) failed: {}",
@@ -771,14 +777,17 @@ fn socket_path_targets_the_server_and_conflicts_with_socket_name() {
     assert!(!socket_path.is_empty(), "resolved a server socket path");
     let workdir = s.workdir.to_string_lossy().into_owned();
 
-    let by_path = tma_raw(&[
-        "--socket-path",
-        &socket_path,
-        "--manifest-dir",
-        &workdir,
-        "ls",
-        "--json",
-    ]);
+    let by_path = tma_raw(
+        &s,
+        &[
+            "--socket-path",
+            &socket_path,
+            "--manifest-dir",
+            &workdir,
+            "ls",
+            "--json",
+        ],
+    );
     assert!(
         by_path.status.success(),
         "ls --socket-path failed: {}",
@@ -791,7 +800,8 @@ fn socket_path_targets_the_server_and_conflicts_with_socket_name() {
     );
 
     // The env fallback: no socket flag at all, TMA_SOCKET_PATH names the same server.
-    let by_env = Command::new(env!("CARGO_BIN_EXE_tma"))
+    let by_env = s
+        .command()
         .args(["ls", "--json", "--manifest-dir", &workdir])
         .env("TMA_CONFIG", common::empty_config_path())
         .env("TMA_SOCKET_PATH", &socket_path)
@@ -805,7 +815,8 @@ fn socket_path_targets_the_server_and_conflicts_with_socket_name() {
     );
 
     // An explicit flag beats the env, even when the env points at a live server.
-    let flag_wins = Command::new(env!("CARGO_BIN_EXE_tma"))
+    let flag_wins = s
+        .command()
         .args(["ls", "--socket-name", "tma_test_no_such_server", "--json"])
         .env("TMA_CONFIG", common::empty_config_path())
         .env("TMA_SOCKET_PATH", &socket_path)
@@ -817,13 +828,16 @@ fn socket_path_targets_the_server_and_conflicts_with_socket_name() {
     );
 
     // Both flags at once is a usage error, not a silent precedence rule.
-    let both = tma_raw(&[
-        "ls",
-        "--socket-name",
-        &s.socket,
-        "--socket-path",
-        &socket_path,
-    ]);
+    let both = tma_raw(
+        &s,
+        &[
+            "ls",
+            "--socket-name",
+            &s.socket,
+            "--socket-path",
+            &socket_path,
+        ],
+    );
     assert_eq!(
         both.status.code(),
         Some(2),
@@ -977,8 +991,8 @@ fn ls_json_carries_the_transcript_stamped_on_the_pane() {
 }
 
 /// The `permission_request` and `stamped_at_ms` keys: both read straight off the pane's options, so
-/// this covers the `list-panes -F` read set and the serialization. The first cycle builds its rows
-/// from the options it read before its own stamp, which is why the anchor starts `null` too.
+/// this covers the `list-panes -F` read set and the serialization, including the first producer's
+/// persisted winning stamp.
 #[test]
 fn ls_json_carries_the_permission_request_and_stamp_time() {
     if !tma_test_support::tmux_available() {
@@ -995,16 +1009,18 @@ fn ls_json_carries_the_permission_request_and_stamp_time() {
         json.contains("\"permission_request\":null"),
         "a pane waiting on nothing carries no request id: {json}"
     );
+    let first_stamp = s.pane_option(&pane, "@agent_stamped_at");
+    assert!(first_stamp.parse::<u64>().is_ok_and(|stamp| stamp > 0));
     assert!(
-        json.contains("\"stamped_at_ms\":null"),
-        "the first cycle's row predates its own stamp: {json}"
+        json.contains(&format!("\"stamped_at_ms\":{first_stamp}")),
+        "the first producing row carries its persisted winner: {json}"
     );
 
     let id = "per_01ABC";
-    let stamped_at = "1790787200000";
+    let stamped_at = tma_runtime::now_ms().to_string();
     for (key, value) in [
         ("@agent_permission_request", id),
-        ("@agent_stamped_at", stamped_at),
+        ("@agent_stamped_at", stamped_at.as_str()),
     ] {
         assert!(
             s.tmux(&["set-option", "-p", "-t", &pane, key, value])

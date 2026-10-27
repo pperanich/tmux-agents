@@ -1,5 +1,5 @@
 //! Guarded stamping: the write half of the poll cycle. Renders a producer's verdict into a
-//! chained, server-side-guarded `tmux set-option` invocation and spawns it.
+//! owned pane transaction, verifies the stored winner, and reconciles summaries.
 //!
 //! The *rendering* is pure and lives in `tma-core` ([`tma_core::render`]); this module owns the
 //! seam that touches tmux: mapping a [`Verdict`] to a guard, the capability probe, appending the
@@ -11,11 +11,36 @@ use tma_core::render::{self, Guard, Publish, StampCommand, SummaryScope};
 use tma_core::stamp::opt;
 use tma_core::{AgentState, Provenance, Verdict, WriteAction};
 
+use crate::persistence::{self, OptionEdit, PaneRead, PersistenceError};
 use crate::tmux::{PaneRecord, Tmux, TmuxError};
+
+fn clock() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_millis() as u64)
+}
+
+pub fn persistence_error(error: PersistenceError) -> TmuxError {
+    match error {
+        PersistenceError::Tmux(error) => error,
+        error => TmuxError::Parse {
+            cmd: "pane persistence".into(),
+            reason: error.to_string(),
+        },
+    }
+}
+
+/// Actual stored winner, including partial advisory progress when grouped writes are unavailable.
+#[derive(Clone, Debug)]
+pub struct Applied {
+    pub read: PaneRead,
+    pub committed: bool,
+}
 
 /// Fires the one-time degrade warning at most once per process (so the picker's 1 Hz refresh
 /// loop does not spam it every cycle).
 static DEGRADE_WARNED: AtomicBool = AtomicBool::new(false);
+static SUMMARY_BOUND_WARNED: AtomicBool = AtomicBool::new(false);
 
 /// What to write for one pane this cycle.
 pub enum StampPlan {
@@ -23,7 +48,7 @@ pub enum StampPlan {
     Publish(Publish),
     /// Writes-on-hold: refresh freshness + hash only.
     Hold { stamped_at: u64, hash: Option<u64> },
-    /// The agent exited: remove all `@agent_*` options.
+    /// The agent exited: remove its state and independently owned metadata, retaining a private revision tombstone.
     Remove,
     /// One session ended under a still-running agent: clear the session lane, keep the state tuple
     /// (`render::render_end_session`).
@@ -35,7 +60,7 @@ pub enum StampPlan {
 /// the read→write window still wins (TOCTOU-safe).
 pub(crate) fn guard_for_verdict(v: &Verdict) -> Guard {
     if v.writes.episode_reset {
-        // The stored tuple belongs to a dead pid; render writes it unconditionally anyway.
+        // This bypasses legacy arbitration; shared program ownership still guards the tuple.
         return Guard::Unconditional;
     }
     if v.writes.may_override {
@@ -89,7 +114,7 @@ pub fn plan_from_verdict(
 
 /// Whether this server supports `set-option -F` conditional writes (the guards). Cached in
 /// [`opt::SETPF_OK`] for the server's life; probes once against any pane. On `false`, producers fall
-/// back to advisory (unguarded) writes (NOT TOCTOU-safe, clobber race), warned once. If the probe
+/// back to the legacy expansion posture, warned once. Ownership checks remain mandatory. If the probe
 /// cannot run, default to guarded WITHOUT caching so a later cycle re-probes.
 pub fn guarded_writes_supported(tmux: &Tmux, panes: &[PaneRecord]) -> bool {
     match tmux.get_server_option(opt::SETPF_OK) {
@@ -121,10 +146,7 @@ pub fn guarded_writes_supported(tmux: &Tmux, panes: &[PaneRecord]) -> bool {
 
 fn warn_degrade_once() {
     if !DEGRADE_WARNED.swap(true, Ordering::Relaxed) {
-        eprintln!(
-            "tma: this tmux lacks `set-option -F` expansion; using advisory writes \
-             (clobber race possible under concurrent hook events)."
-        );
+        eprintln!("tma: this tmux lacks `set-option -F` expansion; legacy writes may be advisory.");
     }
 }
 
@@ -160,23 +182,21 @@ pub fn probe_conditional_writes(tmux: &Tmux, pane_id: &str) -> Result<bool, Tmux
     Ok(value == "ok")
 }
 
-/// Apply a plan for one pane as a single chained invocation, appending both `@agent_summary`
-/// recomputes (window and session). `guarded` selects the `Publish` path: `-F` guards, else the advisory degrade (clobber race).
+/// Apply an owned plan and return persisted truth. Window/session summaries are reconciled
+/// separately through explicit-context CAS commands. `guarded` is the legacy capability hint;
+/// every operation still checks ownership and execution-time hook support.
 pub fn apply(
     tmux: &Tmux,
     all_panes: &[PaneRecord],
     pane_id: &str,
     plan: &StampPlan,
     guarded: bool,
-) -> Result<(), TmuxError> {
+) -> Result<Applied, TmuxError> {
     apply_with(tmux, all_panes, pane_id, plan, guarded, &[])
 }
 
-/// [`apply`] with `trailing` commands chained into the SAME tmux invocation. Every `set-option`
-/// tmux executes ends in an unguarded full redraw of every attached client, so a caller with one
-/// more option to write pays for it here rather than in a second invocation (the poll cycle's
-/// `@tma_last_poll` claim). `trailing` commits last, after the tuple and both rollups, so it never
-/// reorders anything a reader keys on.
+/// Apply with independent trailing commands after a verified complete commit.
+/// State-dependent pane companions use `apply_with_edits` instead.
 pub fn apply_with(
     tmux: &Tmux,
     all_panes: &[PaneRecord],
@@ -184,40 +204,395 @@ pub fn apply_with(
     plan: &StampPlan,
     guarded: bool,
     trailing: &[StampCommand],
-) -> Result<(), TmuxError> {
-    let mut cmds = match plan {
-        StampPlan::Publish(p) if guarded => render::render_publish(p),
-        StampPlan::Publish(p) => {
-            // Advisory degrade (no `-F`): plain unguarded sets, with `@agent_since` write-once
-            // computed producer-side from the snapshot. Read-then-write, NOT TOCTOU-safe.
-            let prev_state = stored_state(all_panes, pane_id);
-            let prev_since = stored_since(all_panes, pane_id);
-            render::render_publish_advisory(p, prev_state, prev_since)
+) -> Result<Applied, TmuxError> {
+    apply_with_edits(tmux, all_panes, pane_id, plan, guarded, trailing, &[])
+}
+
+/// State-dependent companions share the complete tuple's ownership decision and readback.
+#[allow(clippy::too_many_arguments)]
+pub fn apply_with_edits(
+    tmux: &Tmux,
+    all_panes: &[PaneRecord],
+    pane_id: &str,
+    plan: &StampPlan,
+    _guarded: bool,
+    trailing: &[StampCommand],
+    companions: &[OptionEdit],
+) -> Result<Applied, TmuxError> {
+    let observed = observed_pane(tmux, all_panes, pane_id)?;
+    apply_observed(tmux, observed, plan, trailing, companions, None)
+}
+
+/// A poll cycle may batch its advisory hint with the exact pane write. The hint
+/// certifies server execution, even if a later receipt replacement defeats readback.
+pub fn apply_cycle(
+    tmux: &Tmux,
+    all_panes: &[PaneRecord],
+    pane_id: &str,
+    plan: &StampPlan,
+    _guarded: bool,
+    hint: Option<persistence::PollHint>,
+    companions: &[OptionEdit],
+) -> Result<Applied, TmuxError> {
+    let observed = observed_pane(tmux, all_panes, pane_id)?;
+    apply_observed(tmux, observed, plan, &[], companions, hint)
+}
+
+fn observed_pane(
+    tmux: &Tmux,
+    all_panes: &[PaneRecord],
+    pane_id: &str,
+) -> Result<PaneRead, TmuxError> {
+    let actual = if tma_core::program_status::PaneId::parse(pane_id).is_ok() {
+        pane_id.to_owned()
+    } else {
+        tmux.pane_format(pane_id, "#{pane_id}")?
+    };
+    let observed = if let Some(pane) = all_panes.iter().find(|pane| pane.pane_id == actual) {
+        let mut read = PaneRead::from_options(pane.pane_id.clone(), pane.options.clone());
+        read.target = pane_id.to_owned();
+        read
+    } else {
+        persistence::read_pane(tmux, pane_id).map_err(persistence_error)?
+    };
+    Ok(observed)
+}
+
+/// Hook state is bound to the metadata session checked before its independent update.
+pub fn apply_for_metadata(
+    tmux: &Tmux,
+    pane: &str,
+    plan: &StampPlan,
+    expected: Option<&tma_core::persistence::MetadataOwner>,
+    companions: &[OptionEdit],
+) -> Result<Applied, TmuxError> {
+    let observed = persistence::read_pane(tmux, pane).map_err(persistence_error)?;
+    if persistence::metadata_owner(&observed).as_ref() != expected {
+        return Ok(Applied {
+            committed: false,
+            read: observed,
+        });
+    }
+    apply_observed(tmux, observed, plan, &[], companions, None)
+}
+
+fn apply_observed(
+    tmux: &Tmux,
+    observed: PaneRead,
+    plan: &StampPlan,
+    trailing: &[StampCommand],
+    companions: &[OptionEdit],
+    hint: Option<persistence::PollHint>,
+) -> Result<Applied, TmuxError> {
+    let pane_id = &observed.target;
+    if matches!(plan, StampPlan::EndSession) {
+        let (expected, current) = metadata_binding(tmux, &observed)?;
+        if current.is_none() {
+            return Ok(Applied {
+                committed: false,
+                read: observed,
+            });
         }
-        StampPlan::Hold { stamped_at, hash } => render::render_hold(pane_id, *stamped_at, *hash),
-        StampPlan::Remove => render::render_remove(pane_id),
-        StampPlan::EndSession => render::render_end_session(pane_id),
+        let edits: Vec<_> = tma_core::persistence::METADATA_KEYS
+            .iter()
+            .map(|key| OptionEdit::unset(key))
+            .collect();
+        return match persistence::write_metadata(tmux, &observed, expected.as_ref(), None, &edits) {
+            Ok(outcome) => Ok(Applied {
+                committed: outcome.won(),
+                read: outcome.winner().clone(),
+            }),
+            Err(PersistenceError::Unsupported) => Ok(Applied {
+                committed: false,
+                read: persistence::advisory_metadata(
+                    tmux,
+                    &observed,
+                    expected.as_ref(),
+                    None,
+                    &edits,
+                )
+                .map_err(persistence_error)?,
+            }),
+            Err(error) => Err(persistence_error(error)),
+        };
+    }
+    let checked_plan = if let StampPlan::Publish(publish) = plan {
+        observed
+            .options
+            .get(tma_core::persistence::opt::BLOCKED_HISTORY)
+            .and_then(|raw| tma_core::persistence::BlockedHistory::parse(raw))
+            .map(|history| {
+                let mut publish = publish.clone();
+                let current = blocked_processes_current(tmux, &observed, &history.processes);
+                // A stale projection supplies no fold evidence. Its independently checked
+                // process can still identify a continuing hook fallback presentation.
+                if publish.pid == 0
+                    && publish.source == Provenance::Hook
+                    && current
+                    && persistence::metadata_owner(&observed)
+                        .is_some_and(|owner| owner.process == history.processes.agent())
+                    && observed
+                        .options
+                        .get(opt::PID)
+                        .and_then(|raw| raw.parse::<u32>().ok())
+                        == Some(history.processes.agent().pid)
+                {
+                    publish.pid = history.processes.agent().pid;
+                }
+                if !current || publish.pid != history.processes.agent().pid {
+                    publish.episode_reset = true;
+                    publish.set_attention |= publish.state == AgentState::Blocked;
+                }
+                StampPlan::Publish(publish)
+            })
+    } else {
+        None
     };
-
-    // The target pane's state as it will read *after* this write, for the rollup.
-    let target_state = match plan {
-        StampPlan::Publish(p) => Some(p.state),
-        StampPlan::Remove => None,
-        // The state tuple is untouched, so the rollups read exactly what they read before.
-        StampPlan::Hold { .. } | StampPlan::EndSession => stored_state(all_panes, pane_id),
+    let plan = checked_plan.as_ref().unwrap_or(plan);
+    let previous = tma_core::persistence::current_stamp(&observed.options, clock())
+        .ok()
+        .flatten()
+        .map(|stamp| stamp.into_inner());
+    // Duration is not authority. An unchanged same-process state keeps its public run start
+    // through fallback, while the fold still receives no stale program evidence.
+    let duration_previous = previous.clone().or_else(|| {
+        let StampPlan::Publish(publish) = plan else {
+            return None;
+        };
+        tma_core::StampedState::from_options(&observed.options)
+            .ok()
+            .flatten()
+            .map(|stamp| stamp.into_inner())
+            .filter(|stamp| stamp.pid != 0 && stamp.pid == publish.pid)
+    });
+    let mut edits = persistence::edits_for_plan(pane_id, plan, duration_previous.as_ref())
+        .map_err(persistence_error)?;
+    if observed.program.program_origin && previous.is_none() {
+        if let StampPlan::Publish(publish) = plan {
+            // Stale protocol attention is not fallback completion evidence. Keep historical turn
+            // markers for exact reconciliation, but publish only this capture's attention intent.
+            edits.push(if publish.set_attention {
+                OptionEdit::set(opt::ATTENTION, "1")
+            } else {
+                OptionEdit::unset(opt::ATTENTION)
+            });
+        }
+    }
+    edits.extend_from_slice(companions);
+    let guard = match plan {
+        StampPlan::Publish(publish) => publish.guard,
+        _ => Guard::Unconditional,
     };
-    cmds.push(window_summary_command(all_panes, pane_id, target_state));
-    cmds.push(session_summary_command(all_panes, pane_id, target_state));
-    cmds.extend(trailing.iter().cloned());
+    let mut result =
+        match persistence::write_fallback_with_hint(tmux, &observed, guard, clock, &edits, hint) {
+            Ok(outcome) => Applied {
+                committed: outcome.won(),
+                read: outcome.winner().clone(),
+            },
+            Err(PersistenceError::Unsupported) => Applied {
+                read: persistence::advisory_fallback(tmux, &observed, guard, &edits, clock)
+                    .map_err(persistence_error)?,
+                committed: false,
+            },
+            Err(error) => return Err(persistence_error(error)),
+        };
+    // Summaries are convergent hints derived from persisted pane truth, outside the restricted
+    // nonyielding transaction. Never substitute the producer's intended state for a lost write.
+    if matches!(plan, StampPlan::Remove) && result.committed {
+        let expected = persistence::metadata_owner(&observed);
+        let edits: Vec<_> = tma_core::persistence::METADATA_KEYS
+            .iter()
+            .map(|key| OptionEdit::unset(key))
+            .collect();
+        match persistence::write_metadata(tmux, &result.read, expected.as_ref(), None, &edits) {
+            Ok(outcome) => result.read = outcome.winner().clone(),
+            Err(PersistenceError::Unsupported) => {
+                result.read = persistence::advisory_metadata(
+                    tmux,
+                    &result.read,
+                    expected.as_ref(),
+                    None,
+                    &edits,
+                )
+                .map_err(persistence_error)?;
+            }
+            Err(error) => return Err(persistence_error(error)),
+        }
+        result.read = persistence::finish_removal(tmux, &result.read).map_err(persistence_error)?;
+    }
+    reconcile_summaries(tmux)?;
+    if result.committed {
+        tmux.apply(trailing)?;
+    }
+    Ok(result)
+}
 
-    tmux.apply(&cmds)
+fn blocked_processes_current(
+    tmux: &Tmux,
+    observed: &PaneRead,
+    processes: &tma_core::persistence::ProcessChain,
+) -> bool {
+    let Some(root) = tmux
+        .pane_format(&observed.target, "#{pane_pid}")
+        .ok()
+        .and_then(|raw| raw.parse::<u32>().ok())
+    else {
+        return false;
+    };
+    if Some(root) != processes.as_slice().first().map(|process| process.pid) {
+        return false;
+    }
+    crate::tmux::sample_process_chain(root, processes.agent().pid)
+        .is_ok_and(|current| current == processes.as_slice())
+}
+
+/// Prepare summary CAS commands from one coherent pane read. Each scope snapshot is verified
+/// again in the server command. A delayed reconciler cannot overwrite a
+/// newer writer's aggregate, including after pane membership or target context changes.
+/// A scope snapshot above 64 KiB retains its previous hint and emits one bounded warning.
+pub fn summary_commands(tmux: &Tmux) -> Result<Vec<StampCommand>, TmuxError> {
+    let panes = tmux.list_panes()?;
+    let mut seen = Vec::new();
+    let mut commands = Vec::new();
+    let mut keys = persistence::PROJECTION_KEYS.to_vec();
+    keys.push(opt::DETAIL);
+    let fields = keys
+        .iter()
+        .map(|key| format!("#{{{key}}}"))
+        .collect::<Vec<_>>()
+        .join("|");
+    let pane_loop = format!("#{{P:#{{pane_id}}|{fields};}}");
+    let now = clock();
+    for scope in [SummaryScope::Window, SummaryScope::Session] {
+        for member in &panes {
+            let key = (
+                scope,
+                member.session.as_str(),
+                (scope == SummaryScope::Window).then_some(member.window_index),
+            );
+            if seen.contains(&key) {
+                continue;
+            }
+            seen.push(key);
+            // list-panes and the native pane/window loops use tmux's session/window/pane order.
+            // Include membership and explicit target context, not just the aggregate state count.
+            let members: Vec<_> = panes
+                .iter()
+                .filter(|pane| in_scope(scope, pane, member))
+                .collect();
+            let body = members
+                .iter()
+                .map(|pane| {
+                    format!(
+                        "{}|{};",
+                        pane.pane_id,
+                        keys.iter()
+                            .map(|key| pane.options.get(*key).map_or("", String::as_str))
+                            .collect::<Vec<_>>()
+                            .join("|")
+                    )
+                })
+                .collect::<String>();
+            if body.len() > 64 * 1024 {
+                if !SUMMARY_BOUND_WARNED.swap(true, Ordering::Relaxed) {
+                    eprintln!(
+                        "tma: summary reconciliation skipped: {:?} scope at {}:{}.{} has a {} byte snapshot (limit 65536); its previous summary is retained",
+                        scope, member.session, member.window_index, member.pane_index, body.len(),
+                    );
+                }
+                continue;
+            }
+            let snapshot = format!("{}:{}:{body}", member.session, member.window_index);
+            let members_format = if scope == SummaryScope::Window {
+                pane_loop.clone()
+            } else {
+                format!("#{{W:{pane_loop}}}")
+            };
+            let snapshot_format = format!("#{{session_name}}:#{{window_index}}:{members_format}");
+            let states: Vec<_> = members
+                .iter()
+                .filter_map(|pane| {
+                    tma_core::persistence::current_stamp(&pane.options, now)
+                        .ok()
+                        .flatten()
+                })
+                .map(|stamp| stamp.into_inner().state)
+                .collect();
+            let desired = render::summary_string(&states);
+            let stored = match scope {
+                SummaryScope::Window => member.window_summary.as_deref(),
+                SummaryScope::Session => member.session_summary.as_deref(),
+            };
+            if desired.as_deref() == stored {
+                continue;
+            }
+            let predicate = format!(
+                "#{{==:{snapshot_format},{}}}",
+                render::literal_tmux_format(&snapshot)
+            );
+            let target = format!("={}:.{}", member.session, member.pane_id);
+            commands.push(render::conditional_group(
+                &target,
+                &predicate,
+                &[render::render_summary(scope, &target, desired.as_deref())],
+            ));
+        }
+    }
+    Ok(commands)
+}
+
+pub fn reconcile_summaries(tmux: &Tmux) -> Result<(), TmuxError> {
+    for command in summary_commands(tmux)? {
+        let pane = command.argv.get(3).ok_or_else(|| TmuxError::Parse {
+            cmd: "summary".into(),
+            reason: "missing explicit target".into(),
+        })?;
+        tmux.apply_persistence(pane, std::slice::from_ref(&command))?;
+    }
+    Ok(())
+}
+
+/// Apply state-dependent housekeeping without an unguarded alternate write path.
+pub fn apply_companions(
+    tmux: &Tmux,
+    observed: &PaneRead,
+    edits: &[OptionEdit],
+) -> Result<Applied, TmuxError> {
+    match persistence::write_fallback(tmux, observed, Guard::Unconditional, clock, edits) {
+        Ok(outcome) => Ok(Applied {
+            committed: outcome.won(),
+            read: outcome.winner().clone(),
+        }),
+        Err(PersistenceError::Unsupported) => Ok(Applied {
+            committed: false,
+            read: persistence::advisory_fallback(
+                tmux,
+                observed,
+                Guard::Unconditional,
+                edits,
+                clock,
+            )
+            .map_err(persistence_error)?,
+        }),
+        Err(error) => Err(persistence_error(error)),
+    }
+}
+
+/// Literal housekeeping commands, admitted through the shared state owner rather than directly.
+pub fn apply_commands(
+    tmux: &Tmux,
+    observed: &PaneRead,
+    commands: &[StampCommand],
+) -> Result<Applied, TmuxError> {
+    let edits: Result<Vec<_>, _> = commands.iter().map(persistence::edit_from_plain).collect();
+    apply_companions(tmux, observed, &edits.map_err(persistence_error)?)
 }
 
 /// Apply a context-utilization observation to `pane_id`: the guarded `-F` evidence-time write
-/// when the server supports it, else the advisory degrade (a producer-side `not older` decision against
-/// the stored `@agent_context_at`, then a plain write). One chained invocation. `pct = None` is a
-/// null-clear, `tokens = None` clears the absolute count pair. The ownership filter is the caller's
-/// (it needs the payload session); this is the store.
+/// when the server supports it, else protected advisory mutations under the same metadata binding
+/// and evidence-time guard. `pct = None` is a
+/// null-clear, `tokens = None` clears the absolute count pair. The caller validates its payload
+/// session; the original pane snapshot fences that attribution through the write.
 pub fn apply_context(
     tmux: &Tmux,
     all_panes: &[PaneRecord],
@@ -227,17 +602,15 @@ pub fn apply_context(
     evidence_at: u64,
     guarded: bool,
 ) -> Result<(), TmuxError> {
-    let cmds = if guarded {
-        render::render_context(pane_id, pct, tokens, evidence_at)
-    } else {
-        // No `-F` expansion: decide producer-side. Drop an observation not newer than the stored
-        // evidence time (`e|>` accepts equal, so does this: only a strictly-older one is dropped).
-        if evidence_at < stored_at(all_panes, pane_id, opt::CONTEXT_AT) {
-            return Ok(());
-        }
-        render::render_context_advisory(pane_id, pct, tokens, evidence_at)
-    };
-    tmux.apply(&cmds)
+    let _ = guarded;
+    apply_metadata_observation(
+        tmux,
+        all_panes,
+        pane_id,
+        opt::CONTEXT_AT,
+        evidence_at,
+        &render::render_context_advisory(pane_id, pct, tokens, evidence_at),
+    )
 }
 
 /// Apply a quota/cost observation to `pane_id`, [`apply_context`]'s twin on the `@agent_quota_at`
@@ -252,15 +625,182 @@ pub fn apply_quota(
     evidence_at: u64,
     guarded: bool,
 ) -> Result<(), TmuxError> {
-    let cmds = if guarded {
-        render::render_quota(pane_id, quota, evidence_at)
-    } else {
-        if evidence_at < stored_at(all_panes, pane_id, opt::QUOTA_AT) {
-            return Ok(());
-        }
-        render::render_quota_advisory(pane_id, quota, evidence_at)
+    let _ = guarded;
+    apply_metadata_observation(
+        tmux,
+        all_panes,
+        pane_id,
+        opt::QUOTA_AT,
+        evidence_at,
+        &render::render_quota_advisory(pane_id, quota, evidence_at),
+    )
+}
+
+/// Metadata updates bind the current process birth and session, separately from state ownership.
+/// Runtime supplies the same session checks on intake; this adapter also protects direct callers.
+pub fn apply_metadata_edits(
+    tmux: &Tmux,
+    all_panes: &[PaneRecord],
+    pane: &str,
+    edits: &[OptionEdit],
+) -> Result<bool, TmuxError> {
+    let Some((observed, expected, next)) = metadata_observation(tmux, all_panes, pane)? else {
+        return Ok(false);
     };
-    tmux.apply(&cmds)
+    metadata_write(tmux, &observed, expected.as_ref(), Some(&next), edits)
+}
+
+fn metadata_binding(
+    tmux: &Tmux,
+    observed: &PaneRead,
+) -> Result<
+    (
+        Option<tma_core::persistence::MetadataOwner>,
+        Option<tma_core::persistence::MetadataOwner>,
+    ),
+    TmuxError,
+> {
+    let expected = persistence::metadata_owner(observed);
+    let pane_pid = tmux
+        .pane_format(&observed.target, "#{pane_pid}")?
+        .parse::<u32>()
+        .ok();
+    let pid = observed
+        .owner()
+        .map(|owner| owner.processes.agent().pid)
+        .or_else(|| {
+            observed
+                .options
+                .get(opt::PID)?
+                .parse()
+                .ok()
+                .filter(|pid| *pid != 0)
+        })
+        .or_else(|| expected.as_ref().map(|owner| owner.process.pid))
+        .or(pane_pid);
+    let next = pid.and_then(|pid| {
+        let chain = crate::tmux::sample_process_chain(pane_pid?, pid).ok()?;
+        let process = *chain.last()?;
+        if observed
+            .owner()
+            .is_some_and(|owner| owner.processes.as_slice() != chain)
+        {
+            return None;
+        }
+        if expected
+            .as_ref()
+            .is_some_and(|owner| owner.process != process)
+        {
+            return None;
+        }
+        let session = observed
+            .options
+            .get(opt::SESSION)
+            .cloned()
+            .or_else(|| expected.as_ref().map(|owner| owner.session.clone()))
+            .unwrap_or_else(|| "<unattributed>".into());
+        Some(tma_core::persistence::MetadataOwner { process, session })
+    });
+    Ok((expected, next))
+}
+
+/// Keep the process/session attribution of the caller's payload. Refresh only the admission
+/// receipt, allowing context, quota and model from one observation to follow each other.
+fn metadata_observation(
+    tmux: &Tmux,
+    all_panes: &[PaneRecord],
+    pane: &str,
+) -> Result<
+    Option<(
+        PaneRead,
+        Option<tma_core::persistence::MetadataOwner>,
+        tma_core::persistence::MetadataOwner,
+    )>,
+    TmuxError,
+> {
+    let original = observed_pane(tmux, all_panes, pane)?;
+    let (original_owner, Some(original_next)) = metadata_binding(tmux, &original)? else {
+        return Ok(None);
+    };
+    let current = persistence::read_pane(tmux, pane).map_err(persistence_error)?;
+    let (expected, Some(next)) = metadata_binding(tmux, &current)? else {
+        return Ok(None);
+    };
+    if next != original_next
+        || (expected != original_owner && expected.as_ref() != Some(&original_next))
+    {
+        return Ok(None);
+    }
+    Ok(Some((current, expected, next)))
+}
+
+fn metadata_write(
+    tmux: &Tmux,
+    observed: &PaneRead,
+    expected: Option<&tma_core::persistence::MetadataOwner>,
+    next: Option<&tma_core::persistence::MetadataOwner>,
+    edits: &[OptionEdit],
+) -> Result<bool, TmuxError> {
+    match persistence::write_metadata(tmux, observed, expected, next, edits) {
+        Ok(outcome) => Ok(outcome.won()),
+        Err(PersistenceError::Unsupported) => {
+            persistence::advisory_metadata(tmux, observed, expected, next, edits)
+                .map_err(persistence_error)?;
+            Ok(false)
+        }
+        Err(error) => Err(persistence_error(error)),
+    }
+}
+
+fn apply_metadata_observation(
+    tmux: &Tmux,
+    all_panes: &[PaneRecord],
+    pane: &str,
+    key: &str,
+    at: u64,
+    commands: &[StampCommand],
+) -> Result<(), TmuxError> {
+    let Some((observed, expected, next)) = metadata_observation(tmux, all_panes, pane)? else {
+        return Ok(());
+    };
+    let previous = observed
+        .options
+        .get(key)
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    if at < previous {
+        return Ok(());
+    }
+    let edits: Result<Vec<_>, _> = commands.iter().map(persistence::edit_from_plain).collect();
+    let edits = edits.map_err(persistence_error)?;
+    let evidence = if key == opt::CONTEXT_AT {
+        tma_core::persistence::MetadataEvidence::Context(at)
+    } else {
+        tma_core::persistence::MetadataEvidence::Quota(at)
+    };
+    match persistence::write_metadata_observation(
+        tmux,
+        &observed,
+        expected.as_ref(),
+        Some(&next),
+        &edits,
+        Some(evidence),
+    ) {
+        Ok(_) => {}
+        Err(PersistenceError::Unsupported) => {
+            persistence::advisory_metadata_observation(
+                tmux,
+                &observed,
+                expected.as_ref(),
+                Some(&next),
+                &edits,
+                Some(evidence),
+            )
+            .map_err(persistence_error)?;
+        }
+        Err(error) => return Err(persistence_error(error)),
+    }
+    Ok(())
 }
 
 /// Arm a notify marker on `pane_id` (`key` is `@agent_context_notified_at` or
@@ -270,212 +810,45 @@ pub fn apply_quota(
 /// server without `-F`. `now` is the marker value (debuggability only).
 pub fn arm_notify_marker(
     tmux: &Tmux,
-    pane_id: &str,
-    key: &str,
+    rec: &PaneRecord,
+    key: &'static str,
     now: u64,
-    guarded: bool,
+    _guarded: bool,
 ) -> Result<bool, TmuxError> {
-    if guarded {
-        let cmd = render::render_notify_arm(pane_id, key, now);
-        tmux.apply(std::slice::from_ref(&cmd))?;
-        // Read-back: the winner sees its own value; a loser reads the winner's older marker.
-        let stored = tmux.get_pane_option(pane_id, key)?;
-        Ok(stored.as_deref() == Some(now.to_string().as_str()))
-    } else {
-        // Advisory degrade: only set when currently absent (racy, the documented no-`-F` posture).
-        if tmux
-            .get_pane_option(pane_id, key)?
-            .filter(|v| !v.is_empty())
-            .is_some()
-        {
-            return Ok(false);
+    let observed = PaneRead::from_options(rec.pane_id.clone(), rec.options.clone());
+    match persistence::update_notify_marker(tmux, &observed, key, Some(now)) {
+        Ok(outcome) => Ok(outcome.won()),
+        Err(PersistenceError::Unsupported) => {
+            persistence::advisory_notify_marker(tmux, &observed, key, Some(now))
+                .map(|outcome| outcome.claimed())
+                .map_err(persistence_error)
         }
-        let cmd = render::render_notify_arm_advisory(pane_id, key, now);
-        tmux.apply(std::slice::from_ref(&cmd))?;
-        Ok(true)
+        Err(error) => Err(persistence_error(error)),
     }
 }
 
-/// Rearm a notify marker on `pane_id`: unset it so the next crossing fires.
-pub fn rearm_notify_marker(tmux: &Tmux, pane_id: &str, key: &str) -> Result<(), TmuxError> {
-    let cmd = render::render_notify_rearm(pane_id, key);
-    tmux.apply(std::slice::from_ref(&cmd))
-}
-
-/// The pane's currently-stored epoch value at `key` (0 when unset or unparsable): the advisory
-/// path's `not older` comparison basis, shared by the context and quota chains.
-fn stored_at(all_panes: &[PaneRecord], pane_id: &str, key: &str) -> u64 {
-    all_panes
-        .iter()
-        .find(|p| p.pane_id == pane_id)
-        .and_then(|p| p.options.get(key))
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
-}
-
-/// The `@agent_summary` write for `target_pane`'s window, rolling up sibling states. `target_state`
-/// is what the pane reads after the pending write (`None` when removed). Exposed for the hook path.
-///
-/// A best-effort in-chain hint: rolled up from the intended state plus cycle-start siblings, so a
-/// multi-agent window can be mis-rolled. The convergent authority is `run_cycle`'s end-of-cycle
-/// reconciliation (recompute + write-on-drift); this append serves callers with no cycle.
-pub fn window_summary_command(
-    all_panes: &[PaneRecord],
-    target_pane: &str,
-    target_state: Option<AgentState>,
-) -> StampCommand {
-    let summary = summary_string_for(SummaryScope::Window, all_panes, target_pane, target_state);
-    render::render_summary(SummaryScope::Window, target_pane, summary.as_deref())
-}
-
-/// [`window_summary_command`]'s session-scoped mirror: the same rollup over every pane in the
-/// target's session, written to `@agent_session_summary`.
-pub fn session_summary_command(
-    all_panes: &[PaneRecord],
-    target_pane: &str,
-    target_state: Option<AgentState>,
-) -> StampCommand {
-    let summary = summary_string_for(SummaryScope::Session, all_panes, target_pane, target_state);
-    render::render_summary(SummaryScope::Session, target_pane, summary.as_deref())
-}
-
-/// [`window_summary_command`] carrying the tuple's `guard`, so the rollup commits iff the pane stamp
-/// commits: a hook event that loses arbitration must not overwrite the winning claim's summary with
-/// its own suppressed state. The cycle path keeps the unguarded variant (reconciliation self-corrects).
-pub fn window_summary_command_guarded(
-    all_panes: &[PaneRecord],
-    target_pane: &str,
-    target_state: Option<AgentState>,
-    guard: Guard,
-) -> StampCommand {
-    let summary = summary_string_for(SummaryScope::Window, all_panes, target_pane, target_state);
-    render::render_summary_guarded(SummaryScope::Window, target_pane, summary.as_deref(), guard)
-}
-
-/// [`window_summary_command_guarded`]'s session-scoped mirror, carrying the same guard so both
-/// rollups commit exactly when the pane stamp does.
-pub fn session_summary_command_guarded(
-    all_panes: &[PaneRecord],
-    target_pane: &str,
-    target_state: Option<AgentState>,
-    guard: Guard,
-) -> StampCommand {
-    let summary = summary_string_for(SummaryScope::Session, all_panes, target_pane, target_state);
-    render::render_summary_guarded(
-        SummaryScope::Session,
-        target_pane,
-        summary.as_deref(),
-        guard,
-    )
-}
-
-/// The rollup string for `target_pane`'s window or session: `target_state` for the target pane (its
-/// post-write state, `None` when removed) plus each sibling's stored `@agent_state`.
-fn summary_string_for(
-    scope: SummaryScope,
-    all_panes: &[PaneRecord],
-    target_pane: &str,
-    target_state: Option<AgentState>,
-) -> Option<String> {
-    let target = all_panes.iter().find(|p| p.pane_id == target_pane)?;
-    // The target pane's stored state is replaced by its intended post-write `target_state`.
-    let mut states = states_in_scope(scope, all_panes, target, Some(target_pane));
-    if let Some(s) = target_state {
-        states.push(s);
+/// Rearm only the marker/metric/state observation that requested it.
+pub fn rearm_notify_marker(
+    tmux: &Tmux,
+    rec: &PaneRecord,
+    key: &'static str,
+) -> Result<(), TmuxError> {
+    let observed = PaneRead::from_options(rec.pane_id.clone(), rec.options.clone());
+    match persistence::update_notify_marker(tmux, &observed, key, None) {
+        Ok(_) => Ok(()),
+        Err(PersistenceError::Unsupported) => {
+            persistence::advisory_notify_marker(tmux, &observed, key, None)
+                .map(|_| ())
+                .map_err(persistence_error)
+        }
+        Err(error) => Err(persistence_error(error)),
     }
-    render::summary_string(&states)
-}
-
-/// Collect the stored `@agent_state` of every pane sharing `scope` with `member`, in `all_panes`
-/// order, optionally skipping one by id. Shared by the in-chain rollups and the reconcilers.
-pub(crate) fn states_in_scope(
-    scope: SummaryScope,
-    all_panes: &[PaneRecord],
-    member: &PaneRecord,
-    skip_pane: Option<&str>,
-) -> Vec<AgentState> {
-    all_panes
-        .iter()
-        .filter(|p| in_scope(scope, p, member))
-        .filter(|p| skip_pane != Some(p.pane_id.as_str()))
-        .filter_map(|p| p.options.get(opt::STATE).and_then(|v| v.parse().ok()))
-        .collect()
 }
 
 /// Whether `pane` rolls up into the same `scope` as `member`.
 fn in_scope(scope: SummaryScope, pane: &PaneRecord, member: &PaneRecord) -> bool {
     pane.session == member.session
         && (scope == SummaryScope::Session || pane.window_index == member.window_index)
-}
-
-/// The convergent rollup reconciliation both authorities share (the end-of-cycle pass and the
-/// daemon's lifecycle pass): recompute every window's and every session's summary from `state_of`
-/// and emit a write only where it drifts from what tmux stores, so a quiet server writes nothing.
-/// One function for both scopes, so the two rollups cannot diverge.
-pub fn reconcile_summary_commands(
-    panes: &[PaneRecord],
-    state_of: impl Fn(&PaneRecord) -> Option<AgentState>,
-) -> Vec<StampCommand> {
-    let mut cmds = Vec::new();
-    for scope in [SummaryScope::Window, SummaryScope::Session] {
-        // One representative pane per scope instance; its stored value is the whole scope's.
-        let mut seen: Vec<(&str, Option<u32>)> = Vec::new();
-        for rec in panes {
-            let key = match scope {
-                SummaryScope::Window => (rec.session.as_str(), Some(rec.window_index)),
-                SummaryScope::Session => (rec.session.as_str(), None),
-            };
-            if seen.contains(&key) {
-                continue;
-            }
-            seen.push(key);
-
-            let states: Vec<AgentState> = panes
-                .iter()
-                .filter(|p| in_scope(scope, p, rec))
-                .filter_map(&state_of)
-                .collect();
-            let desired = render::summary_string(&states);
-            let stored = match scope {
-                SummaryScope::Window => rec.window_summary.as_deref(),
-                SummaryScope::Session => rec.session_summary.as_deref(),
-            };
-            if desired.as_deref() != stored {
-                cmds.push(render::render_summary(
-                    scope,
-                    &rec.pane_id,
-                    desired.as_deref(),
-                ));
-            }
-        }
-    }
-    cmds
-}
-
-/// A pane's stored `@agent_state`, the reconciliation fallback for a pane this pass did not decide.
-pub fn stored_pane_state(pane: &PaneRecord) -> Option<AgentState> {
-    pane.options.get(opt::STATE).and_then(|v| v.parse().ok())
-}
-
-/// Parse a pane's currently-stored `@agent_state` from a `list-panes` read.
-fn stored_state(all_panes: &[PaneRecord], pane_id: &str) -> Option<AgentState> {
-    all_panes
-        .iter()
-        .find(|p| p.pane_id == pane_id)?
-        .options
-        .get(opt::STATE)
-        .and_then(|v| v.parse().ok())
-}
-
-/// Parse a pane's currently-stored `@agent_since` (epoch), 0 when unset. The advisory write
-/// path's producer-side write-once basis.
-fn stored_since(all_panes: &[PaneRecord], pane_id: &str) -> u64 {
-    all_panes
-        .iter()
-        .find(|p| p.pane_id == pane_id)
-        .and_then(|p| p.options.get(opt::SINCE))
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -495,6 +868,7 @@ mod tests {
             state,
             detail: None,
             winning_evidence: WinningEvidence {
+                origin: None,
                 source,
                 at,
                 label: "t".into(),
@@ -505,6 +879,7 @@ mod tests {
                 set_attention: false,
                 episode_reset,
             },
+            program: None,
         }
     }
 

@@ -5,7 +5,7 @@
 //! under the reader without touching the corpus.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tma_test_support::Scratch;
 
@@ -18,7 +18,7 @@ fn have_tmux() -> bool {
 }
 
 fn transcript(s: &Scratch, args: &[&str]) -> Output {
-    Command::new(s.bin())
+    s.command()
         .arg("transcript")
         .args(args)
         .arg("--socket-name")
