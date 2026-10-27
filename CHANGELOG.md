@@ -10,6 +10,8 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-27
+
 ### Added
 
 - Opt-in native OSC 7501 state in the daemon. `[program_status] mode = "observe"`
@@ -1261,7 +1263,8 @@ live dashboard, jump bindings, and a status-line segment over the result. Detect
 setup by walking the process tree, gets faster and more precise when you wire the agent's own hooks,
 and becomes push-based with the optional daemon.
 
-[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.5.16...HEAD
+[Unreleased]: https://github.com/pperanich/tmux-agents/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/pperanich/tmux-agents/compare/v0.5.16...v0.6.0
 [0.5.16]: https://github.com/pperanich/tmux-agents/compare/v0.5.15...v0.5.16
 [0.5.15]: https://github.com/pperanich/tmux-agents/compare/v0.5.14...v0.5.15
 [0.5.14]: https://github.com/pperanich/tmux-agents/compare/v0.5.13...v0.5.14
