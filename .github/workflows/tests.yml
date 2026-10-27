@@ -41,25 +41,31 @@ jobs:
 
   test-macos:
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        tmux: ["3.6a", "3.7b"]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      # Built from source at the declared 3.6a floor: brew ships whatever is newest, and the lane
-      # should test the version we promise. 3.7b also passes the full suite (verified locally).
+      # Cover both the supported floor and the version used by Nix. tmux 3.7 adds a format
+      # evaluation time limit that can reject large persistence guards under build load.
       - name: Cache tmux
         id: tmux-cache
         uses: actions/cache@v4
         with:
           path: ~/tmux-bin
-          key: tmux-3.6a-${{ runner.os }}
+          key: tmux-${{ matrix.tmux }}-${{ runner.os }}
       - name: Install tmux deps
         run: brew install libevent ncurses bison utf8proc
-      - name: Build tmux 3.6a
+      - name: Build tmux ${{ matrix.tmux }}
         if: steps.tmux-cache.outputs.cache-hit != 'true'
+        env:
+          TMUX_VERSION: ${{ matrix.tmux }}
         run: |
-          curl -fsSL https://github.com/tmux/tmux/releases/download/3.6a/tmux-3.6a.tar.gz | tar xz
-          cd tmux-3.6a
+          curl -fsSL "https://github.com/tmux/tmux/releases/download/${TMUX_VERSION}/tmux-${TMUX_VERSION}.tar.gz" | tar xz
+          cd "tmux-${TMUX_VERSION}"
           ./configure --prefix="$HOME/tmux-bin" --enable-utf8proc \
             CPPFLAGS="-I$(brew --prefix libevent)/include -I$(brew --prefix ncurses)/include -I$(brew --prefix utf8proc)/include" \
             LDFLAGS="-L$(brew --prefix libevent)/lib -L$(brew --prefix ncurses)/lib -L$(brew --prefix utf8proc)/lib"

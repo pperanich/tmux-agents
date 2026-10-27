@@ -10,6 +10,12 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Fixed
+
+- Reduce repeated parsing of large process-lineage guards on tmux 3.7. This lowers
+  the risk of notification claims hitting its format evaluation time limit under
+  build load, which caused maximum-lineage integration tests to fail in Nix builds.
+
 ## [0.6.0] - 2026-10-27
 
 ### Added

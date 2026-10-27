@@ -217,11 +217,14 @@ pub(crate) const PROJECTION_KEYS: &[&str] = &[
 ];
 
 fn projection_unchanged(observed: &PaneRead) -> String {
+    // tmux rescans each nested operand. Keep the large OWNER and COMMIT comparisons near the
+    // root to avoid repeatedly parsing a maximum process chain under its format time limit.
     PROJECTION_KEYS
         .iter()
+        .rev()
         .copied()
         .fold("1".to_owned(), |predicate, key| {
-            and(&predicate, &equal(key, observed.value(key)))
+            and(&equal(key, observed.value(key)), &predicate)
         })
 }
 
