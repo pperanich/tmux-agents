@@ -75,6 +75,18 @@ const BLOCKED_CHROME: &str = "\\n\\n\\n\\n\
     │ ❯ 1. Yes                 │\\n\
     ╰──────────────────────────╯\\n";
 
+fn flip_to_blocked(s: &Scratch, target: &str) {
+    // macOS sh's C-locale line editor treats Unicode keystrokes as editing commands.
+    // Source the prompt from a file so only ASCII travels through that line editor.
+    let script = s.workdir.join("blocked.sh");
+    std::fs::write(&script, format!("printf '{BLOCKED_CHROME}'\n")).unwrap();
+    let command = format!(". '{}'", script.display());
+    assert!(s
+        .tmux(&["send-keys", "-t", target, &command, "Enter"])
+        .status
+        .success());
+}
+
 /// Launch a static detached agent pane (`chrome`, then a long-lived `sleep`) and return its pane id.
 /// The marker (`READY` or the prompt text) proves the chrome rendered and the shell reached `exec`.
 fn static_agent(s: &Scratch, sess: &str, chrome: &str, marker: &str) -> String {
@@ -418,11 +430,11 @@ fn transition_idle_to_blocked_unblocks() {
         "the waiter never got through its entry cycle"
     );
 
-    let flip = format!("printf '{BLOCKED_CHROME}'");
-    s.tmux(&["send-keys", "-t", "work", &flip, "Enter"]);
+    flip_to_blocked(&s, "work");
     assert!(
         wait_capture_contains(&s.socket, "work", "Do you want to proceed?", POLL_CEILING),
-        "blocked chrome did not render after the flip"
+        "blocked chrome did not render after the flip{}",
+        s.forensics(&[&pane])
     );
 
     let code = await_exit(&mut child, POLL_CEILING);
@@ -594,11 +606,11 @@ fn agent_pins_to_first_observed_ignoring_a_later_second_pane() {
     );
 
     // Flip the PINNED pane A to blocked; the waiter returns on it, naming A, not B.
-    let flip = format!("printf '{BLOCKED_CHROME}'");
-    s.tmux(&["send-keys", "-t", "a", &flip, "Enter"]);
+    flip_to_blocked(&s, "a");
     assert!(
         wait_capture_contains(&s.socket, "a", "Do you want to proceed?", POLL_CEILING),
-        "pane A blocked chrome did not render after the flip"
+        "pane A blocked chrome did not render after the flip{}",
+        s.forensics(&[&pane_a, &pane_b])
     );
 
     let code = await_exit(&mut child, POLL_CEILING);
@@ -1138,7 +1150,7 @@ fn push_edge_returns_well_under_the_poll_tick() {
     if !have_tmux() {
         return;
     }
-    let s = Scratch::new("wait-push");
+    let s = Scratch::new_daemon("wait-push");
     let pane = static_agent(&s, "work", "READY\\n", "READY");
     write_hook_manifest(&s, &pane_process_names(&s, "work"));
     let status = s.workdir.join("daemon-status");
@@ -1147,7 +1159,8 @@ fn push_edge_returns_well_under_the_poll_tick() {
     // client), unrelated to the latency proof, which only starts its clock after the push fires below.
     assert!(
         wait_status_eq(&status, "clients", "1", POLL_CEILING),
-        "daemon came up with one control client"
+        "daemon came up with one control client{}",
+        s.forensics(&[&pane])
     );
 
     // A 60 s `--timeout` (belt-floor unaffected: the push-fallback cap is min(5 s, remaining)) so a
@@ -1200,14 +1213,18 @@ fn daemon_killed_mid_wait_degrades_and_still_times_out() {
     if !have_tmux() {
         return;
     }
-    let s = Scratch::new("wait-daemon-die");
+    let s = Scratch::new_daemon("wait-daemon-die");
     let pane = static_agent(&s, "work", "READY\\n", "READY");
     // Capture-only manifest: the pane stays idle and never reaches blocked, so the ONLY way the wait
     // ends is the timeout, which must still fire after the daemon dies.
     write_manifest(&s, &pane_process_names(&s, "work"));
     let status = s.workdir.join("daemon-status");
     let mut daemon = spawn_daemon(&s, &status);
-    assert!(wait_status_eq(&status, "clients", "1", POLL_CEILING));
+    assert!(
+        wait_status_eq(&status, "clients", "1", POLL_CEILING),
+        "daemon came up with one control client{}",
+        s.forensics(&[&pane])
+    );
 
     let mut child = spawn_wait(
         &s,
