@@ -371,14 +371,15 @@ fn live_daemon_pushes_change_under_poll_interval() {
     if !have_tmux() {
         return;
     }
-    let s = Scratch::new("sub-push");
+    let s = Scratch::new_daemon("sub-push");
     let pane = static_agent(&s, "work");
     write_hook_manifest(&s, &pane_process_names(&s, "work"));
     let status = s.workdir.join("daemon-status");
     let _daemon = spawn_daemon(&s, &status);
     assert!(
         wait_status_eq(&status, "clients", "1", POLL_CEILING),
-        "daemon came up with one control client"
+        "daemon came up with one control client{}",
+        s.forensics(&[&pane])
     );
 
     let sub = SubscribeChild::spawn(&s, 10);
@@ -418,12 +419,16 @@ fn daemon_killed_mid_stream_continues_via_polling() {
     if !have_tmux() {
         return;
     }
-    let s = Scratch::new("sub-degrade");
-    let _pane = static_agent(&s, "work");
+    let s = Scratch::new_daemon("sub-degrade");
+    let pane = static_agent(&s, "work");
     write_manifest(&s, &pane_process_names(&s, "work"));
     let status = s.workdir.join("daemon-status");
     let mut daemon = spawn_daemon(&s, &status);
-    assert!(wait_status_eq(&status, "clients", "1", POLL_CEILING));
+    assert!(
+        wait_status_eq(&status, "clients", "1", POLL_CEILING),
+        "daemon came up with one control client{}",
+        s.forensics(&[&pane])
+    );
 
     let mut sub = SubscribeChild::spawn(&s, 1);
     assert!(
