@@ -1,0 +1,8 @@
+state=idle:app=pi
+state=working:app=pi
+state=done:app=pi
+state=blocked:app=pi:kind=permission:msg=T1NDIDc1MDEgcHJvdG90eXBl
+state=done:app=pi
+state=working:app=pi
+state=error:app=pi:msg=NDAwOiB7Im1lc3NhZ2UiOiJEZWxpYmVyYXRlIHByb3RvdHlwZSBmYWlsdXJlIiwidHlwZSI6ImludmFsaWRfcmVxdWVzdF9lcnJvciJ9
+state=clear

@@ -10,13 +10,12 @@
 use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::process::Child;
 
-use tma_core::render;
 use tma_core::stamp::opt;
 use tma_core::{AgentState, Provenance, ReadResult, StampedState};
 
 use tma_runtime::config::{trigger_enabled, NotifyCommands, NotifySinks, NotifyTrigger};
 use tma_runtime::notify::{
-    evaluate_context_high, evaluate_stall, fire, notification_for, trigger_for,
+    evaluate_context_high_checked, evaluate_stall_checked, fire, notification_for, trigger_for,
 };
 use tma_tmux::tmux::{PaneRecord, Tmux, TmuxError};
 
@@ -102,6 +101,7 @@ pub(crate) struct NotifyState {
     // ---- introspection counters (status file; tests + operators) ----
     /// Notifications fired over the daemon's life (monotone).
     fires: u64,
+    reconciliations: u64,
     /// Transitions pushed into the history ring over the daemon's life (monotone).
     transitions_recorded: u64,
     /// OSC 9;4 progress edges written over the daemon's life (monotone).
@@ -131,6 +131,7 @@ impl NotifyState {
             pending: Vec::new(),
             working_windows: BTreeSet::new(),
             fires: 0,
+            reconciliations: 0,
             transitions_recorded: 0,
             progress_edges: 0,
         }
@@ -157,9 +158,21 @@ impl NotifyState {
 
     /// The single notification-dispatch pass (see module docs): one `list-panes` read that records
     /// each pane's transition and fires for a `blocked` pane whose marker predates its episode.
+    #[cfg(test)]
     pub(crate) fn reconcile(&mut self, tmux: &Tmux) -> Result<(), TmuxError> {
+        self.reconcile_checked(tmux, |_| true)
+    }
+
+    /// Program effects additionally require the daemon's monotonic lease check
+    /// after the claim IO. This does not promote a losing publication.
+    pub(crate) fn reconcile_checked(
+        &mut self,
+        tmux: &Tmux,
+        mut effect_allowed: impl FnMut(&tma_tmux::persistence::PaneRead) -> bool,
+    ) -> Result<(), TmuxError> {
+        self.reconciliations += 1;
         self.reap();
-        let panes = tmux.list_panes()?;
+        let mut panes = tmux.list_panes()?;
         let now = tma_runtime::now_ms();
         let mut live: HashSet<String> = HashSet::new();
         // `-F` support, probed once and only when a marker-lane trigger is configured (a
@@ -168,7 +181,14 @@ impl NotifyState {
         let mut guarded_supported: Option<bool> = None;
 
         for rec in &panes {
-            let Some(stored) = StampedState::from_options(&rec.options)
+            let read = tma_tmux::persistence::PaneRead::from_options(
+                rec.pane_id.clone(),
+                rec.options.clone(),
+            );
+            if read.program.program_origin && !effect_allowed(&read) {
+                continue;
+            }
+            let Some(stored) = tma_core::persistence::current_stamp(&rec.options, now)
                 .ok()
                 .flatten()
                 .map(ReadResult::into_inner)
@@ -192,8 +212,20 @@ impl NotifyState {
 
             // Dispatch: fire once per state-run for a configured trigger, keyed only on the
             // persisted marker.
-            if let Some(trigger) = fire_trigger(&stored, &self.on) {
-                self.fire_for(tmux, rec, &stored, now, trigger);
+            let trigger = if rec
+                .options
+                .contains_key(tma_core::persistence::opt::ATTENTION_EPISODE)
+            {
+                trigger_for(
+                    stored.state,
+                    stored.state == AgentState::Blocked || stored.attention,
+                )
+                .filter(|trigger| trigger_enabled(&self.on, *trigger))
+            } else {
+                fire_trigger(&stored, &self.on)
+            };
+            if let Some(trigger) = trigger {
+                self.fire_for(tmux, rec, &stored, now, trigger, &mut effect_allowed);
             }
 
             // Context-high dispatch: read the gauge + armed flag off the same list-panes and
@@ -202,7 +234,7 @@ impl NotifyState {
             if let Some(threshold) = self.context_high {
                 let g = *guarded_supported
                     .get_or_insert_with(|| tma_tmux::stamp::guarded_writes_supported(tmux, &panes));
-                self.fire_context_high(tmux, rec, threshold, g, now);
+                self.fire_context_high(tmux, rec, threshold, g, now, &mut effect_allowed);
             }
 
             // Stall dispatch: the same shape on the pane's own `@agent_stall_notified_at` marker,
@@ -210,20 +242,36 @@ impl NotifyState {
             if let Some(threshold_ms) = self.stall_ms {
                 let g = *guarded_supported
                     .get_or_insert_with(|| tma_tmux::stamp::guarded_writes_supported(tmux, &panes));
-                self.fire_stall(tmux, rec, threshold_ms, g, now);
+                self.fire_stall(tmux, rec, threshold_ms, g, now, &mut effect_allowed);
             }
         }
 
         // Prune the last-seen map to live agent panes: a closed/exited pane drops its entry.
         self.last_state.retain(|p, _| live.contains(p));
-        self.dispatch_progress(tmux, &panes);
+        // Keep denied targets available for clearing an existing indicator, but
+        // never promote their stale working state into a new progress effect.
+        for rec in &mut panes {
+            let read = tma_tmux::persistence::PaneRead::from_options(
+                rec.pane_id.clone(),
+                rec.options.clone(),
+            );
+            if read.program.program_origin && !effect_allowed(&read) {
+                rec.options.remove(opt::STATE);
+            }
+        }
+        self.dispatch_progress_checked(tmux, &panes, &mut effect_allowed);
         Ok(())
     }
 
     /// The `notify.osc_progress` lane, off the same `list-panes` read: write the working edges this
     /// pass produced and remember the new set. With the sink off it only takes down whatever a
     /// previously-enabled pass left lit, then costs nothing (the set stays empty).
-    fn dispatch_progress(&mut self, tmux: &Tmux, panes: &[PaneRecord]) {
+    fn dispatch_progress_checked(
+        &mut self,
+        tmux: &Tmux,
+        panes: &[PaneRecord],
+        effect_allowed: &mut impl FnMut(&tma_tmux::persistence::PaneRead) -> bool,
+    ) {
         if !self.sinks.osc_progress {
             if !self.working_windows.is_empty() {
                 self.clear_progress(tmux, panes);
@@ -231,10 +279,28 @@ impl NotifyState {
             return;
         }
         let lanes = progress::progress_panes(panes);
-        let (working, edges) = progress::progress_edges(&self.working_windows, &lanes);
+        let (mut working, edges) = progress::progress_edges(&self.working_windows, &lanes);
         for (pane, state) in edges {
-            tmux.osc_progress(&pane, state);
-            self.progress_edges += 1;
+            let Some(rec) = panes.iter().find(|rec| rec.pane_id == pane) else {
+                continue;
+            };
+            let read =
+                tma_tmux::persistence::PaneRead::from_options(pane.clone(), rec.options.clone());
+            if !read.program.program_origin || state == tma_tmux::tmux::Progress::Clear {
+                tmux.osc_progress(&pane, state);
+                self.progress_edges += 1;
+                continue;
+            }
+            if tmux.osc_progress_checked(&pane, state, || effect_allowed(&read)) {
+                self.progress_edges += 1;
+            } else {
+                let key = (rec.session.clone(), rec.window_index);
+                if self.working_windows.contains(&key) {
+                    working.insert(key);
+                } else {
+                    working.remove(&key);
+                }
+            }
         }
         self.working_windows = working;
     }
@@ -267,18 +333,80 @@ impl NotifyState {
         &mut self,
         tmux: &Tmux,
         rec: &PaneRecord,
-        stored: &StampedState,
+        _stored: &StampedState,
         now: u64,
         trigger: NotifyTrigger,
+        effect_allowed: &mut impl FnMut(&tma_tmux::persistence::PaneRead) -> bool,
     ) {
-        // Clamp the marker forward past the episode instant (see [`clamp_marker`]): a backward
-        // wall-clock step must not let the marker predate the episode, or it re-fires.
-        let mark_at = clamp_marker(now, stored.episode_at());
-        let marker = render::set_pane_option(&rec.pane_id, opt::NOTIFIED_AT, &mark_at.to_string());
-        if tmux.apply(&[marker]).is_err() {
-            return; // marker not committed ⇒ do not fire (retried next reconcile)
+        let read =
+            tma_tmux::persistence::PaneRead::from_options(rec.pane_id.clone(), rec.options.clone());
+        let Some(observation) = tma_tmux::persistence::AttentionObservation::from_read(read, now)
+        else {
+            return;
+        };
+        if observation.read.program.program_origin && !effect_allowed(&observation.read) {
+            return;
         }
-
+        let Ok(mut claim) =
+            tma_tmux::persistence::claim_observation(tmux, &observation, tma_runtime::now_ms)
+        else {
+            return;
+        };
+        // A timed-out hook sender can refresh this episode after the daemon's decision read.
+        // There may be no later IPC wake. Retry once, only within the exact current observation.
+        if !claim.claimed() {
+            let current = claim.winner();
+            let same_raw = |key| current.options.get(key) == observation.read.options.get(key);
+            if same_raw(tma_core::persistence::opt::RECEIPT)
+                || !same_raw(tma_core::persistence::opt::METADATA_OWNER)
+                || !same_raw(opt::ATTENTION)
+            {
+                return;
+            }
+            let now = tma_runtime::now_ms();
+            if observation.read.program.program_origin
+                && !matches!(
+                    observation.read.projection(now),
+                    Ok(tma_core::persistence::ProjectionRead::Live { .. })
+                )
+            {
+                return;
+            }
+            let Some(current) =
+                tma_tmux::persistence::AttentionObservation::from_read(current.clone(), now)
+            else {
+                return;
+            };
+            if current.identity != observation.identity {
+                return;
+            }
+            if current.read.program.program_origin && !effect_allowed(&current.read) {
+                return;
+            }
+            let Ok(retried) =
+                tma_tmux::persistence::claim_observation(tmux, &current, tma_runtime::now_ms)
+            else {
+                return;
+            };
+            claim = retried;
+            if !claim.claimed() {
+                return;
+            }
+        }
+        let mut winner = rec.clone();
+        winner.options = claim.winner().options.clone();
+        let rec = &winner;
+        let Some(current) =
+            tma_core::persistence::current_stamp(&rec.options, tma_runtime::now_ms())
+                .ok()
+                .flatten()
+        else {
+            return;
+        };
+        let stored = current.into_inner();
+        if !effect_allowed(claim.winner()) {
+            return;
+        }
         // `tma mute` on this pane: the episode is marked notified above and then stays silent, so a
         // mute that expires mid-episode does not ring for a transition the user already muted.
         if tma_runtime::notify::muted(rec, now) {
@@ -315,6 +443,7 @@ impl NotifyState {
     /// Context-high dispatch for one pane: read the stored gauge + armed flag and run the
     /// shared [`evaluate_context_high`], which arms-and-fires (guarded, read-back) or rearms. The
     /// marker is its own armed flag, never the state lane's `@agent_notified_at`.
+    #[allow(clippy::too_many_arguments)]
     fn fire_context_high(
         &mut self,
         tmux: &Tmux,
@@ -322,9 +451,12 @@ impl NotifyState {
         threshold: u8,
         guarded: bool,
         now: u64,
+        effect_allowed: &mut impl FnMut(&tma_tmux::persistence::PaneRead) -> bool,
     ) {
         let command = self.commands.for_context_high().map(str::to_string);
-        if let Some(child) = evaluate_context_high(
+        let read =
+            tma_tmux::persistence::PaneRead::from_options(rec.pane_id.clone(), rec.options.clone());
+        if let Some(child) = evaluate_context_high_checked(
             tmux,
             guarded,
             rec,
@@ -332,6 +464,7 @@ impl NotifyState {
             command.as_deref(),
             &self.sinks,
             now,
+            || effect_allowed(&read),
         ) {
             self.track_child(child, command);
             self.fires += 1;
@@ -341,6 +474,7 @@ impl NotifyState {
     /// Stall dispatch for one pane: read the state tuple + armed flag and run the shared
     /// [`evaluate_stall`], which arms-and-fires (guarded, read-back) or rearms. Its own armed flag,
     /// never the state lane's `@agent_notified_at` and never the context lane's marker.
+    #[allow(clippy::too_many_arguments)]
     fn fire_stall(
         &mut self,
         tmux: &Tmux,
@@ -348,9 +482,12 @@ impl NotifyState {
         threshold_ms: u64,
         guarded: bool,
         now: u64,
+        effect_allowed: &mut impl FnMut(&tma_tmux::persistence::PaneRead) -> bool,
     ) {
         let command = self.commands.for_stall().map(str::to_string);
-        if let Some(child) = evaluate_stall(
+        let read =
+            tma_tmux::persistence::PaneRead::from_options(rec.pane_id.clone(), rec.options.clone());
+        if let Some(child) = evaluate_stall_checked(
             tmux,
             guarded,
             rec,
@@ -358,6 +495,7 @@ impl NotifyState {
             command.as_deref(),
             &self.sinks,
             now,
+            || effect_allowed(&read),
         ) {
             self.track_child(child, command);
             self.fires += 1;
@@ -414,8 +552,9 @@ impl NotifyState {
     /// fire count, history bound, and total transitions recorded.
     pub(crate) fn status_lines(&self) -> String {
         format!(
-            "notify_fires={}\ntransitions_recorded={}\nhistory_len={}\nhistory_cap={}\n\
+            "notify_reconciliations={}\nnotify_fires={}\ntransitions_recorded={}\nhistory_len={}\nhistory_cap={}\n\
              notify_pending={}\nprogress_edges={}\n",
+            self.reconciliations,
             self.fires,
             self.transitions_recorded,
             self.history.len(),
@@ -479,6 +618,7 @@ fn bound_pending(pending: &mut Vec<PendingFire>, cap: usize) {
 /// ([`StampedState::episode_at`]). Under a backward wall-clock step `now` can land before it, and a
 /// marker predating the episode would read as not-yet-notified and re-fire; the `max` holds dedup.
 /// With a monotone clock it is exactly `now`.
+#[cfg(test)]
 fn clamp_marker(now: u64, episode_at: u64) -> u64 {
     now.max(episode_at)
 }
@@ -763,5 +903,387 @@ mod tests {
         ] {
             assert!(s.contains(key), "status missing {key}: {s}");
         }
+    }
+}
+
+#[cfg(test)]
+mod program_adoption_tests {
+    use super::*;
+    use tma_core::persistence::{PaneOwner, PersistedResult, ProcessChain};
+    use tma_core::program_status::{
+        EpisodeId, RecordId, ResultGeneration, ResultIdentity, ResultKind, WorkCycle,
+    };
+    use tma_core::render::{Guard, Publish};
+    use tma_core::snapshot::ProcessIdentity;
+    use tma_tmux::persistence::{self as store, OptionEdit};
+
+    fn program_panes(count: usize) -> (tma_test_support::Scratch, Tmux) {
+        let scratch = tma_test_support::Scratch::new("b6_notify_checks");
+        for index in 0..count {
+            assert!(scratch
+                .tmux(&[
+                    "new-session",
+                    "-d",
+                    "-s",
+                    &format!("owned-{index}"),
+                    "exec /bin/sleep 120"
+                ])
+                .status
+                .success());
+        }
+        let tmux = Tmux::new(Some(scratch.socket.clone()));
+        let rows = tmux.list_panes().unwrap();
+        let token = store::fresh_token().unwrap();
+        assert!(matches!(
+            store::acquire_collector(&tmux, &rows[0].pane_id, &token, tma_runtime::now_ms).unwrap(),
+            store::LeaseOutcome::Won(_)
+        ));
+        for (index, row) in rows.iter().enumerate() {
+            let sample = tma_tmux::tmux::sample_program_process(row.pane_pid).unwrap();
+            let owner = PaneOwner {
+                collector: token.clone(),
+                episode: EpisodeId::new(index as u64 + 1),
+                stream_epoch: 1,
+                processes: ProcessChain::new(vec![ProcessIdentity {
+                    pid: row.pane_pid,
+                    birth: sample.birth,
+                }])
+                .unwrap(),
+            };
+            let now = tma_runtime::now_ms();
+            let publish = Publish {
+                pane_id: row.pane_id.clone(),
+                state: AgentState::Working,
+                detail: None,
+                source: Provenance::Hook,
+                evidence_at: now - 2000,
+                since: now - 2000,
+                stamped_at: now,
+                hash: None,
+                pid: row.pane_pid,
+                name: "reporter".into(),
+                set_attention: false,
+                episode_reset: false,
+                guard: Guard::Unconditional,
+            };
+            assert!(store::publish_program(
+                &tmux,
+                &store::read_pane(&tmux, &row.pane_id).unwrap(),
+                &owner,
+                tma_runtime::now_ms,
+                &publish,
+                None,
+                &[]
+            )
+            .unwrap()
+            .won());
+        }
+        (scratch, tmux)
+    }
+
+    fn deny_after_io(scratch: &tma_test_support::Scratch, pattern: &str) -> Tmux {
+        use std::os::unix::fs::PermissionsExt;
+        let wrapper = scratch.workdir.join("deny-later-notify-io");
+        std::fs::write(
+            &wrapper,
+            format!(
+                r#"#!/bin/sh
+for arg do
+case "$arg" in
+*'set-option'*'@agent_context_notified_at'*|*'set-option'*'@agent_stall_notified_at'*|*'#{{pane_tty}}'*) printf 'io\n' >> '{calls}'; break ;;
+esac
+done
+for arg do
+case "$arg" in
+{pattern})
+if [ ! -e '{denied}' ]; then
+tmux "$@"; tma_notify_result=$?
+printf '%s\n' "$tma_notify_result" > '{done}'
+touch '{denied}'; sleep 0.1; exit "$tma_notify_result"
+fi
+break ;;
+esac
+done
+exec tmux "$@"
+"#,
+                calls = scratch.workdir.join("notify-io-calls").display(),
+                denied = scratch.workdir.join("notify-denied").display(),
+                done = scratch.workdir.join("notify-first-io-done").display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        Tmux::connect(&tma_tmux::tmux::Server {
+            socket_name: Some(scratch.socket.clone()),
+            bin: Some(wrapper.to_string_lossy().into_owned()),
+            ..Default::default()
+        })
+    }
+
+    #[test]
+    fn denied_program_continuation_does_not_start_a_later_marker_claim_or_rearm() {
+        let _gate = tma_test_support::DaemonTestGuard::acquire();
+        if !tma_test_support::tmux_available() {
+            return;
+        }
+        let (scratch, plain) = program_panes(1);
+        let pane = plain.list_panes().unwrap()[0].pane_id.clone();
+        plain
+            .set_pane_option(&pane, opt::CONTEXT_PCT, "90")
+            .unwrap();
+        plain
+            .set_pane_option(&pane, opt::CONTEXT_AT, &tma_runtime::now_ms().to_string())
+            .unwrap();
+        let tmux = deny_after_io(&scratch, "*'set-option'*'@agent_context_notified_at'*");
+        let mut notify = NotifyState::new(
+            NotifyCommands::default(),
+            vec![],
+            NotifySinks::default(),
+            Some(75),
+            Some(1),
+        );
+        notify
+            .reconcile_checked(&tmux, |_| !scratch.workdir.join("notify-denied").exists())
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.workdir.join("notify-first-io-done"))
+                .unwrap()
+                .trim(),
+            "0"
+        );
+        let calls = std::fs::read_to_string(scratch.workdir.join("notify-io-calls")).unwrap();
+        assert_eq!(
+            calls.lines().count(),
+            1,
+            "later program marker must not start after earlier IO denies continuation"
+        );
+        assert!(plain.list_panes().unwrap()[0]
+            .options
+            .contains_key(opt::CONTEXT_NOTIFIED_AT));
+        assert!(!plain.list_panes().unwrap()[0]
+            .options
+            .contains_key(opt::STALL_NOTIFIED_AT));
+
+        std::fs::remove_file(scratch.workdir.join("notify-denied")).unwrap();
+        std::fs::write(scratch.workdir.join("notify-io-calls"), "").unwrap();
+        plain.set_pane_option(&pane, opt::CONTEXT_PCT, "1").unwrap();
+        plain.set_pane_option(&pane, opt::STATE, "idle").unwrap();
+        plain
+            .set_pane_option(&pane, opt::STALL_NOTIFIED_AT, "1")
+            .unwrap();
+        notify
+            .reconcile_checked(&tmux, |_| !scratch.workdir.join("notify-denied").exists())
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.workdir.join("notify-io-calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "later program rearm must not start after earlier IO denies continuation"
+        );
+        assert!(plain.list_panes().unwrap()[0]
+            .options
+            .contains_key(opt::STALL_NOTIFIED_AT));
+    }
+
+    #[test]
+    fn denied_program_continuation_does_not_start_a_later_progress_edge() {
+        let _gate = tma_test_support::DaemonTestGuard::acquire();
+        if !tma_test_support::tmux_available() {
+            return;
+        }
+        let (scratch, plain) = program_panes(2);
+        let tmux = deny_after_io(&scratch, "*'#{pane_tty}'*");
+        let mut notify = NotifyState::new(
+            NotifyCommands::default(),
+            vec![],
+            NotifySinks {
+                osc_progress: true,
+                ..Default::default()
+            },
+            None,
+            None,
+        );
+        notify
+            .reconcile_checked(&tmux, |_| !scratch.workdir.join("notify-denied").exists())
+            .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(scratch.workdir.join("notify-first-io-done"))
+                .unwrap()
+                .trim(),
+            "0"
+        );
+        assert_eq!(
+            std::fs::read_to_string(scratch.workdir.join("notify-io-calls"))
+                .unwrap()
+                .lines()
+                .count(),
+            1,
+            "later progress edge must recheck after the first native tty read"
+        );
+        assert_eq!(
+            notify.working_windows.len(),
+            0,
+            "the first edge is denied after its own slow tty lookup"
+        );
+        assert_eq!(notify.progress_edges, 0);
+        notify.reconcile_checked(&plain, |_| true).unwrap();
+        assert_eq!(notify.working_windows.len(), 2);
+        assert_eq!(notify.progress_edges, 2);
+    }
+
+    #[test]
+    fn native_direct_and_daemon_claims_dedup_and_failure_and_muted_results_are_spent() {
+        let _gate = tma_test_support::DaemonTestGuard::acquire();
+        if !tma_test_support::tmux_available() {
+            return;
+        }
+        let scratch = tma_test_support::Scratch::new("b5b_notify");
+        assert!(scratch
+            .tmux(&["new-session", "-d", "-s", "owned", "exec /bin/sleep 120"])
+            .status
+            .success());
+        let pane = scratch.get("owned", "#{pane_id}");
+        let tmux = Tmux::new(Some(scratch.socket.clone()));
+        let log = scratch.workdir.join("notify.jsonl");
+        let sinks = NotifySinks {
+            log: Some(log.clone()),
+            ..NotifySinks::default()
+        };
+        let on = vec![NotifyTrigger::Blocked, NotifyTrigger::Done];
+        let commands = NotifyCommands::default();
+        let manifests = tma_runtime::manifests::load(None, &[]).unwrap().manifests;
+        let manifest = manifests
+            .iter()
+            .find(|manifest| manifest.name == "claude")
+            .unwrap();
+        let direct = tma_runtime::event::NotifyPolicy {
+            opt_in: true,
+            on: &on,
+            commands: &commands,
+            sinks: &sinks,
+        };
+        tma_runtime::event::apply_event(
+            &tmux,
+            manifest,
+            &pane,
+            "PermissionRequest",
+            r#"{"session_id":"same","tool_name":"Bash","tool_use_id":"call"}"#,
+            &direct,
+            tma_runtime::now_ms(),
+        );
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+        let mut daemon = NotifyState::new(commands.clone(), on, sinks.clone(), None, None);
+        daemon.reconcile(&tmux).unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 1);
+        let token = store::fresh_token().unwrap();
+        assert!(matches!(
+            store::acquire_collector(&tmux, &pane, &token, tma_runtime::now_ms).unwrap(),
+            store::LeaseOutcome::Won(_)
+        ));
+        let pid = scratch.get(&pane, "#{pane_pid}").parse().unwrap();
+        let sample = tma_tmux::tmux::sample_program_process(pid).unwrap();
+        let owner = PaneOwner {
+            collector: token,
+            episode: EpisodeId::new(1),
+            stream_epoch: 1,
+            processes: ProcessChain::new(vec![ProcessIdentity {
+                pid,
+                birth: sample.birth,
+            }])
+            .unwrap(),
+        };
+        let now = tma_runtime::now_ms();
+        let publish = Publish {
+            pane_id: pane.clone(),
+            state: AgentState::Idle,
+            detail: Some(tma_core::Detail::new(tma_core::Detail::ERROR)),
+            source: Provenance::Hook,
+            evidence_at: now,
+            since: now,
+            stamped_at: now,
+            hash: None,
+            pid,
+            name: "claude".into(),
+            set_attention: true,
+            episode_reset: false,
+            guard: Guard::Unconditional,
+        };
+        let mut result = PersistedResult {
+            owner: owner.clone(),
+            identity: ResultIdentity {
+                owner: owner.episode,
+                record: RecordId::root(),
+                generation: ResultGeneration::new(1),
+            },
+            cycle: WorkCycle::new(0),
+            kind: ResultKind::Failure,
+        };
+        let observed = store::read_pane(&tmux, &pane).unwrap();
+        assert!(store::publish_program(
+            &tmux,
+            &observed,
+            &owner,
+            tma_runtime::now_ms,
+            &publish,
+            Some(&result),
+            &[OptionEdit::set(opt::TURN_AT, now.to_string())]
+        )
+        .unwrap()
+        .won());
+        daemon.reconcile(&tmux).unwrap();
+        daemon.reconcile(&tmux).unwrap();
+        let contents = std::fs::read_to_string(&log).unwrap();
+        assert_eq!(contents.lines().count(), 2);
+        assert!(contents
+            .lines()
+            .last()
+            .unwrap()
+            .contains("\"detail\":\"error\""));
+        let record = tmux.list_panes().unwrap().remove(0);
+        let notification = notification_for(
+            &record,
+            "claude",
+            "done",
+            Some("error".into()),
+            None,
+            now,
+            now,
+        );
+        assert_eq!(notification.state, "done");
+        assert_eq!(notification.display_state(), "failed");
+        tmux.set_pane_option(
+            &pane,
+            opt::MUTE_UNTIL,
+            &now.saturating_add(60_000).to_string(),
+        )
+        .unwrap();
+        result.identity.generation = ResultGeneration::new(2);
+        let observed = store::read_pane(&tmux, &pane).unwrap();
+        assert!(store::publish_program(
+            &tmux,
+            &observed,
+            &owner,
+            tma_runtime::now_ms,
+            &publish,
+            Some(&result),
+            &[OptionEdit::set(opt::TURN_AT, (now + 1).to_string())]
+        )
+        .unwrap()
+        .won());
+        daemon.reconcile(&tmux).unwrap();
+        assert_eq!(
+            store::read_pane(&tmux, &pane)
+                .unwrap()
+                .program
+                .notified
+                .unwrap()
+                .result,
+            result
+        );
+        tmux.unset_pane_option(&pane, opt::MUTE_UNTIL).unwrap();
+        daemon.reconcile(&tmux).unwrap();
+        assert_eq!(std::fs::read_to_string(&log).unwrap().lines().count(), 2);
     }
 }

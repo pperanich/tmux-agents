@@ -196,7 +196,14 @@ fn wrapper_bridges_hook_events_to_stamps_and_dedups() {
         &payload("SessionStart", SESSION),
         false,
     );
-    assert_eq!(s.get(&pane, "#{@agent_state}"), "idle");
+    assert_eq!(
+        s.get(&pane, "#{@agent_state}"),
+        "idle",
+        "SessionStart readback: pane command {}, pid {}, options {}",
+        s.get(&pane, "#{pane_current_command}"),
+        s.get(&pane, "#{pane_pid}"),
+        String::from_utf8_lossy(&s.tmux(&["show-options", "-p", "-t", &pane]).stdout)
+    );
     assert_eq!(s.get(&pane, "#{@agent_source}"), "hook");
     assert_eq!(s.get(&pane, "#{@agent_session}"), SESSION);
     assert_eq!(s.get(&pane, "#{@agent_transcript}"), TRANSCRIPT);
@@ -315,7 +322,7 @@ fn losing_arbitration_event_neither_stamps_nor_fires() {
     s.set_opt(&pane, "@agent_evidence_at", future);
     s.set_opt(&pane, "@agent_since", "1000");
     s.set_opt(&pane, "@agent_stamped_at", future);
-    s.set_opt(&pane, "@agent_pid", "4242");
+    s.set_opt(&pane, "@agent_pid", &s.get(&pane, "#{pane_pid}"));
     s.set_opt(&pane, "@agent_name", "claude");
 
     let sink = s.workdir.join("sink");
@@ -387,7 +394,7 @@ fn winning_arbitration_event_stamps_and_fires() {
     s.set_opt(&pane, "@agent_evidence_at", past);
     s.set_opt(&pane, "@agent_since", past);
     s.set_opt(&pane, "@agent_stamped_at", past);
-    s.set_opt(&pane, "@agent_pid", "4242");
+    s.set_opt(&pane, "@agent_pid", &s.get(&pane, "#{pane_pid}"));
     s.set_opt(&pane, "@agent_name", "claude");
 
     let sink = s.workdir.join("sink");
@@ -772,7 +779,8 @@ fn event_degrades_on_malformed_config_and_still_stamps() {
     std::fs::write(&bad_config, "[fold]\nfreshness_secs = \"three\"\n").unwrap();
 
     use std::io::Write;
-    let mut child = Command::new(common::tma_bin())
+    let mut child = s
+        .command()
         .args([
             "event",
             "--agent",
@@ -946,7 +954,8 @@ fn the_hook_lane_answers_a_permission_request_over_tma_act() {
         "the record carries the payload's own call: {parked}"
     );
 
-    let out = Command::new(common::tma_bin())
+    let out = s
+        .command()
         .args(["act", "approve", "--pane", &pane])
         .args(["--expect-permission-request", &request])
         .arg("--json")

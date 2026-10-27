@@ -1,10 +1,10 @@
 # The `@agent_state` contract
 
 `tma` keeps a pane's agent state in tmux user options on the pane itself. There is
-no socket and no privileged writer in the way, so anything that can run
-`tmux set-option` can write those options too. This page is the contract for a
-tool other than tma that wants to: what the tokens mean, which options belong to
-whom, and how to write them without clobbering a concurrent producer.
+no privileged writer in the way, so anything that can run `tmux set-option`
+can overwrite those options. This page defines their public meaning and the
+ownership requirement for cooperating producers. Direct option access is not
+permission to bypass an active program owner.
 
 A *reader* needs [Pane options and JSON contracts](pane-options-and-json.md),
 which documents the whole option set, and [Read agent state from a status bar or
@@ -57,17 +57,19 @@ this vocabulary is open: a value tma has never seen round-trips intact rather
 than failing the decode, and the vocabulary itself is unstable until 1.0. Read it
 defensively, matching the tokens you know and degrading on the rest.
 
-What tma emits today. The bundled manifests emit four:
+The bundled manifests emit these detail tokens:
 
 | token | with state | meaning |
 |---|---|---|
 | `permission` | `blocked` | a tool-use permission prompt; approving grants the one action in front of the user |
 | `plan` | `blocked` | a plan-approval dialog, whose affirmative option grants every following action |
 | `trust` | `blocked` | a workspace-trust gate, whose affirmative option grants the whole folder |
+| `question` | `blocked` | a question waiting for a human answer, not a permission grant |
 | `rate_limit` | `working` or `blocked` | a usage-limit wait; `working` when the agent resumes by itself, `blocked` when the wait halted and needs a person |
 
-`tma-core` declares four more as constants that no bundled manifest emits yet:
-`question`, `error`, `background`, `compacting`.
+Native OSC 7501 can also supply `auth` on blocked and `error` on a fresh failure
+result projected to idle. `tma-core` declares `background` and `compacting` as
+constants without a bundled mapping. Failure is not an approval target.
 
 The `rate_limit` pair is the shape of the axis split: the state says who owes the
 next move, the detail says why. A producer that has a reason to report puts it
@@ -93,14 +95,15 @@ more than 2000 ms *ahead* of `@agent_stamped_at` came from a backward wall-clock
 step (a suspend, an NTP correction), and the next publish rewrites it rather than
 holding a value in the future forever.
 
-`@agent_stamped_at` is the instant of *this write*. Every write tma makes ends
-with it, including a refresh that changes nothing else. It is the per-pane
-freshness marker: a reader ages the verdict against it, and tma's poll cycle
-compares it against `#{window_activity}` to decide whether the pane needs
-re-reading at all. Because it is written last, a reader that finds
-`@agent_stamped_at` older than `@agent_since` or `@agent_evidence_at` caught a
-chained write in flight and should treat the tuple as in progress rather than
-acting on it.
+`@agent_stamped_at` is the state stamp's freshness marker. Baseline state
+publication/hold writes it after the public state fields; it is not the last
+write in every transaction. Private commit/receipt fields can follow it and
+independent metadata or acknowledgement writes need not advance it. A reader
+that finds it slightly older than `@agent_since` or `@agent_evidence_at` treats
+the public tuple as in progress. The 2-second clock-step exception above still
+applies. For native authority, lease and owner validation also matter: an old
+report can remain valid during silence, and a fresh timestamp alone cannot
+restore a lost stream.
 
 ## Identity and provenance
 
@@ -113,7 +116,7 @@ reporting on.
 
 | token | meaning |
 |---|---|
-| `hook` | the agent itself reported this, through an event, with no inference |
+| `hook` | direct application evidence, from a hook event or a validated native program report |
 | `capture` | it was read off the pane's screen |
 | `process` | it came from the process walk |
 | `activity` | legacy, accepted on read, produced by nothing since a viewport hash change stopped counting as evidence |
@@ -126,8 +129,7 @@ weakest provenance and the one tma's guards will overwrite most readily.
 
 `@agent_evidence_at` is the epoch ms of the evidence behind the current state, as
 distinct from when it was written. Absent reads as `0`. It is the basis tma's
-guards arbitrate on, so a producer that leaves it unset is choosing to lose every
-arbitration it enters.
+baseline guards arbitrate on. It does not supersede program ownership.
 
 `@agent_session` is the agent's own session id, as the agent reports it. tma
 stamps it from the hook payload at registration. A writer that knows its agent's
@@ -138,61 +140,44 @@ things.
 
 ## Writing without clobbering
 
-tmux options have no transactions, no compare-and-set, and no writer identity. A
-read-then-write from a second process loses exactly the races that matter,
-because a state change lands inside the read-to-write window. So tma never
-decides client-side. Every write whose correctness depends on a previous value is
-a server-side conditional: tmux expands the format in the target pane's context,
-at write time, and stores the result.
+tmux has no atomic option-tuple transaction. Current tma producers use typed
+ownership guards in addition to evidence timestamps. A frozen `if-shell -F`
+admission body contains only literal, explicitly targeted option mutations.
+Private owner, commit and receipt comparisons plus full readback determine
+whether publication won. State-dependent identity, freshness, attention and
+removal operations obey the same ownership policy.
 
-One `set-option -F` per option, where the value expands either to the new value
-or back to the stored one:
+Failed admission makes no edits. A write that executed may then lose readback
+to a concurrent receipt replacement; that Lost result is not proof of no
+mutation and does not authorize replay. A batched advisory poll hint can remain
+after this outcome, but grants no state or notification permission. Separate
+exact acknowledgement and notification claims provide at-most-once admission,
+not exactly-once external delivery.
 
-```
-tmux set-option -p -F -t <pane> <key> '#{?<suppress>,#{<key>},<new value>}'
-```
+Baseline timestamps still prevent old capture evidence overwriting a newer
+hook claim, with the documented newer-blocker and coverage-aware decay rules.
+They cannot override live program authority. Public `source=hook` encodes both
+direct origins, so checking that token or `evidence_at` alone is insufficient.
+Upgrade all tma producers together. Mixed older writers and third-party direct
+writers that lack these guards are not guaranteed safe. Integrations should
+submit agent events through `tma event` instead of copying a timestamp-only
+`set-option` recipe. The private protocol is an implementation contract, not a
+stable third-party write API.
 
-`<suppress>` is a format that expands truthy when the write must be held. tma
-chains every option of the tuple under the *same* `<suppress>`, in one `tmux`
-invocation with `;` separators, so the tuple commits together or holds together,
-and `@agent_stamped_at` goes last.
+The adapter probes conditional-write behavior. An effective nonempty
+`after-set-option` hook can yield within a body and disables program authority
+for that target. tma revokes the matching pane commit, keeps protected baseline
+fallback, and can retain healthy peers through another supported lease target.
+It never removes the user's hook or downgrades native authority to unguarded
+writes. Unsupported servers remain on baseline behavior.
 
-Two of tma's own guards are the ones a second writer meets:
-
-- A capture-sourced write suppresses on `#{==:#{@agent_source},hook}`. A screen
-  read never overwrites a claim the agent itself made.
-- Blocker chrome overrides a `working` or `idle` hook claim only when the
-  capture postdates the stored evidence:
-  `#{&&:#{==:#{@agent_source},hook},#{e|<=:<capture ms>,#{@agent_evidence_at}}}`.
-
-The practical consequence for a second writer that reports its agent's own
-events: stamp `@agent_source` as `hook` with a fresh `@agent_evidence_at`, and
-tma's capture writes hold off the pane. Blocker chrome newer than your evidence
-still wins, which is deliberate. A blocked pane is the expensive thing to get
-wrong.
-
-For your own writes, the rule two event-sourced producers use between themselves
-is evidence-time arbitration, and it is the one to copy. Suppress when the store
-holds a hook claim whose evidence is strictly newer than yours, so the outcome
-depends on when the two things happened rather than on which process finished
-first:
-
-```sh
-now=$(...)   # epoch milliseconds
-suppress="#{&&:#{==:#{@agent_source},hook},#{e|<:$now,#{@agent_evidence_at}}}"
-tmux set-option -p -F -t "$pane" @agent_state  "#{?$suppress,#{@agent_state},working}" \
-   \; set-option -p -F -t "$pane" @agent_source "#{?$suppress,#{@agent_source},hook}" \
-   \; set-option -p -F -t "$pane" @agent_evidence_at "#{?$suppress,#{@agent_evidence_at},$now}" \
-   \; set-option -p -F -t "$pane" @agent_stamped_at "#{?$suppress,#{@agent_stamped_at},$now}"
-```
-
-One caveat on `-F`. A tmux before 3.2 accepts the flag and stores the literal
-`#{?...}` string instead of expanding it, which corrupts the tuple rather than
-failing loudly. tma probes the behaviour once per server (it writes a format that
-can only expand to `ok`, reads it back, and unsets it) and caches the answer in
-the server option `@tma_setpf_ok`, degrading to plain unguarded writes when the
-answer is no. A second writer should run its own probe under its own key; that
-one is tma's.
+Session/transcript, model/API endpoint, subagent and pending-request metadata
+have independent process/session ownership. A valid metadata update can apply
+when its accompanying hook state loses. A sessionless event may establish a
+private validated binding without inventing public session/tool/request data.
+First metadata admission has one bounded receipt-only recovery attempt when
+the original identity, metadata and episode are still unchanged; an already
+applied update that lost readback is not replayed.
 
 ## The rollups are tma's
 
@@ -209,39 +194,48 @@ session, so one shared name would make an agentless window render its session's
 counts.
 
 **Do not write either one.** They are a pure function of the panes' own
-`@agent_state`, and tma recomputes both from every pane in scope and writes only
-where the recomputed value differs from what is stored. A second writer that
-stamps a valid token is therefore counted for free, with no rollup code of its
-own. One that stamps an out-of-set token is dropped from the count silently: the
-token fails to parse, and the pane contributes nothing to the total.
+validated state, and tma writes a recomputed value only when it differs and the
+complete scope snapshot still matches. The snapshot is capped at 64 KiB. An
+oversized scope keeps its previous summary hint and emits a bounded warning;
+its summary is not guaranteed to converge while it remains oversized. Pane
+publication and resolved rows retain their independent guards.
+
+Within an admitted scope, a cooperating second writer needs no rollup code of
+its own. An out-of-set state token fails to parse and contributes nothing to
+the total.
 
 ## Removal when the agent exits
 
 A pane outlives its agent, so a stamp nothing refreshes has to go. tma unsets the
-whole per-pane set in one invocation and recomputes both rollups:
+per-pane set under ownership guards and recomputes both rollups:
 
 `@agent_state`, `@agent_detail`, `@agent_source`, `@agent_evidence_at`,
 `@agent_since`, `@agent_stamped_at`, `@agent_attention`, `@agent_notified_at`,
-`@agent_turn_at`, `@agent_hash`, `@agent_pid`, `@agent_name`, `@agent_session`,
+`@agent_turn_at`, `@agent_hash`, `@agent_pid`, `@agent_name`, `@agent_session`, `@agent_transcript`,
 `@agent_subagents`, `@agent_context_pct`, `@agent_context_at`, `@agent_tokens`,
-`@agent_tokens_at`, `@agent_context_notified_at`, `@agent_quota_pct`,
+`@agent_tokens_at`, `@agent_context_notified_at`, `@agent_stall_notified_at`, `@agent_quota_pct`,
 `@agent_quota_window`, `@agent_quota_resets_at`, `@agent_quota_at`,
-`@agent_cost_usd`, `@agent_model`, `@agent_permission_request`,
+`@agent_cost_usd`, `@agent_model`, `@agent_permission_request`, `@agent_question_request`,
 `@agent_pending_tool`, `@agent_pending_call`, `@agent_pending_summary`,
 `@agent_api_endpoint`, and two internal anchors, `@tma_title_match_pid` and
 `@tma_reg_dead_since`.
 
-Three survive that removal on purpose, and go only in `tma uninstall`'s sweep:
+Private protocol fields use their own exact owner/history cleanup. SessionEnd
+while the agent is still alive clears its session metadata and pending requests,
+preserving state rather than treating an in-process session boundary as exit.
+
+Independent action/user/watcher options survive ordinary agent removal:
 `@agent_action` (a detached action can outlive the agent that triggered it),
 `@agent_mute_until` (a mute belongs to the user, not to the episode), and
-`@tma_watch_pid` (its owner is a `tma watch`, not the agent). `@agent_ignore` is
+`@tma_watch_pid` (its owner is a `tma watch`, not the agent). Action repeat
+bookkeeping (`@agent_act_repeat`) is also independent. `@agent_ignore` is
 never cleared by tma at all: the user wrote it, and only the user takes it back.
 
-A second writer removing its own pane unsets at least `@agent_state`,
+A cooperating writer removing its own pane, after validating ownership, unsets at least `@agent_state`,
 `@agent_detail`, `@agent_source`, `@agent_evidence_at`, `@agent_since` and
 `@agent_stamped_at`. Leaving `@agent_state` standing with nothing refreshing it
-is the failure this list exists to prevent: no reader can tell a held stamp from
-a live one except by its age.
+leaves a historical snapshot behind. Age is a baseline freshness hint; native
+state also requires the separate live owner and collector lease.
 
 ## The rules, condensed
 
@@ -249,19 +243,20 @@ A second writer **MUST**:
 
 - write only `idle`, `working`, `blocked` or `unknown` into `@agent_state`, and
   `unknown` rather than a fifth token when nothing fits;
-- write `@agent_stamped_at` on every write, in epoch milliseconds, last in the
-  chain;
+- keep state freshness in epoch milliseconds and preserve the public-field
+  ordering and private commit/readback rules;
 - write `@agent_source` from its closed set, `hook` for the agent's own event and
   `capture` for a screen read, and put its own identity in `@agent_name` instead;
-- unset the state options when its agent exits.
+- obey program ownership on state and companion writes, holds and removals;
+- remove its own state when its agent exits without clearing a newer owner.
 
 **SHOULD**:
 
 - set `@agent_evidence_at` to the instant of the evidence rather than of the
   write, since that is what arbitration compares;
 - set `@agent_name`, and `@agent_session` when it knows the agent's session id;
-- write conditionally with `set-option -F`, holding when the stored evidence is
-  newer than its own;
+- use tma's event intake for supported agent events; a direct writer must
+  implement ownership as well as evidence ordering;
 - write `@agent_since` only on a state change and hold it otherwise;
 - keep `@agent_detail` to `[a-z0-9_-]`.
 

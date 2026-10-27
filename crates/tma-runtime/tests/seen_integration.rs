@@ -244,7 +244,10 @@ fn the_sweep_defers_its_clear_to_the_caller() {
 
     let deferred = capture.take_deferred_seen();
     assert_eq!(
-        deferred.iter().map(|(p, _)| p.as_str()).collect::<Vec<_>>(),
+        deferred
+            .iter()
+            .map(|observation| observation.read.pane_id.as_str())
+            .collect::<Vec<_>>(),
         vec![watched.as_str()],
         "the sweep hands the raised pane to its caller"
     );
@@ -267,7 +270,7 @@ fn the_sweep_defers_its_clear_to_the_caller() {
         report
             .deferred_seen
             .iter()
-            .map(|(p, _)| p.as_str())
+            .map(|observation| observation.read.pane_id.as_str())
             .collect::<Vec<_>>(),
         vec![watched.as_str()]
     );

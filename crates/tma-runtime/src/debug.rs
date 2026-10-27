@@ -86,7 +86,7 @@ pub fn observe<'a>(
 
     // A malformed stamp is treated as no prior, as everywhere else, but `explain` keeps the error:
     // it is the surface whose job is saying why a pane reads the way it does.
-    let (prev, stamp_error) = match StampedState::from_options(&record.options) {
+    let (prev, stamp_error) = match tma_core::persistence::current_stamp(&record.options, now) {
         Ok(read) => (read.map(ReadResult::into_inner), None),
         Err(err) => (None, Some(err)),
     };
@@ -152,7 +152,7 @@ pub fn observe<'a>(
                 scrolled: snapshot.scrolled(),
                 history_view: evaluation.history_view,
             };
-            let verdict = tma_core::verdict(
+            let mut verdict = tma_core::verdict(
                 prev.clone(),
                 &facts,
                 &evidence,
@@ -160,6 +160,20 @@ pub fn observe<'a>(
                 cfg,
                 now,
             );
+            if let Ok(tma_core::persistence::ProjectionRead::Live { stamp, .. }) =
+                tma_core::persistence::read_projection(&record.options, now)
+            {
+                verdict.state = stamp.state;
+                verdict.detail = stamp.detail;
+                verdict.winning_evidence = tma_core::WinningEvidence {
+                    origin: Some(Source::ProgramStatus),
+                    source: tma_core::Provenance::Hook,
+                    at: stamp.evidence_at,
+                    label: "persisted program status".into(),
+                };
+                verdict.writes.action = tma_core::WriteAction::Hold;
+                verdict.writes.set_attention = false;
+            }
             (Some(evaluation), evidence, facts, Some(verdict))
         }
         None => {
@@ -501,6 +515,7 @@ fn identity_source(s: identity::IdentitySource) -> &'static str {
 
 fn source_token(s: Source) -> &'static str {
     match s {
+        Source::ProgramStatus => "program-status",
         Source::HookEvent => "hook",
         Source::ScreenRule => "screen",
         Source::Title => "title",
@@ -617,6 +632,7 @@ mod tests {
                 state: AgentState::Blocked,
                 detail: Some(Detail::new(Detail::PERMISSION)),
                 winning_evidence: WinningEvidence {
+                    origin: Some(Source::ScreenRule),
                     source: Provenance::Capture,
                     at: 1_700_000_000_000,
                     label: "rule#0".to_string(),
@@ -627,6 +643,7 @@ mod tests {
                     set_attention: false,
                     episode_reset: false,
                 },
+                program: None,
             }),
             now: 1_700_000_000_000,
         }

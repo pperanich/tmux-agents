@@ -7,10 +7,8 @@
 //! two emission modifiers, `--changes-only` (poll mode stops repeating) and `--events` (a silent
 //! baseline, then one edge per transition). Scratch `tmux -L` server, killed on drop.
 
-use std::io::{BufRead, BufReader, Read, Write};
-use std::os::unix::net::UnixListener;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -145,7 +143,20 @@ impl SubscribeChild {
 
     /// [`SubscribeChild::spawn`] plus the emission-mode flags (`--changes-only`, `--events`).
     fn spawn_with(s: &Scratch, interval: u64, extra: &[&str]) -> SubscribeChild {
-        let mut child = Command::new(s.bin())
+        Self::spawn_with_tmux(s, interval, extra, None)
+    }
+
+    fn spawn_with_tmux(
+        s: &Scratch,
+        interval: u64,
+        extra: &[&str],
+        binary: Option<&std::path::Path>,
+    ) -> SubscribeChild {
+        let mut command = s.command();
+        if let Some(binary) = binary {
+            command.env("TMA_TMUX_BIN", binary);
+        }
+        let mut child = command
             .args(["subscribe", "--json", "--interval", &interval.to_string()])
             .args(extra)
             .args(["--socket-name", &s.socket])
@@ -179,6 +190,26 @@ impl SubscribeChild {
             errs,
             readers: vec![r1, r2],
         }
+    }
+
+    fn events_after_baseline(s: &Scratch, pane: &str) -> Self {
+        use std::os::unix::fs::PermissionsExt;
+        let polls = s.workdir.join("subscriber-polls");
+        std::fs::write(&polls, "").unwrap();
+        let wrapper = s.workdir.join("observe-subscriber-polls");
+        // Exactly one LAST_POLL read begins each cycle. Starting the third proves both
+        // the silent baseline and one unchanged render have completed in this child.
+        std::fs::write(&wrapper, format!("#!/bin/sh\nread_options=0\nread_poll=0\nfor arg do\n[ \"$arg\" != show-options ] || read_options=1\n[ \"$arg\" != '@tma_last_poll' ] || read_poll=1\ndone\nif [ $read_options -eq 1 ] && [ $read_poll -eq 1 ]; then printf x >> '{}'; fi\nexec tmux \"$@\"\n", polls.display())).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let mut sub = SubscribeChild::spawn_with_tmux(s, 1, &["--events"], Some(&wrapper));
+        assert!(
+            tma_test_support::wait_until(POLL_CEILING, || sub.is_running()
+                && std::fs::metadata(&polls).is_ok_and(|meta| meta.len() >= 3)),
+            "subscriber never completed its baseline: stderr={:?}{}",
+            sub.errors(),
+            s.forensics(&[pane])
+        );
+        sub
     }
 
     fn snapshot(&self) -> Vec<(Instant, String)> {
@@ -241,7 +272,8 @@ impl Drop for DaemonChild {
 /// `clients` (daemon up) and `wait_subscribers` (a stream subscribed). Shares the scratch's socket +
 /// manifest-dir, so it keys the SAME per-server socket the stream probes.
 fn spawn_daemon(s: &Scratch, status: &std::path::Path) -> DaemonChild {
-    let child = Command::new(s.bin())
+    let child = s
+        .command()
         .arg("daemon")
         .args(["--socket-name", &s.socket])
         .arg("--manifest-dir")
@@ -259,8 +291,9 @@ fn spawn_daemon(s: &Scratch, status: &std::path::Path) -> DaemonChild {
 
 /// Fire `tma event --agent agent --kind Block` at the daemon (as a hook would): the daemon applies
 /// the `blocked` stamp and pushes its subscribers.
-fn fire_block(s: &Scratch, pane: &str) {
-    let mut child = Command::new(s.bin())
+fn fire_block(s: &Scratch, pane: &str) -> std::process::Output {
+    let mut child = s
+        .command()
         .args([
             "event",
             "--agent",
@@ -277,7 +310,7 @@ fn fire_block(s: &Scratch, pane: &str) {
         .env("TMA_CONFIG", empty_config_path())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::piped())
         .spawn()
         .expect("spawn tma event");
     child
@@ -286,7 +319,13 @@ fn fire_block(s: &Scratch, pane: &str) {
         .unwrap()
         .write_all(br#"{"session_id":"s"}"#)
         .unwrap();
-    assert!(child.wait().expect("wait tma event").success());
+    let output = child.wait_with_output().expect("wait tma event");
+    assert!(
+        output.status.success(),
+        "event intake: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    output
 }
 
 /// (a) drift / own-cycle: with no daemon (poll mode), a stream line is byte-identical to what `ls
@@ -422,7 +461,7 @@ fn version_skew_nak_falls_back_to_poll() {
     if !have_tmux() {
         return;
     }
-    let s = Scratch::new("sub-skew");
+    let s = Scratch::new_daemon("sub-skew");
     let _pane = static_agent(&s, "work");
     write_manifest(&s, &pane_process_names(&s, "work"));
     assert!(s.tma(&["ls"]).status.success()); // populate stamps (pane is idle)
@@ -431,32 +470,11 @@ fn version_skew_nak_falls_back_to_poll() {
     // EXACT value the client's `resolve_socket_path` sees), then derive the keyed path.
     let socket_path = s.display("work", "#{socket_path}");
     assert!(!socket_path.is_empty(), "resolved a server socket path");
-    let keyed = tma_runtime::ipc::paths_for(&socket_path);
-    std::fs::create_dir_all(&keyed.dir).unwrap();
-    let _ = std::fs::remove_file(&keyed.socket);
-    let listener = UnixListener::bind(&keyed.socket).unwrap();
-    listener.set_nonblocking(true).unwrap();
-    let stop = Arc::new(AtomicBool::new(false));
-    let stop2 = stop.clone();
-    let fake = std::thread::spawn(move || {
-        // NAK every accepted subscribe and hold it open, so EOF is never the degrade trigger — the
-        // NAK is. The stream re-probes periodically, so more than one accept is expected and fine.
-        let mut held: Vec<_> = Vec::new();
-        while !stop2.load(Ordering::Relaxed) {
-            match listener.accept() {
-                Ok((mut c, _)) => {
-                    let mut buf = [0u8; 8];
-                    let _ = c.read(&mut buf); // consume the subscribe frame
-                    let _ = c.write_all(&[0x15]); // NAK: an old daemon rejects the unknown magic
-                    held.push(c);
-                }
-                Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(_) => break,
-            }
-        }
-    });
+    let socket = s.workdir.join("tma").join(format!(
+        "{}.sock",
+        tma_runtime::ipc::socket_key(&socket_path)
+    ));
+    let fake = tma_test_support::NakServer::new(socket);
 
     let mut sub = SubscribeChild::spawn(&s, 1);
     // The NAK degrades the stream to the poll loop, which emits every second: two lines prove it
@@ -474,10 +492,9 @@ fn version_skew_nak_falls_back_to_poll() {
         sub.errors()
     );
 
+    assert!(fake.hits() >= 1, "a real subscribe frame was NAKed");
     drop(sub);
-    stop.store(true, Ordering::Relaxed);
-    let _ = fake.join();
-    let _ = std::fs::remove_file(&keyed.socket);
+    drop(fake);
 }
 
 /// (e) `--changes-only` in poll mode: a settled server goes quiet after the entry snapshot instead
@@ -531,10 +548,7 @@ fn events_emit_one_edge_per_transition_after_a_silent_baseline() {
     assert!(s.tma(&["ls"]).status.success());
     assert_eq!(s.display("work", "#{@agent_state}"), "idle");
 
-    let sub = SubscribeChild::spawn_with(&s, 1, &["--events"]);
-    // A negative window: two poll intervals with nothing moving, so the baseline cycle and the ones
-    // after it have all run and said nothing. There is no event to poll for by design.
-    std::thread::sleep(Duration::from_millis(2500));
+    let mut sub = SubscribeChild::events_after_baseline(&s, &pane);
     assert_eq!(
         sub.line_count(),
         0,
@@ -544,10 +558,14 @@ fn events_emit_one_edge_per_transition_after_a_silent_baseline() {
 
     // No daemon is running, so `tma event` direct-stamps the pane blocked; the stream's next cycle
     // observes the transition.
-    fire_block(&s, &pane);
-    let (_, line) = sub
-        .wait_for_line(|l| l.contains("\"to\":\"blocked\""), POLL_CEILING)
-        .expect("an edge record for the idle→blocked transition");
+    let intake = fire_block(&s, &pane);
+    let intake_stamp = s.get(
+        &pane,
+        "#{@agent_state}|#{@agent_pid}|#{@agent_stamped_at}|#{@agent_session}",
+    );
+    let edge = sub.wait_for_line(|l| l.contains("\"to\":\"blocked\""), POLL_CEILING);
+    assert!(edge.is_some(), "missing idle-to-blocked edge: child_alive={}, intake_status={:?}, intake_stderr={}, intake_stamp={intake_stamp:?}, lines={:?}, stream_errors={:?}{}", sub.is_running(), intake.status.code(), String::from_utf8_lossy(&intake.stderr), sub.snapshot(), sub.errors(), s.forensics(&[&pane]));
+    let (_, line) = edge.unwrap();
 
     assert!(line.starts_with("{\"schema\":1,\"at_ms\":"), "{line}");
     assert!(line.contains("\"from\":\"idle\""), "{line}");
@@ -602,10 +620,7 @@ fn the_stream_reports_the_done_edge_before_retiring_it() {
     });
     let last_input = s.client_activity_ms();
 
-    let sub = SubscribeChild::spawn_with(&s, 1, &["--events"]);
-    // Two poll intervals of silence: the baseline cycle and its successors have run, so the diff's
-    // left side is the settled idle row and the next edge emitted is the one under test.
-    std::thread::sleep(Duration::from_millis(2500));
+    let sub = SubscribeChild::events_after_baseline(&s, &pane);
     assert_eq!(
         sub.line_count(),
         0,

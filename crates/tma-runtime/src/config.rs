@@ -21,6 +21,8 @@ use crate::window_name::NameTemplate;
 #[serde(deny_unknown_fields)]
 pub struct Config {
     #[serde(default)]
+    pub program_status: ProgramStatusSection,
+    #[serde(default)]
     pub fold: FoldSection,
     #[serde(default)]
     pub status: StatusStyles,
@@ -55,6 +57,33 @@ pub struct Config {
     /// `deny_unknown_fields` print an unknown-key error the user has to decode.
     #[serde(default, rename = "agents")]
     legacy_agents: Option<toml::Value>,
+}
+
+/// Native program reporting is opt-in and independent of manifest app aliases.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ProgramStatusMode {
+    #[default]
+    Off,
+    Observe,
+    Prefer,
+}
+
+impl ProgramStatusMode {
+    pub const fn word(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Observe => "observe",
+            Self::Prefer => "prefer",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProgramStatusSection {
+    #[serde(default)]
+    pub mode: ProgramStatusMode,
 }
 
 // ---- [fold] ------------------------------------------------------------------------------
@@ -1053,6 +1082,28 @@ fn resolve_path(explicit: Option<&Path>) -> Option<PathBuf> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn program_status_modes_are_typed_opt_in_and_strict() {
+        let default: Config = toml::from_str("").unwrap();
+        assert_eq!(default.program_status.mode, ProgramStatusMode::Off);
+        for (word, mode) in [
+            ("off", ProgramStatusMode::Off),
+            ("observe", ProgramStatusMode::Observe),
+            ("prefer", ProgramStatusMode::Prefer),
+        ] {
+            let config: Config =
+                toml::from_str(&format!("[program_status]\nmode = {word:?}")).unwrap();
+            assert_eq!(config.program_status.mode, mode);
+        }
+        for input in [
+            "[program_status]\nmode = \"Prefer\"",
+            "[program_status]\nmode = \"enabled\"",
+            "[program_status]\napps = [\"pi\"]",
+        ] {
+            assert!(toml::from_str::<Config>(input).is_err());
+        }
+    }
+
     /// Zero-config: an empty document deserializes to exactly the documented defaults, so the
     /// no-file path and the pre-config hardcodes agree field-for-field.
     #[test]
@@ -1565,6 +1616,10 @@ mod tests {
         let d = &c.daemon;
         let secs = |v: u64| toml::Value::Integer(v as i64);
         let mut out = vec![
+            (
+                "program_status.mode".to_string(),
+                toml::Value::String(c.program_status.mode.word().to_string()),
+            ),
             ("fold.dwell_secs".to_string(), secs(f.dwell_secs)),
             ("fold.hook_decay_secs".to_string(), secs(f.hook_decay_secs)),
             (

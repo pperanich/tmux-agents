@@ -20,7 +20,8 @@ fn bin() -> &'static str {
 /// A fresh `tma event` process (cold: no in-process state), pane pinned via `TMUX_PANE`. Suite-specific
 /// (claude agent, stdin payload, cold-restart semantics), so a free helper over the shared [`Scratch`].
 fn event(s: &Scratch, event: &str, pane: &str, payload: &str, notify: bool) {
-    let mut child = Command::new(bin())
+    let mut child = s
+        .command()
         .args([
             "event",
             "--agent",
@@ -50,12 +51,29 @@ fn event(s: &Scratch, event: &str, pane: &str, payload: &str, notify: bool) {
 
 /// Simulate the select-pane hook firing the clear-attention command.
 fn clear_attention(s: &Scratch, pane: &str) {
-    let out = Command::new(bin())
+    let out = s
+        .command()
         .args(["clear-attention", pane, "--socket-name", &s.socket])
         .env("TMA_CONFIG", common::empty_config_path())
         .output()
         .expect("spawn clear-attention");
     assert!(out.status.success());
+}
+
+/// Navigation tests need a coherent legacy presentation with an observed episode. An isolated
+/// attention bit carries no state/result identity and cannot authorize an exact acknowledgement.
+fn raise_legacy_attention(s: &Scratch, pane: &str) {
+    let now = tma_runtime::now_ms().to_string();
+    for (key, value) in [
+        ("@agent_state", "blocked"),
+        ("@agent_source", "hook"),
+        ("@agent_since", now.as_str()),
+        ("@agent_evidence_at", now.as_str()),
+        ("@agent_stamped_at", now.as_str()),
+    ] {
+        s.set_opt(pane, key, value);
+    }
+    s.set_opt(pane, "@agent_attention", "1");
 }
 
 const SESSION: &str = "65ced290-2a08-43de-aa80-d0b049d7ce30";
@@ -156,7 +174,8 @@ fn episode_reset_clears_attention_and_notified() {
     }
 
     // A pid-change episode boundary (pid 222): the write path must clear attention + marker.
-    let out = Command::new(bin())
+    let out = s
+        .command()
         .args(["debug", "stamp", &pane, "--socket-name", &s.socket])
         .args([
             "--mode", "publish", "--state", "working", "--source", "capture",
@@ -221,7 +240,7 @@ fn select_pane_hook_clears_attention_on_the_selected_pane() {
     select_pane(&s, &second);
     install_hook(&s, "after-select-pane");
 
-    s.set_opt(&first, "@agent_attention", "1");
+    raise_legacy_attention(&s, &first);
     select_pane(&s, &first);
 
     assert!(
@@ -246,9 +265,10 @@ const WINDOW_HOOK: &str = "session-window-changed";
 /// test: it is what tells `clear-attention` which departure format to resolve.
 fn install_hook(s: &Scratch, hook: &str) {
     let cmd = format!(
-        "run-shell \"TMA_HOOK_KIND={hook} '{0}' clear-attention '#{{pane_id}}' 2>/dev/null \
+        "run-shell \"TMA_HOOK_KIND={hook} '{0}' clear-attention '#{{pane_id}}' --socket-name '{1}' 2>/dev/null \
          || true\"",
-        bin()
+        bin(),
+        s.socket
     );
     assert!(s.tmux(&["set-hook", "-g", hook, &cmd]).status.success());
 }
@@ -257,7 +277,8 @@ fn install_hook(s: &Scratch, hook: &str) {
 /// environment, the arrival pane in argv, and `TMUX_PANE` explicitly absent so tmux cannot infer the
 /// query's target from the environment instead of from the argument we pass it.
 fn clear_attention_as_hook(s: &Scratch, arrival: &str, hook: &str) {
-    let out = Command::new(bin())
+    let out = s
+        .command()
         .args(["clear-attention", arrival, "--socket-name", &s.socket])
         .env("TMA_CONFIG", common::empty_config_path())
         .env("TMA_HOOK_KIND", hook)
@@ -290,8 +311,8 @@ fn attached_client(s: &Scratch) -> String {
 /// silently did nothing, which is the failure mode these tests exist to catch. Returns whether
 /// `pane`'s flag survived.
 fn survives_navigation(s: &Scratch, pane: &str, witness: &str, nav: impl FnOnce()) -> bool {
-    s.set_opt(pane, "@agent_attention", "1");
-    s.set_opt(witness, "@agent_attention", "1");
+    raise_legacy_attention(s, pane);
+    raise_legacy_attention(s, witness);
     nav();
     assert!(
         tma_test_support::wait_until(tma_test_support::POLL_CEILING, || s
@@ -338,7 +359,7 @@ fn departing_a_pane_clears_its_attention_flag() {
     );
 
     install_hook(&s, "after-select-pane");
-    s.set_opt(&watched, "@agent_attention", "1");
+    raise_legacy_attention(&s, &watched);
     select_pane(&s, &elsewhere);
 
     assert!(
@@ -377,7 +398,7 @@ fn departing_a_window_clears_the_pane_it_was_showing() {
     select_pane(&s, &watched);
 
     install_hook(&s, WINDOW_HOOK);
-    s.set_opt(&watched, "@agent_attention", "1");
+    raise_legacy_attention(&s, &watched);
     assert!(s.tmux(&["select-window", "-t", "s1:1"]).status.success());
 
     assert!(
@@ -435,8 +456,8 @@ fn a_no_op_window_selection_leaves_the_window_you_left_alone() {
     install_hook(&s, WINDOW_HOOK);
 
     // Two agents finish: one in the window you are sitting in, one in the window you left earlier.
-    s.set_opt(&far, "@agent_attention", "1");
-    s.set_opt(&near, "@agent_attention", "1");
+    raise_legacy_attention(&s, &far);
+    raise_legacy_attention(&s, &near);
 
     // Jump to the near one. You are already in its window, so this select-window changes nothing.
     assert!(s.tmux(&["select-window", "-t", "s1:1"]).status.success());
@@ -594,8 +615,8 @@ fn the_departure_lookup_stays_inside_the_arrival_panes_session() {
 
     for i in 0..2 {
         let (mine, theirs) = (i, 1 - i);
-        s.set_opt(&departed[mine], "@agent_attention", "1");
-        s.set_opt(&departed[theirs], "@agent_attention", "1");
+        raise_legacy_attention(&s, &departed[mine]);
+        raise_legacy_attention(&s, &departed[theirs]);
         clear_attention_as_hook(&s, &arrivals[mine], "after-select-pane");
         assert_eq!(
             s.pane_option(&departed[mine], "@agent_attention"),
@@ -645,7 +666,7 @@ fn a_flag_raised_after_the_departure_survives() {
 
     // Leave `left` for `middle`. Its flag comes off — that is `departing_a_pane...` again, asserted
     // here only to prove the hook is live before the interesting part.
-    s.set_opt(&left, "@agent_attention", "1");
+    raise_legacy_attention(&s, &left);
     select_pane(&s, &middle);
     assert!(
         tma_test_support::wait_until(tma_test_support::POLL_CEILING, || s
@@ -664,7 +685,7 @@ fn a_flag_raised_after_the_departure_survives() {
     );
 
     // And the purest form: raised on the pane you are sitting on, with no navigation at all.
-    s.set_opt(&right, "@agent_attention", "1");
+    raise_legacy_attention(&s, &right);
     assert_eq!(
         s.get("s1:0.2", "#{pane_active}"),
         "1",
@@ -711,7 +732,7 @@ fn a_hand_wired_session_hook_can_only_clear_the_pane_you_arrived_at() {
     // Installing afterwards would prove nothing until the switch, and may also race the attach's
     // own firing through tmux's notification queue.
     install_hook(&s, "client-session-changed");
-    s.set_opt(&watched, "@agent_attention", "1");
+    raise_legacy_attention(&s, &watched);
     match s.attach_client("s1") {
         AttachOutcome::Attached => {}
         AttachOutcome::NoPython => {
@@ -793,7 +814,7 @@ fn a_hand_wired_focus_out_hook_clears_a_pane_you_only_detached_from() {
     // take the credit the detach is supposed to earn. Installing here means the detach is the only
     // thing that can have fired.
     install_hook(&s, "pane-focus-out");
-    s.set_opt(&watched, "@agent_attention", "1");
+    raise_legacy_attention(&s, &watched);
     assert_eq!(
         s.pane_option(&watched, "@agent_attention"),
         "1",
@@ -868,7 +889,7 @@ fn a_control_mode_client_suppresses_the_session_departure_focus_out() {
         "precondition: the control client must count as a second attached viewer of s1"
     );
 
-    s.set_opt(&watched, "@agent_attention", "1");
+    raise_legacy_attention(&s, &watched);
     assert!(s
         .tmux(&["switch-client", "-c", &client, "-t", "s2"])
         .status
@@ -895,7 +916,7 @@ fn a_control_mode_client_suppresses_the_session_departure_focus_out() {
         }),
         "the control client must be gone before the liveness half"
     );
-    s.set_opt(&watched, "@agent_attention", "1");
+    raise_legacy_attention(&s, &watched);
     assert!(s
         .tmux(&["switch-client", "-c", &client, "-t", "s2"])
         .status

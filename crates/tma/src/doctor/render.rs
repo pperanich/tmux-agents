@@ -83,6 +83,11 @@ pub(super) fn render_text(r: &Report) -> String {
         ));
     }
 
+    out.push_str(&format!("program: {} (configured mode); a capability query or manifest alias does not verify reporting\n", r.program_mode.word()));
+    if r.program_mode == tma_runtime::config::ProgramStatusMode::Prefer {
+        out.push_str("         authority requires a fresh report, verified process/stream coverage and supported guarded writes; launch Pi with PI_PROGRAM_STATUS=1 before requesting work\n");
+    }
+
     // Ambient driver.
     match r.ambient_poll_age_ms {
         Some(age) => out.push_str(&format!(
@@ -323,6 +328,9 @@ pub(super) fn render_text(r: &Report) -> String {
             "  {:<4} {:<10} {:<12} tier {}   {}\n",
             a.pane, a.agent, a.locator, a.tier.level, state
         ));
+        if a.tier.reason == super::TierReason::ProgramTier {
+            out.push_str("       program: observed report with live authority; state hooks are optional here, metadata and action adapters remain separate\n");
+        }
         out.push_str(&format!("       hooks: {}\n", hook_summary(&a.wiring)));
         if a.hook_demoted {
             out.push_str(

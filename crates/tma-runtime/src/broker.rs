@@ -354,13 +354,13 @@ pub trait BrokerIo {
     /// Write the pane's `@agent_act_repeat` run under the held lock. Best-effort and infallible by
     /// construction, like [`BrokerIo::clear_permission_request`]: the counter is a mis-tap signal,
     /// and a failed option write must never turn a delivered action into a reported failure.
-    fn set_act_repeat(&self, pane_id: &str, value: &str);
+    fn set_act_repeat(&self, pane_id: &str, facts: &PaneFacts, value: &str);
     /// Unset `@agent_permission_request` after a request has been spent. Best-effort and
     /// infallible by construction: it runs after the answer is already delivered, so a failed
     /// option write must not turn a successful reply into a reported failure.
-    fn clear_permission_request(&self, pane_id: &str);
+    fn clear_permission_request(&self, pane_id: &str, facts: &PaneFacts);
     /// The same, for `@agent_question_request` once a question has been answered or dismissed.
-    fn clear_question_request(&self, pane_id: &str);
+    fn clear_question_request(&self, pane_id: &str, facts: &PaneFacts);
     /// Acquire the single-flight lock; the implementation supplies the broker pid and nonce.
     fn acquire(
         &self,
@@ -642,7 +642,7 @@ fn observe(observed: &mut ActObserved, facts: &PaneFacts) {
 /// about rather than things the broker should decide for them.
 fn bump_repeat<T: BrokerIo>(io: &T, action: &str, pane_id: &str, facts: &PaneFacts) -> u32 {
     let (value, count) = audit::next_repeat(facts.act_repeat.as_deref(), facts.episode_ms, action);
-    io.set_act_repeat(pane_id, &value);
+    io.set_act_repeat(pane_id, facts, &value);
     if count >= audit::REPEAT_WARN {
         eprintln!(
             "tma: {count} consecutive {action} on {pane_id} in this episode; \
@@ -757,9 +757,9 @@ fn act_under_lock<T: BrokerIo>(
                         // fails safe: a missing stamp refuses the next dispatch `requires-unmet`
                         // instead of firing at a stale id.
                         match transport.op {
-                            ApiOp::PermissionReply => io.clear_permission_request(pane_id),
+                            ApiOp::PermissionReply => io.clear_permission_request(pane_id, &facts),
                             ApiOp::QuestionReply | ApiOp::QuestionReject => {
-                                io.clear_question_request(pane_id)
+                                io.clear_question_request(pane_id, &facts)
                             }
                             // A command answers no request, so there is no id to spend.
                             ApiOp::Interrupt => {}
@@ -791,7 +791,7 @@ fn act_under_lock<T: BrokerIo>(
                             // Spend the id here, under the same lock, for the same reason the API
                             // arm does: a second dispatch then refuses `request-gone` at the binder
                             // rather than reaching a verdict file that would refuse it anyway.
-                            io.clear_permission_request(pane_id);
+                            io.clear_permission_request(pane_id, &facts);
                             Outcome::Replied
                         }
                         // A verdict already existed: the request was answered between the binder's
@@ -960,6 +960,7 @@ fn is_stale(now: u64, stamped_at: u64) -> bool {
 /// threw the reason away with it.
 fn io_error(e: TmuxError) -> Outcome {
     match &e {
+        TmuxError::PaneGone { .. } => Outcome::Vanished(Gone::Pane),
         TmuxError::Failed { stderr, .. } if pane_gone(stderr) => Outcome::Vanished(Gone::Pane),
         _ => Outcome::Error(e.to_string()),
     }
@@ -1225,13 +1226,13 @@ mod tests {
                 .push((request_id.to_string(), verdict));
             self.hook_result.clone()
         }
-        fn set_act_repeat(&self, _pane: &str, value: &str) {
+        fn set_act_repeat(&self, _pane: &str, _facts: &PaneFacts, value: &str) {
             self.repeat_writes.borrow_mut().push(value.to_string());
         }
-        fn clear_permission_request(&self, pane_id: &str) {
+        fn clear_permission_request(&self, pane_id: &str, _facts: &PaneFacts) {
             self.request_cleared.borrow_mut().push(pane_id.to_string());
         }
-        fn clear_question_request(&self, pane_id: &str) {
+        fn clear_question_request(&self, pane_id: &str, _facts: &PaneFacts) {
             self.question_cleared.borrow_mut().push(pane_id.to_string());
         }
         fn acquire(
@@ -1883,7 +1884,7 @@ mod tests {
     /// `200 true`, exactly as opencode's own endpoints do. Independent of this crate's HTTP client,
     /// which is the point: it records what actually crossed the socket.
     const STUB_SERVER: &str = r#"
-import http.server, sys
+import http.server, os, sys
 log = sys.argv[1]
 class H(http.server.BaseHTTPRequestHandler):
     def do_POST(self):
@@ -1898,7 +1899,9 @@ class H(http.server.BaseHTTPRequestHandler):
     def log_message(self, *a):
         pass
 srv = http.server.HTTPServer(("127.0.0.1", 0), H)
-print(srv.server_port, flush=True)
+with open(sys.argv[2] + ".tmp", "w") as f:
+    f.write(f"{srv.server_port} {os.getpid()} {os.getppid()}")
+os.replace(sys.argv[2] + ".tmp", sys.argv[2])
 srv.serve_forever()
 "#;
 
@@ -1911,8 +1914,19 @@ srv.serve_forever()
     /// path is the check that cannot pass vacuously.
     #[test]
     fn the_api_ops_hit_the_v1_paths_against_a_real_server() {
-        use std::io::{BufRead, BufReader};
         use std::process::{Command, Stdio};
+
+        struct Stub {
+            child: std::process::Child,
+            dir: std::path::PathBuf,
+        }
+        impl Drop for Stub {
+            fn drop(&mut self) {
+                let _ = self.child.kill();
+                let _ = self.child.wait();
+                let _ = std::fs::remove_dir_all(&self.dir);
+            }
+        }
 
         if !tma_test_support::python3_available() {
             eprintln!("skipping: python3 unavailable for the stub server");
@@ -1922,19 +1936,55 @@ srv.serve_forever()
         std::fs::create_dir_all(&dir).unwrap();
         let log = dir.join("requests.log");
         let script = dir.join("stub.py");
+        let ready = dir.join("ready");
+        let _ = std::fs::remove_file(&ready);
+        let _ = std::fs::remove_file(&log);
         std::fs::write(&script, STUB_SERVER).unwrap();
 
-        let mut child = Command::new("python3")
+        let child = Command::new("python3")
             .arg(&script)
             .arg(&log)
-            .stdout(Stdio::piped())
+            .arg(&ready)
+            .stdout(Stdio::null())
             .spawn()
             .expect("spawn the stub server");
-        let mut port = String::new();
-        BufReader::new(child.stdout.take().unwrap())
-            .read_line(&mut port)
-            .expect("the stub prints its port");
-        let base = format!("http://127.0.0.1:{}", port.trim());
+        let mut stub = Stub { child, dir };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        let fields = loop {
+            if let Ok(text) = std::fs::read_to_string(&ready) {
+                let fields: Vec<u32> = text
+                    .split_whitespace()
+                    .map(|s| s.parse().unwrap())
+                    .collect();
+                if fields.len() == 3 {
+                    break fields;
+                }
+            }
+            assert!(
+                matches!(stub.child.try_wait(), Ok(None)),
+                "stub exited before readiness"
+            );
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stub readiness timed out"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        };
+        assert_eq!(
+            fields[1],
+            stub.child.id(),
+            "the Rust owner holds the actual Python child"
+        );
+        assert_eq!(
+            fields[2],
+            std::process::id(),
+            "no intermediate supervisor owns Python"
+        );
+        eprintln!(
+            "broker stub: direct_child_pid={}, owner_pid={}",
+            fields[1], fields[2]
+        );
+        let base = format!("http://127.0.0.1:{}", fields[0]);
 
         let facts = blocked_question(1_000_000);
         let picked = [vec!["A: hello".to_string()]];
@@ -1955,8 +2005,8 @@ srv.serve_forever()
                 "{op:?}"
             );
         }
-        let _ = child.kill();
-        let _ = child.wait();
+        stub.child.kill().unwrap();
+        stub.child.wait().unwrap();
 
         let recorded = std::fs::read_to_string(&log).expect("the stub recorded the requests");
         let lines: Vec<&str> = recorded.lines().collect();
@@ -1973,7 +2023,6 @@ srv.serve_forever()
             !recorded.contains("/api/"),
             "no op may address the v2 plane, which answers empty while a v1 request is pending"
         );
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -2556,6 +2605,10 @@ srv.serve_forever()
     /// "pane vanished (exit 3)" with the reason discarded.
     #[test]
     fn io_error_separates_a_gone_pane_from_a_rejected_command() {
+        let gone = io_error(TmuxError::PaneGone {
+            pane: tma_core::program_status::PaneId::new(999),
+        });
+        assert!(matches!(gone, Outcome::Vanished(Gone::Pane)));
         // `cmd` carries the whole joined argv, as `describe_argv` builds it at the tmux edge.
         let failed = |stderr: &str| TmuxError::Failed {
             cmd: "send-keys -t %999 1".to_string(),

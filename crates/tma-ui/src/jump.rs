@@ -53,6 +53,7 @@ struct Destination {
     window_target: String,
     pane_target: String,
     locator: String,
+    observation: Option<tma_core::persistence::ObservationIdentity>,
 }
 
 impl Destination {
@@ -63,6 +64,7 @@ impl Destination {
             // A pane id is a stable, unambiguous select-pane target.
             pane_target: r.pane_id.clone(),
             locator: r.locator(),
+            observation: r.acknowledgement.clone(),
         }
     }
 
@@ -75,6 +77,7 @@ impl Destination {
             window_target: format!("{session}:{window}"),
             pane_target: loc.to_string(),
             locator: loc.to_string(),
+            observation: None,
         })
     }
 }
@@ -172,7 +175,7 @@ pub fn run_jump(
         kind,
         JumpKind::Attention | JumpKind::Blocked | JumpKind::Pane(_)
     ) {
-        let _ = ui::clear_attention(tmux, &dest.pane_target);
+        let _ = ui::clear_observed_attention(tmux, &dest.pane_target, dest.observation.as_ref());
     }
     Ok(JumpOutcome {
         message: format!("jumped to {}", dest.locator),
@@ -524,6 +527,7 @@ mod tests {
 
     fn row(session: &str, w: u32, p: u32, state: AgentState, since: u64) -> AgentRow {
         AgentRow {
+            acknowledgement: None,
             pane_id: format!("%{w}{p}"),
             agent: "claude".to_string(),
             state,
@@ -870,5 +874,22 @@ mod tests {
         let mut bad = vec!["x".to_string(), "y".to_string()];
         assert!(pop_valid_from_bottom(&mut bad).is_none());
         assert!(bad.is_empty());
+    }
+    #[test]
+    fn destination_keeps_the_observation_from_the_selected_row() {
+        let mut shown = row("s", 0, 0, AgentState::Idle, 10);
+        let original = tma_core::persistence::ObservationIdentity::Legacy {
+            blocked: None,
+            episode: None,
+            pid: 10,
+            state: AgentState::Idle,
+            source: tma_core::Provenance::Hook,
+            since: 10,
+            turn_at: 10,
+        };
+        shown.acknowledgement = Some(original.clone());
+        let destination = Destination::from_row(&shown);
+        shown.acknowledgement = None;
+        assert_eq!(destination.observation, Some(original));
     }
 }

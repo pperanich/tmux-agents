@@ -1,5 +1,45 @@
 //! Per-pane observation input to the detection core.
 
+/// Kernel process creation identity. Units stay platform-specific: converting Linux
+/// ticks to a wall clock would lose precision and introduce a clock dependency.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum ProcessBirth {
+    LinuxStartTicks(u64),
+    MacOsStart { seconds: u64, microseconds: u32 },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ProcessIdentity {
+    pub pid: u32,
+    pub birth: ProcessBirth,
+}
+
+/// An unavailable birth is never a valid zero-valued identity.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProcessUnavailable {
+    NotFound,
+    PermissionDenied,
+    Unsupported,
+    Malformed,
+    ReadFailed,
+}
+
+/// Metadata and birth read from the same kernel process record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProcessSample {
+    pub info: ProcInfo,
+    pub birth: ProcessBirth,
+}
+
+impl ProcessSample {
+    pub fn identity(&self) -> ProcessIdentity {
+        ProcessIdentity {
+            pid: self.info.pid,
+            birth: self.birth,
+        }
+    }
+}
+
 /// One process in a pane's tree, from a `ps -eo pid,ppid,pgid,tpgid,comm` parse. The identity
 /// engine walks these to resolve pane ownership; the core stores them as opaque facts, never
 /// spawning `ps`.

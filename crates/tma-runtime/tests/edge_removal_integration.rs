@@ -99,7 +99,9 @@ fn pane_agent_options(s: &Scratch, pane: &str) -> Vec<String> {
 /// stored `@agent_state`, so the two rollups have something to recompute FROM and differ from each
 /// other. `-P -F` prints the new pane's id.
 fn parked_agent(s: &Scratch, args: &[&str], state: &str) -> String {
-    let out = s.tmux(args);
+    let mut command = args.to_vec();
+    command.push("exec sleep 100000");
+    let out = s.tmux(&command);
     assert!(
         out.status.success(),
         "{args:?} failed: {}",
@@ -213,9 +215,17 @@ fn a_quit_agent_loses_its_stamp_on_the_next_edge() {
         .expect("the quiet edge after the exit");
 
     let left = pane_agent_options(&s, &pane);
+    assert_eq!(
+        left.len(),
+        1,
+        "only the private revision tombstone may remain, found {left:?}"
+    );
+    let receipt = left[0]
+        .strip_prefix("@tma_write_receipt ")
+        .expect("the sole remaining key is the pane revision");
     assert!(
-        left.is_empty(),
-        "the quit agent's pane must keep no tma option at all, found {left:?}"
+        tma_core::persistence::Token::parse(receipt).is_some(),
+        "the tombstone is a bounded random token"
     );
     assert_eq!(
         s.get(&pane, "#{@agent_summary}"),

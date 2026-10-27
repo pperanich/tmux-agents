@@ -48,7 +48,14 @@ pub fn muted(rec: &PaneRecord, now: u64) -> bool {
 
 /// The structured data a notification carries (the hook payload; metadata only, never captured
 /// screen content).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NotificationMeaning {
+    Ordinary,
+    Failure,
+}
+
 pub struct Notification {
+    pub meaning: NotificationMeaning,
     pub agent: String,
     pub pane: String,
     /// The trigger word (`blocked`/`done`). For a `done` fire this is the transition word, not the
@@ -78,6 +85,16 @@ pub struct Notification {
     pub episode_ms: u64,
     /// The pane's stored context-utilization percent, `None` when the agent reports none.
     pub context_pct: Option<u8>,
+}
+
+impl Notification {
+    pub fn display_state(&self) -> &str {
+        if self.meaning == NotificationMeaning::Failure {
+            "failed"
+        } else {
+            &self.state
+        }
+    }
 }
 
 /// Whether the pane title may leave the host on this fire. Carried as a named type rather than a
@@ -123,6 +140,11 @@ pub fn notification_for(
     // git, so the daemon pays one bounded `git rev-parse` per repo per TTL and a one-shot hook at most one.
     let repo = rec.cwd.as_deref().and_then(crate::repo::resolve);
     Notification {
+        meaning: if state_word == "done" && detail.as_deref() == Some(tma_core::Detail::ERROR) {
+            NotificationMeaning::Failure
+        } else {
+            NotificationMeaning::Ordinary
+        },
         agent: agent.to_string(),
         pane: rec.pane_id.clone(),
         state: state_word.to_string(),
@@ -160,10 +182,11 @@ pub fn fire(
 ) -> Option<Child> {
     // Baseline `display-message`, best-effort: no attached client just means nowhere to show it, and
     // the durable record is the marker, not this line.
+    let display_state = n.display_state();
     let msg = if n.title.is_empty() {
-        format!("tma: {} {} in {}", n.agent, n.state, n.pane)
+        format!("tma: {} {} in {}", n.agent, display_state, n.pane)
     } else {
-        format!("tma: {} {} — {}", n.agent, n.state, n.title)
+        format!("tma: {} {}: {}", n.agent, display_state, n.title)
     };
     let _ = tmux.message(&msg);
 
@@ -177,13 +200,13 @@ pub fn fire(
     // session. The text is agent + state only — never the pane title, which the pane's own program
     // controls and could stuff with escape bytes.
     if sinks.osc {
-        tmux.osc_notify(&n.pane, &format!("{} {}", n.agent, n.state));
+        tmux.osc_notify(&n.pane, &format!("{} {}", n.agent, display_state));
     }
 
     // The OSC 777 companion: the same two words, split into the title and body that sequence takes.
     // Ghostty and WezTerm read 777 and ignore 9, so enabling both covers either emulator.
     if sinks.osc_777 {
-        tmux.osc777_notify(&n.pane, &n.agent, &n.state);
+        tmux.osc777_notify(&n.pane, &n.agent, display_state);
     }
 
     // One decision for all three carriers below; `display-message` above already ran with the real
@@ -393,6 +416,24 @@ pub fn evaluate_context_high(
     sinks: &NotifySinks,
     now: u64,
 ) -> Option<Child> {
+    evaluate_context_high_checked(tmux, guarded, rec, threshold, command, sinks, now, || true)
+}
+
+/// Confirm scheduler continuity after marker IO and before the external effect.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_context_high_checked(
+    tmux: &Tmux,
+    guarded: bool,
+    rec: &PaneRecord,
+    threshold: u8,
+    command: Option<&str>,
+    sinks: &NotifySinks,
+    now: u64,
+    mut completed: impl FnMut() -> bool,
+) -> Option<Child> {
+    if !completed() {
+        return None;
+    }
     let num = |key: &str| rec.options.get(key).and_then(|v| v.parse::<u64>().ok());
     let pct = rec
         .options
@@ -409,7 +450,7 @@ pub fn evaluate_context_high(
             // silent, so concurrent firers resolve to one bell.
             match tma_tmux::stamp::arm_notify_marker(
                 tmux,
-                &rec.pane_id,
+                rec,
                 opt::CONTEXT_NOTIFIED_AT,
                 now,
                 guarded,
@@ -417,6 +458,7 @@ pub fn evaluate_context_high(
                 // Arm first, then check the mute: a muted alert is consumed like a fired one, so
                 // the gauge has to dip below the rearm band before it can ring again.
                 Ok(true) if muted(rec, now) => None,
+                Ok(true) if !completed() => None,
                 Ok(true) => {
                     // The episode start the ROW reports: `max(@agent_since, @agent_turn_at)`, the
                     // same instant `AgentRow::episode_at()` yields and the daemon's dispatch passes.
@@ -447,8 +489,7 @@ pub fn evaluate_context_high(
             }
         }
         ContextNotify::Rearm => {
-            let _ =
-                tma_tmux::stamp::rearm_notify_marker(tmux, &rec.pane_id, opt::CONTEXT_NOTIFIED_AT);
+            let _ = tma_tmux::stamp::rearm_notify_marker(tmux, rec, opt::CONTEXT_NOTIFIED_AT);
             None
         }
         ContextNotify::Idle => None,
@@ -519,10 +560,37 @@ pub fn evaluate_stall(
     sinks: &NotifySinks,
     now: u64,
 ) -> Option<Child> {
-    let state = rec
-        .options
-        .get(opt::STATE)
-        .and_then(|v| v.parse::<AgentState>().ok());
+    evaluate_stall_checked(
+        tmux,
+        guarded,
+        rec,
+        threshold_ms,
+        command,
+        sinks,
+        now,
+        || true,
+    )
+}
+
+/// Confirm scheduler continuity after marker IO and before the external effect.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_stall_checked(
+    tmux: &Tmux,
+    guarded: bool,
+    rec: &PaneRecord,
+    threshold_ms: u64,
+    command: Option<&str>,
+    sinks: &NotifySinks,
+    now: u64,
+    mut completed: impl FnMut() -> bool,
+) -> Option<Child> {
+    if !completed() {
+        return None;
+    }
+    let state = tma_core::persistence::current_stamp(&rec.options, now)
+        .ok()
+        .flatten()
+        .map(|stamp| stamp.into_inner().state);
     let num = |key: &str| rec.options.get(key).and_then(|v| v.parse::<u64>().ok());
     match decide_stall(
         state,
@@ -534,7 +602,7 @@ pub fn evaluate_stall(
         StallNotify::Fire { since } => {
             match tma_tmux::stamp::arm_notify_marker(
                 tmux,
-                &rec.pane_id,
+                rec,
                 opt::STALL_NOTIFIED_AT,
                 now,
                 guarded,
@@ -542,6 +610,7 @@ pub fn evaluate_stall(
                 // Arm first, then check the mute: a muted alert is consumed like a fired one, so the
                 // run has to end before the pane can ring again.
                 Ok(true) if muted(rec, now) => None,
+                Ok(true) if !completed() => None,
                 Ok(true) => {
                     // The `working` run's start, which is both the episode this fire belongs to and
                     // the instant `since_ms` reports the age of: how long the agent has been stuck.
@@ -563,8 +632,7 @@ pub fn evaluate_stall(
             }
         }
         StallNotify::Rearm => {
-            let _ =
-                tma_tmux::stamp::rearm_notify_marker(tmux, &rec.pane_id, opt::STALL_NOTIFIED_AT);
+            let _ = tma_tmux::stamp::rearm_notify_marker(tmux, rec, opt::STALL_NOTIFIED_AT);
             None
         }
         StallNotify::Idle => None,
@@ -740,6 +808,7 @@ mod tests {
     /// A fully-populated notification (every optional present), the payload tests' base.
     fn notification(title: &str) -> Notification {
         Notification {
+            meaning: NotificationMeaning::Ordinary,
             agent: "claude".to_string(),
             pane: "%3".to_string(),
             state: "blocked".to_string(),
@@ -1109,7 +1178,7 @@ mod tests {
         // the completion's pane is already gone, and the other sinks must still run.
         let server = tma_tmux::tmux::Server {
             socket_path: Some(std::path::PathBuf::from(
-                "/nonexistent/tma-notify-test.sock",
+                "/nonexistent/tma_test_notify.sock",
             )),
             ..Default::default()
         };

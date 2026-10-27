@@ -7,13 +7,28 @@
 //! collapse to one active→quiet edge past [`QUIET_THRESHOLD`] into a bounded queue the capture tier
 //! drains (bounding CPU); that quiet edge is where hookless `blocked` is caught.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::io::Read;
 use std::os::unix::io::{AsFd, BorrowedFd};
 use std::process::{Child, ChildStdin, ChildStdout, Stdio};
 use std::time::{Duration, Instant};
 
 use rustix::event::{poll, PollFd, PollFlags, Timespec};
+
+mod decoder;
+mod protocol;
+#[cfg(test)]
+#[path = "control/tests.rs"]
+mod protocol_tests;
+mod terminal;
+
+use decoder::{Decoded, Decoder, Note};
+use protocol::Collector;
+pub use protocol::{
+    ObservationBoundary, ProgramDrain, ProgramStats, ProgramStreamState, MAX_PROGRAM_EVENTS,
+    MAX_PROGRAM_PAYLOAD_BYTES,
+};
+use tma_core::program_status::{ObservationGap, PaneId, SessionId};
 
 use crate::tmux::{Tmux, TmuxError};
 
@@ -51,10 +66,6 @@ const SEED_RETRY: Duration = Duration::from_millis(250);
 /// are dropped; a lost capture trigger is self-healed by the reconciliation sweep.
 const MAX_EDGES: usize = 1024;
 
-/// Cap on one client's in-progress line buffer. Past it the pane id is salvaged from the prefix and
-/// the rest skipped to the next newline, so a chatty `%output` pane cannot grow the buffer unbounded.
-const MAX_LINE: usize = 256 * 1024;
-
 /// Read chunk size off a control client's stdout.
 const READ_CHUNK: usize = 16 * 1024;
 
@@ -79,20 +90,12 @@ pub struct ActivityEdge {
     pub at: u64,
 }
 
-/// A parsed control-mode notification line. Unknown/malformed lines never reach here: they are
-/// dropped in [`parse_line`] (a bad notification is ignored, never a crash).
+/// Activity and lifecycle hints, independent of protocol collection.
 #[derive(Clone, Debug, PartialEq, Eq)]
 enum Notification {
-    /// `%output %<pane> <data>`: the pane produced output (data discarded; only the edge
-    /// matters). The activity signal.
     Output { pane: String },
-    /// `%sessions-changed`: a session was created or destroyed (server-wide). Triggers pool
-    /// re-enumeration via `list-sessions`.
     SessionsChanged,
-    /// A window/pane lifecycle line. Triggers the window-summary reconcile so a closed agent
-    /// pane's rollup clears promptly even with no `SessionEnd`.
     Lifecycle,
-    /// `%exit`: the control client is detaching (its session or the server is gone).
     Exit,
 }
 
@@ -104,13 +107,8 @@ struct ControlClient {
     _stdin: ChildStdin,
     child: Child,
     stdout: ChildStdout,
-    /// `#{session_name}` at spawn: the key `list-panes` reports a pane's session under, so the
-    /// attach seeding can find the panes this client covers.
-    session_name: String,
-    /// In-progress line bytes (no trailing newline yet).
-    buf: Vec<u8>,
-    /// Set after an over-length line is salvaged: drop bytes until the next newline to resync.
-    skip_to_newline: bool,
+    decoder: Decoder,
+    serial: u64,
     /// `true` once the client has produced its first control-mode byte, which is the attach: tmux
     /// streams `%output` from the attach on, never replaying what a pane printed before it. Until
     /// then the pool holds a client but no coverage.
@@ -123,7 +121,7 @@ struct ControlClient {
 impl ControlClient {
     /// Spawn a control client attached to `session_id`. stdout/stdin are pipes; stdout is set
     /// non-blocking so the daemon's `poll` loop can drain it without blocking.
-    fn spawn(tmux: &Tmux, session_id: &str, session_name: &str) -> std::io::Result<ControlClient> {
+    fn spawn(tmux: &Tmux, session_id: &str, _session_name: &str) -> std::io::Result<ControlClient> {
         let mut cmd = tmux.control_client_command(session_id);
         let mut child = cmd
             .stdin(Stdio::piped())
@@ -132,14 +130,17 @@ impl ControlClient {
             .spawn()?;
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
-        set_nonblocking(&stdout);
+        if let Err(error) = set_nonblocking(&stdout) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(error);
+        }
         Ok(ControlClient {
             _stdin: stdin,
             child,
             stdout,
-            session_name: session_name.to_string(),
-            buf: Vec::new(),
-            skip_to_newline: false,
+            decoder: Decoder::default(),
+            serial: 0,
             attached: false,
             dead: false,
         })
@@ -147,11 +148,20 @@ impl ControlClient {
 
     /// Drain all currently-available bytes into notifications. Non-blocking: returns when the
     /// pipe would block, on EOF (marks `dead`), or after [`MAX_CHUNKS_PER_READ`] chunks.
-    fn read_available(&mut self, out: &mut Vec<Notification>) {
+    fn read_available(
+        &mut self,
+        out: &mut Vec<Notification>,
+        mut protocol: Option<&mut Collector>,
+        session: SessionId,
+    ) {
         for _ in 0..MAX_CHUNKS_PER_READ {
             let mut chunk = [0u8; READ_CHUNK];
             match self.stdout.read(&mut chunk) {
                 Ok(0) => {
+                    if let Some(collector) = protocol.as_deref_mut() {
+                        self.decoder
+                            .finish(|event| collector.decoded(session, self.serial, event));
+                    }
                     self.dead = true;
                     return;
                 }
@@ -159,11 +169,15 @@ impl ControlClient {
                     // First byte off a control client is its attach handshake: coverage of the
                     // session starts here, not at spawn.
                     self.attached = true;
-                    self.ingest(&chunk[..n], out);
+                    self.ingest(&chunk[..n], out, protocol.as_deref_mut(), session);
                 }
                 Err(ref e) if e.kind() == std::io::ErrorKind::WouldBlock => return,
                 Err(ref e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
                 Err(_) => {
+                    if let Some(collector) = protocol.as_deref_mut() {
+                        self.decoder
+                            .finish(|event| collector.decoded(session, self.serial, event));
+                    }
                     self.dead = true;
                     return;
                 }
@@ -171,33 +185,39 @@ impl ControlClient {
         }
     }
 
-    /// Feed raw bytes through the line splitter, emitting one notification per complete line.
-    fn ingest(&mut self, data: &[u8], out: &mut Vec<Notification>) {
-        for &b in data {
-            if self.skip_to_newline {
-                if b == b'\n' {
-                    self.skip_to_newline = false;
-                }
-                continue;
+    fn ingest(
+        &mut self,
+        data: &[u8],
+        out: &mut Vec<Notification>,
+        mut protocol: Option<&mut Collector>,
+        session: SessionId,
+    ) {
+        let enabled = protocol.is_some();
+        let serial = self.serial;
+        let dead = &mut self.dead;
+        self.decoder.feed(data, enabled, |event| {
+            match event {
+                Decoded::Start(pane) => out.push(Notification::Output {
+                    pane: format!("%{}", pane.get()),
+                }),
+                Decoded::Note(note) => out.push(match note {
+                    Note::SessionsChanged => Notification::SessionsChanged,
+                    Note::Lifecycle => Notification::Lifecycle,
+                    Note::Exit => {
+                        *dead = true;
+                        if let Some(collector) = protocol.as_deref_mut() {
+                            collector.client_gap(session, ObservationGap::Disconnected);
+                        }
+                        Notification::Exit
+                    }
+                }),
+                Decoded::Fatal => *dead = true,
+                _ => {}
             }
-            if b == b'\n' {
-                let line = std::mem::take(&mut self.buf);
-                if let Some(n) = parse_line(&line) {
-                    out.push(n);
-                }
-                continue;
+            if let Some(collector) = protocol.as_deref_mut() {
+                collector.decoded(session, serial, event);
             }
-            self.buf.push(b);
-            if self.buf.len() > MAX_LINE {
-                // Giant `%output` line: salvage its pane id, then skip to the next newline so the
-                // buffer cannot grow unbounded.
-                if let Some(n) = parse_line(&self.buf) {
-                    out.push(n);
-                }
-                self.buf.clear();
-                self.skip_to_newline = true;
-            }
-        }
+        });
     }
 }
 
@@ -208,50 +228,6 @@ impl Drop for ControlClient {
         let _ = self.child.kill();
         let _ = self.child.wait();
     }
-}
-
-/// Parse one control-mode line into a [`Notification`], or `None` for anything we don't act on or
-/// cannot parse (command blocks, `%session-changed`, errors, malformed). Never panics.
-fn parse_line(line: &[u8]) -> Option<Notification> {
-    // The tokens we key on are all ASCII, before any `%output` payload byte, so a lossy view of
-    // possibly non-UTF-8 payload bytes is safe for prefix matching.
-    let s = String::from_utf8_lossy(line);
-    let s = s.trim_end_matches(['\r', '\n']);
-    if !s.starts_with('%') {
-        return None;
-    }
-    let mut it = s.split(' ');
-    let tag = it.next()?;
-    match tag {
-        "%output" => {
-            let pane = it.next()?;
-            if is_pane_id(pane) {
-                Some(Notification::Output {
-                    pane: pane.to_string(),
-                })
-            } else {
-                None
-            }
-        }
-        "%sessions-changed" => Some(Notification::SessionsChanged),
-        "%window-add"
-        | "%window-close"
-        | "%window-pane-changed"
-        | "%window-renamed"
-        | "%layout-change"
-        | "%unlinked-window-add"
-        | "%unlinked-window-close"
-        | "%unlinked-window-renamed"
-        | "%pane-mode-changed" => Some(Notification::Lifecycle),
-        "%exit" => Some(Notification::Exit),
-        _ => None,
-    }
-}
-
-/// A tmux pane id is `%` followed by digits.
-fn is_pane_id(s: &str) -> bool {
-    s.strip_prefix('%')
-        .is_some_and(|d| !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The per-session control-client pool and its derived push state. Owned by the daemon loop;
@@ -266,7 +242,7 @@ pub struct ControlPool {
     active: HashMap<String, Instant>,
     /// Bounded active→quiet edge queue for the capture tier.
     edges: VecDeque<ActivityEdge>,
-    /// `#{session_name}`s whose client has attached but whose panes [`seed_attached`] has not
+    /// Stable session IDs whose client has attached but whose panes [`seed_attached`] has not
     /// looked at yet: they were uncovered until that moment, so each needs one look.
     newly_attached: Vec<String>,
     /// Monotone counters for the introspection status file (tests + operators).
@@ -279,6 +255,9 @@ pub struct ControlPool {
     /// Whether the pool has ever held ≥1 client, so the initial startup populate is not
     /// miscounted as a zero-member recovery.
     ever_populated: bool,
+    next_client: u64,
+    protocol: Option<Collector>,
+    protocol_epoch: u64,
 }
 
 impl Default for ControlPool {
@@ -299,6 +278,9 @@ impl ControlPool {
             recoveries: 0,
             seed_retries: 0,
             ever_populated: false,
+            next_client: 0,
+            protocol: None,
+            protocol_epoch: 0,
         }
     }
 
@@ -308,14 +290,103 @@ impl ControlPool {
         self.quiet_threshold = quiet_threshold;
     }
 
+    /// Enable the optional protocol collector. Mode changes discard all previous
+    /// candidates and queues. Call `reconcile` before establishing pane boundaries.
+    /// Disabled pools retain activity and allocate no protocol scanner/store.
+    pub fn set_program_collection(&mut self, enabled: bool) {
+        if let Some(collector) = self.protocol.take() {
+            self.protocol_epoch = collector.last_epoch();
+        }
+        self.protocol = enabled.then(|| Collector::with_epoch(self.protocol_epoch));
+    }
+
+    /// Discard everything observed before process binding. The current terminal
+    /// string framing survives. A notification already in progress is quarantined
+    /// through its newline, so an earlier octal escape cannot begin a new report.
+    /// Drain invalidations first, then accept only this epoch above its floor.
+    pub fn program_boundary(&mut self, pane: PaneId) -> Option<ObservationBoundary> {
+        let (owner, serial) = self.protocol.as_ref()?.owner(pane)?;
+        let in_payload = self
+            .clients
+            .get(&format!("${}", owner.get()))
+            .is_some_and(|client| client.serial == serial && client.decoder.in_payload(pane));
+        self.protocol.as_mut()?.boundary(pane, in_payload)
+    }
+
+    /// Revalidate a decision against losses since its last drain. Merely queued
+    /// newer observations do not change the connection. Unavailable topology,
+    /// whole-scope loss and disabled collection expose no usable stream.
+    pub fn program_stream(&self, pane: PaneId) -> Option<ProgramStreamState> {
+        self.protocol.as_ref()?.stream(pane)
+    }
+
+    /// The selected stream's stable session context, including linked panes.
+    pub fn program_session(&self, pane: PaneId) -> Option<SessionId> {
+        self.protocol
+            .as_ref()?
+            .owner(pane)
+            .map(|(session, _)| session)
+    }
+
+    /// Runtime budget/identity revocation uses the same out-of-band loss seam.
+    pub fn invalidate_program(&mut self, pane: PaneId, reason: ObservationGap) {
+        if let Some(collector) = &mut self.protocol {
+            collector.invalidate(pane, reason, false);
+        }
+    }
+
+    /// Pending owned decoded payload plus partial terminal candidates, for the
+    /// runtime's global 32 MiB budget. Allocator/container overhead is separate.
+    pub fn pending_program_bytes(&self) -> usize {
+        self.protocol.as_ref().map_or(0, Collector::pending_bytes)
+    }
+
+    /// Remaining pending-payload allowance after runtime-owned retained stores.
+    /// Set before reading control clients and after reducing/draining records.
+    /// Lowering it revokes affected panes through out-of-band budget gaps.
+    pub fn set_program_payload_budget(&mut self, available: usize) {
+        if let Some(collector) = &mut self.protocol {
+            collector.set_payload_budget(available);
+        }
+    }
+
+    /// Count-only diagnostics for this collection interval. Disabled collection
+    /// has no stats or protocol storage; no raw terminal text is exposed.
+    pub fn program_stats(&self) -> Option<ProgramStats> {
+        self.protocol.as_ref().map(Collector::stats)
+    }
+
+    /// Apply `all_invalidated`, then pane invalidations, then observations.
+    /// Empty when collection is disabled. Queries never generate terminal input.
+    pub fn drain_program(&mut self) -> ProgramDrain {
+        self.protocol
+            .as_mut()
+            .map_or_else(ProgramDrain::default, Collector::drain)
+    }
+
     /// Sync pool membership to the live `list-sessions` set: reap dead + gone-session clients, spawn
     /// one client per session that lacks one. Idempotent; propagates `ServerGone` to exit cleanly.
     pub fn reconcile(&mut self, tmux: &Tmux) -> Result<(), TmuxError> {
         // Reap defunct clients first (EOF/`%exit`/error). `retain` drops the removed values,
         // and `ControlClient::drop` kills + waits, so nothing leaks or zombifies.
+        if let Some(collector) = &mut self.protocol {
+            for (session, _) in self.clients.iter().filter(|(_, client)| client.dead) {
+                if let Ok(session) = SessionId::parse(session) {
+                    collector.client_gap(session, ObservationGap::Disconnected);
+                }
+            }
+        }
         self.clients.retain(|_, c| !c.dead);
 
-        let sessions = tmux.list_sessions()?; // ServerGone → daemon shutdown
+        let sessions = match tmux.list_sessions() {
+            Ok(sessions) => sessions,
+            Err(error) => {
+                if let Some(collector) = &mut self.protocol {
+                    collector.topology_failed();
+                }
+                return Err(error);
+            }
+        };
         let live: HashSet<&str> = sessions.iter().map(|s| s.id.as_str()).collect();
         self.clients.retain(|sid, _| live.contains(sid.as_str()));
 
@@ -329,13 +400,35 @@ impl ControlPool {
             if !self.clients.contains_key(&s.id) {
                 // Best-effort: a spawn failure retries on the next reconcile rather than
                 // failing the daemon.
-                if let Ok(client) = ControlClient::spawn(tmux, &s.id, &s.name) {
+                if let Ok(mut client) = ControlClient::spawn(tmux, &s.id, &s.name) {
+                    self.next_client = self
+                        .next_client
+                        .checked_add(1)
+                        .expect("client serial exhausted");
+                    client.serial = self.next_client;
                     self.clients.insert(s.id.clone(), client);
                 }
             }
         }
         if !self.clients.is_empty() {
             self.ever_populated = true;
+        }
+        if let Some(collector) = &mut self.protocol {
+            let topology = match tmux.control_topology() {
+                Ok(topology) => topology,
+                Err(error) => {
+                    collector.topology_failed();
+                    return Err(error);
+                }
+            };
+            let clients: BTreeMap<_, _> = self
+                .clients
+                .iter()
+                .filter_map(|(session, client)| {
+                    Some((SessionId::parse(session).ok()?, client.serial))
+                })
+                .collect();
+            collector.reconcile(&topology, &clients);
         }
         Ok(())
     }
@@ -355,9 +448,12 @@ impl ControlPool {
     fn read_client(&mut self, session_id: &str, out: &mut Vec<Notification>) {
         if let Some(c) = self.clients.get_mut(session_id) {
             let was_attached = c.attached;
-            c.read_available(out);
+            let Ok(session) = SessionId::parse(session_id) else {
+                return;
+            };
+            c.read_available(out, self.protocol.as_mut(), session);
             if !was_attached && c.attached {
-                self.newly_attached.push(c.session_name.clone());
+                self.newly_attached.push(session_id.to_owned());
             }
         }
     }
@@ -619,12 +715,7 @@ fn probe_watch(tmux: &Tmux, attach_session: &str) -> std::io::Result<bool> {
 /// stored pane `@agent_state` on a lifecycle event, writing only on drift, so a closed agent pane
 /// leaves both rollups even with no `SessionEnd`.
 pub fn reconcile_summaries(tmux: &Tmux) -> Result<(), TmuxError> {
-    let panes = tmux.list_panes()?;
-    let cmds = crate::stamp::reconcile_summary_commands(&panes, crate::stamp::stored_pane_state);
-    if !cmds.is_empty() {
-        tmux.apply(&cmds)?;
-    }
-    Ok(())
+    crate::stamp::reconcile_summaries(tmux)
 }
 
 /// Aggregated effect of the notifications drained in one loop iteration: the daemon acts on
@@ -651,7 +742,10 @@ pub fn dispatch_ready(
         match n {
             Notification::Output { pane } => pool.mark_active(pane, now),
             Notification::SessionsChanged => fx.need_reconcile = true,
-            Notification::Lifecycle => fx.need_summary = true,
+            Notification::Lifecycle => {
+                fx.need_summary = true;
+                fx.need_reconcile = true;
+            }
             Notification::Exit => fx.need_reconcile = true,
         }
     }
@@ -679,13 +773,15 @@ pub fn seed_attached(pool: &mut ControlPool, tmux: &Tmux, now: Instant) {
     if pool.newly_attached.is_empty() {
         return;
     }
-    let Ok(panes) = tmux.list_panes() else {
+    let Ok(panes) = tmux.control_topology() else {
         pool.seed_retries += 1;
         return;
     };
     let sessions = std::mem::take(&mut pool.newly_attached);
-    for p in panes.iter().filter(|p| sessions.contains(&p.session)) {
-        pool.mark_active(p.pane_id.clone(), now);
+    for (session, pane) in panes {
+        if sessions.contains(&format!("${}", session.get())) {
+            pool.mark_active(format!("%{}", pane.get()), now);
+        }
     }
 }
 
@@ -723,113 +819,16 @@ pub fn pollfds(pool: &ControlPool) -> Vec<(String, BorrowedFd<'_>)> {
     pool.client_fds()
 }
 
-fn set_nonblocking(fd: &ChildStdout) {
+fn set_nonblocking(fd: &ChildStdout) -> std::io::Result<()> {
     use rustix::fs::{fcntl_getfl, fcntl_setfl, OFlags};
-    if let Ok(flags) = fcntl_getfl(fd) {
-        let _ = fcntl_setfl(fd, flags | OFlags::NONBLOCK);
-    }
+    let flags = fcntl_getfl(fd)?;
+    fcntl_setfl(fd, flags | OFlags::NONBLOCK)?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn parses_output_line_and_extracts_pane() {
-        assert_eq!(
-            parse_line(b"%output %12 some \\033[0m escaped data"),
-            Some(Notification::Output {
-                pane: "%12".to_string()
-            })
-        );
-    }
-
-    #[test]
-    fn parses_lifecycle_and_session_and_exit_lines() {
-        assert_eq!(
-            parse_line(b"%sessions-changed"),
-            Some(Notification::SessionsChanged)
-        );
-        assert_eq!(
-            parse_line(b"%window-close @3"),
-            Some(Notification::Lifecycle)
-        );
-        assert_eq!(
-            parse_line(b"%unlinked-window-close @9"),
-            Some(Notification::Lifecycle)
-        );
-        assert_eq!(
-            parse_line(b"%window-pane-changed @2 %5"),
-            Some(Notification::Lifecycle)
-        );
-        assert_eq!(parse_line(b"%exit"), Some(Notification::Exit));
-    }
-
-    #[test]
-    fn ignores_command_blocks_and_unknown_and_malformed() {
-        // `%begin`/`%end`, `%subscription-changed`, `%session-changed`, errors, blanks, and a
-        // bare `%output` with no pane id: all dropped, never a crash.
-        for line in [
-            &b"%begin 1784671199 286 0"[..],
-            &b"%end 1784671199 286 0"[..],
-            &b"%session-changed $0 s1"[..],
-            &b"%subscription-changed act $0 @0 0 %0 : activity"[..],
-            &b"%error 1 2 3"[..],
-            &b""[..],
-            &b"not a control line"[..],
-            &b"%output"[..],
-            &b"%output notapane data"[..],
-        ] {
-            assert_eq!(
-                parse_line(line),
-                None,
-                "line: {:?}",
-                String::from_utf8_lossy(line)
-            );
-        }
-    }
-
-    #[test]
-    fn is_pane_id_rejects_windows_and_junk() {
-        assert!(is_pane_id("%0"));
-        assert!(is_pane_id("%1234"));
-        assert!(!is_pane_id("@0")); // window
-        assert!(!is_pane_id("$0")); // session
-        assert!(!is_pane_id("%"));
-        assert!(!is_pane_id("%1a"));
-    }
-
-    #[test]
-    fn ingest_splits_lines_across_chunk_boundaries() {
-        let mut c_buf = Vec::new();
-        // Simulate a client's ingest by hand via a throwaway struct is awkward; test the line
-        // splitter directly through a small helper mirroring `ingest`'s core.
-        let mut out = Vec::new();
-        let feed = |buf: &mut Vec<u8>, data: &[u8], out: &mut Vec<Notification>| {
-            for &b in data {
-                if b == b'\n' {
-                    let line = std::mem::take(buf);
-                    if let Some(n) = parse_line(&line) {
-                        out.push(n);
-                    }
-                } else {
-                    buf.push(b);
-                }
-            }
-        };
-        feed(&mut c_buf, b"%outp", &mut out);
-        feed(&mut c_buf, b"ut %7 data\n%windo", &mut out);
-        feed(&mut c_buf, b"w-close @1\n", &mut out);
-        assert_eq!(
-            out,
-            vec![
-                Notification::Output {
-                    pane: "%7".to_string()
-                },
-                Notification::Lifecycle,
-            ]
-        );
-    }
 
     #[test]
     fn one_edge_per_burst_then_reactivation() {
@@ -929,7 +928,7 @@ mod tests {
 
     #[test]
     fn repeated_seed_deferrals_do_not_duplicate_the_queue_entry() {
-        // The retry is idempotent by construction: the queue holds session NAMES, and a repeat
+        // The retry is idempotent by construction: the queue holds stable session IDs, and a repeat
         // deferral cannot enqueue the same session twice (only an attach does).
         let mut pool = ControlPool::default();
         pool.newly_attached.push("s1".into());

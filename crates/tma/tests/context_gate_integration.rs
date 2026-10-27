@@ -7,7 +7,7 @@
 //! Driven through the built binary's `tma act --list --json --pane` (the deck/surface path):
 //! the verdict for `compact` is read from the JSON, not inferred.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tma_test_support::{empty_config_path, Scratch};
 
@@ -58,7 +58,7 @@ fn stamp_idle_claude(s: &Scratch, pane: &str, pct: Option<u32>) {
 }
 
 fn act_list(s: &Scratch, pane: &str) -> Output {
-    Command::new(s.bin())
+    s.command()
         .args(["act", "--list", "--json", "--pane", pane])
         .arg("--socket-name")
         .arg(&s.socket)

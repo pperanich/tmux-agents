@@ -219,6 +219,7 @@ impl PickerModel {
             Some(r) => vec![
                 Effect::Focus(Box::new(r.clone())),
                 Effect::ClearAttention {
+                    observation: r.acknowledgement.clone().map(Box::new),
                     pane: r.pane_id.clone(),
                 },
                 Effect::Quit,
@@ -405,6 +406,7 @@ mod tests {
 
     fn row(session: &str, w: u32, p: u32, agent: &str, state: AgentState, since: u64) -> AgentRow {
         AgentRow {
+            acknowledgement: None,
             pane_id: format!("%{w}{p}"),
             agent: agent.to_string(),
             state,
@@ -800,7 +802,7 @@ mod tests {
         assert!(
             matches!(
                 effects.as_slice(),
-                [Effect::Focus(_), Effect::ClearAttention { pane: cp }, Effect::Quit] if *cp == pane
+                [Effect::Focus(_), Effect::ClearAttention { pane: cp, .. }, Effect::Quit] if *cp == pane
             ),
             "Enter yields [Focus, ClearAttention, Quit], got {effects:?}"
         );
@@ -934,5 +936,33 @@ mod tests {
             p.update(Event::Nudge, 200, &mut m).as_slice(),
             [Effect::Refresh]
         ));
+    }
+    #[test]
+    fn focus_effect_keeps_the_displayed_observation_across_a_newer_refresh() {
+        let original = tma_core::persistence::ObservationIdentity::Legacy {
+            blocked: None,
+            episode: Some(
+                tma_core::persistence::Token::parse("00000000000000000000000000000001").unwrap(),
+            ),
+            pid: 10,
+            state: AgentState::Idle,
+            source: tma_core::Provenance::Hook,
+            since: 10,
+            turn_at: 10,
+        };
+        let mut shown = row("a", 0, 0, "agent", AgentState::Idle, 10);
+        shown.acknowledgement = Some(original.clone());
+        let mut matcher = matcher();
+        let mut model = model(vec![shown.clone()], "a", &mut matcher);
+        let effects = model.update(Event::Key(Key::Enter), 0, &mut matcher);
+        shown.acknowledgement = None;
+        model.update(Event::RowsRefreshed(vec![shown]), 1, &mut matcher);
+        let [Effect::Focus(row), Effect::ClearAttention { observation, .. }, Effect::Quit] =
+            effects.as_slice()
+        else {
+            panic!("focus batch");
+        };
+        assert_eq!(row.acknowledgement.as_ref(), Some(&original));
+        assert_eq!(observation.as_deref(), Some(&original));
     }
 }

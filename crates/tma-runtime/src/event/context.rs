@@ -146,9 +146,13 @@ fn stamp_observation(
         };
         let _ = stamp::apply_quota(tmux, &panes, pane, &quota, now, guarded);
     }
-    // The model label rides no chain: a plain last-write-wins set, as the rollout tail does it.
+    // The model label uses the independently owned metadata lane, like the rollout tail.
     if let Some(model) = usage.model.as_deref() {
-        let cmd = tma_core::render::set_pane_option(pane, opt::MODEL, model);
-        let _ = tmux.apply(&[cmd]);
+        let _ = stamp::apply_metadata_edits(
+            tmux,
+            &panes,
+            pane,
+            &[tma_tmux::persistence::OptionEdit::set(opt::MODEL, model)],
+        );
     }
 }

@@ -18,7 +18,7 @@ fn basename(s: &str) -> String {
 /// path. The shared `Scratch::tma` pins an empty config; this suite drives a real one, so it builds
 /// its own command over the shared harness core.
 fn tma(s: &Scratch, config: &Path, args: &[&str]) -> Output {
-    Command::new(common::tma_bin())
+    s.command()
         .args(args)
         .arg("--socket-name")
         .arg(&s.socket)
@@ -302,7 +302,8 @@ fn daemonless_blocked_fire(s: &Scratch, notify_toml: &str) -> String {
     s.write_config(notify_toml);
 
     use std::io::Write;
-    let mut child = Command::new(common::tma_bin())
+    let mut child = s
+        .command()
         .args([
             "event",
             "--agent",
@@ -530,7 +531,8 @@ fn a_failing_notify_command_is_recorded_and_reported() {
         "the fire recorded the failing command: {marker:?}"
     );
 
-    let out = Command::new(common::tma_bin())
+    let out = s
+        .command()
         .args(["doctor", "--json"])
         .args(["--socket-name", &s.socket])
         .args(["--manifest-dir", s.manifest_dir().to_str().unwrap()])
@@ -692,7 +694,7 @@ fn pinned_empty_config_shields_status_from_hostile_default_config() {
     // `tma status` with the hostile config on `$XDG_CONFIG_HOME`, optionally pinned to the empty
     // config the way the shared harness pins it.
     let status = |pinned: bool| -> String {
-        let mut cmd = Command::new(common::tma_bin());
+        let mut cmd = s.command();
         cmd.args(["status", "--socket-name", &s.socket])
             .args(["--manifest-dir", s.manifest_dir().to_str().unwrap()])
             .env("XDG_CONFIG_HOME", &xdg);

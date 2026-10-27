@@ -14,6 +14,7 @@ use serde::de::{self, Deserializer};
 use serde::Deserialize;
 
 use crate::evidence::Claim;
+use crate::program_status::AppId;
 use crate::state::{AgentState, Detail};
 
 /// A parsed, validated agent manifest.
@@ -33,6 +34,20 @@ pub struct Manifest {
     /// the context metric is what distinguishes a `gated` refusal (channel present, metric absent) from
     /// a permanent `no-coverage` one.
     pub telemetry: Option<Telemetry>,
+    /// Validated protocol aliases. These describe reports from an independently
+    /// recognized local process; they cannot register an agent.
+    pub program_status: Option<ProgramStatusApps>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramStatusApps {
+    pub apps: Vec<AppId>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawProgramStatusApps {
+    apps: Vec<String>,
 }
 
 /// The `[telemetry]` block: one optional subtable per metric. The metric-named subtable exists
@@ -344,6 +359,14 @@ impl fmt::Display for Version {
 /// Manifest load/validation errors. Every variant names the offending file (and field).
 #[derive(Debug, thiserror::Error)]
 pub enum ManifestError {
+    #[error(
+        "{file}: [program_status].apps[{index}] {app:?} is not a valid OSC 7501 app identifier"
+    )]
+    BadProgramApp {
+        file: String,
+        index: usize,
+        app: String,
+    },
     #[error("{file}: {source}")]
     // Exposing `toml::de::Error` publicly is deliberate: this crate feeds the tma binary, the toml
     // version is workspace-pinned, and an opaque wrapper would cost more than it protects.
@@ -402,6 +425,8 @@ struct RawManifest {
     details: BTreeMap<String, DetailSpec>,
     #[serde(default)]
     telemetry: Option<Telemetry>,
+    #[serde(default)]
+    program_status: Option<RawProgramStatusApps>,
 }
 
 /// A safe machine token: non-empty, `[a-z0-9_-]` only. Rejects the `set -pF` format
@@ -508,6 +533,24 @@ impl Manifest {
             }
         }
 
+        let program_status = raw
+            .program_status
+            .map(|raw_apps| {
+                let mut apps = Vec::new();
+                for (index, app) in raw_apps.apps.into_iter().enumerate() {
+                    let app_id = AppId::parse(&app).map_err(|_| ManifestError::BadProgramApp {
+                        file: file.to_owned(),
+                        index,
+                        app,
+                    })?;
+                    if !apps.contains(&app_id) {
+                        apps.push(app_id);
+                    }
+                }
+                Ok::<_, ManifestError>(ProgramStatusApps { apps })
+            })
+            .transpose()?;
+
         Ok(Manifest {
             min_engine_version,
             identity: raw.identity,
@@ -516,6 +559,7 @@ impl Manifest {
             rules: raw.rules,
             details: raw.details,
             telemetry: raw.telemetry,
+            program_status,
         })
     }
 

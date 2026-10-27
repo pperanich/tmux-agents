@@ -7,7 +7,7 @@
 //! hermetic closed set, so one test can both map a custom agent and pin the unknown-agent contract
 //! without touching the user's real `~/.config/tma/agents`.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use common::Scratch;
 use tma_test_support as common;
@@ -51,7 +51,7 @@ fn scratch() -> Scratch {
 /// with `TMUX_PANE` set and the real config pinned out. `payload` (if any) is passed via a file
 /// (`--payload <path>`, no stdin plumbing). Returns the `Output`.
 fn event(s: &Scratch, agent: &str, kind: &str, pane: &str, payload: Option<&str>) -> Output {
-    let mut cmd = Command::new(common::tma_bin());
+    let mut cmd = s.command();
     cmd.args(["event", "--agent", agent, "--kind", kind])
         .args(["--socket-name", &s.socket])
         .arg("--manifest-dir")

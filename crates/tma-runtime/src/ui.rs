@@ -88,10 +88,27 @@ pub fn active_client_name(tmux: &Tmux) -> String {
     tmux.display_active("#{client_name}").unwrap_or_default()
 }
 
-/// Clear a pane's attention flag (`@agent_attention`): the picker's Enter path and the "go deal with
-/// this" jumps mark a focused waiter reviewed. Best-effort at the call sites (they discard the result).
-pub fn clear_attention(tmux: &Tmux, pane_id: &str) -> Result<(), TmuxError> {
-    tmux.unset_pane_option(pane_id, opt::ATTENTION)
+/// Clear from an already displayed row. A fresh read verifies its exact original identity;
+/// it must not substitute a newer result merely because the same pane was selected.
+pub fn clear_observed_attention(
+    tmux: &Tmux,
+    pane: &str,
+    expected: Option<&tma_core::persistence::ObservationIdentity>,
+) -> Result<(), TmuxError> {
+    let Some(expected) = expected else {
+        return Ok(());
+    };
+    let read =
+        tma_tmux::persistence::read_pane(tmux, pane).map_err(tma_tmux::stamp::persistence_error)?;
+    let Some(observation) =
+        tma_tmux::persistence::AttentionObservation::from_read(read, crate::now_ms())
+    else {
+        return Ok(());
+    };
+    if &observation.identity == expected {
+        crate::seen::acknowledge(tmux, &observation)?;
+    }
+    Ok(())
 }
 
 /// Read a client's return-trail server option, `None` when unset. The jump return-trail is the only

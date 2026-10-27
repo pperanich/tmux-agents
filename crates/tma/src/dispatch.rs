@@ -22,7 +22,36 @@ pub(crate) fn run_clear_attention(args: ClearAttentionArgs, server: &tmux::Serve
     // Skipped on an empty pane argument (nothing to target, and nothing to scope the departure
     // query to), but the focus change still happened, so the watcher nudge below runs regardless.
     if !args.pane.is_empty() {
-        let _ = tmux.unset_pane_option(&args.pane, tma_core::stamp::opt::ATTENTION);
+        use tma_runtime::tmux_hooks::{ATTENTION_REVISION_ENV, DEPARTURE_REVISION_ENV};
+        let arrival = std::env::var_os(ATTENTION_REVISION_ENV);
+        let departure = std::env::var_os(DEPARTURE_REVISION_ENV);
+        if arrival.is_some() || departure.is_some() {
+            let parse = |raw: std::ffi::OsString| {
+                raw.into_string()
+                    .ok()
+                    .and_then(|raw| tma_core::persistence::AttentionRevision::parse(&raw))
+            };
+            if let Some(revision) = arrival
+                .and_then(parse)
+                .filter(|revision| format!("%{}", revision.pane().get()) == args.pane)
+            {
+                let _ = tma_runtime::seen::acknowledge_revision(&tmux, &revision);
+            }
+            if let Some(revision) = departure.and_then(parse) {
+                let _ = tma_runtime::seen::acknowledge_revision(&tmux, &revision);
+            }
+            tma_runtime::nudge::nudge_watchers(&tmux);
+            return ExitCode::SUCCESS;
+        }
+        let hook_context = std::env::var_os(crate::install::HOOK_KIND_ENV).is_some();
+        let clear = |pane: &str| {
+            if hook_context {
+                tma_runtime::seen::acknowledge_legacy_current(&tmux, pane)
+            } else {
+                tma_runtime::seen::acknowledge_current(&tmux, pane)
+            }
+        };
+        let _ = clear(&args.pane);
         // Seen-on-leave. The kind arrives by environment variable, so an older binary reached
         // through the late-bound hook string simply does not find it and keeps its arrival-only
         // behaviour instead of failing to parse.
@@ -31,7 +60,7 @@ pub(crate) fn run_clear_attention(args: ClearAttentionArgs, server: &tmux::Serve
             .and_then(|h| tmux::DepartureKind::from_hook_name(&h))
         {
             if let Ok(Some(departed)) = tmux.departed_pane(&args.pane, kind) {
-                let _ = tmux.unset_pane_option(&departed, tma_core::stamp::opt::ATTENTION);
+                let _ = clear(&departed);
             }
         }
     }

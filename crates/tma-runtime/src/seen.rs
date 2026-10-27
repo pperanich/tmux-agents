@@ -18,43 +18,95 @@
 
 use tma_core::seen::seen_by_input;
 use tma_core::stamp::opt;
-use tma_core::{render, AgentRow};
+use tma_core::AgentRow;
 use tma_tmux::tmux::Tmux;
 
-/// Clear `@agent_attention` on every pane in `raised` that a client has been typed into since its
-/// raise, returning the panes cleared. `raised` is `(pane_id, episode_at)` for the panes whose
-/// flag currently stands.
-///
-/// Nothing is reported cleared unless the write actually landed: on a failed batch the caller's
-/// view stays as it was and the next cycle retries, so a row can never claim a clear tmux refused.
-///
-/// The `since` it decides on is as old as the rows: read at the top of the cycle, acted on at the
-/// end of it (on the daemon path, after the whole sweep and the notification dispatch). A pane that
-/// re-raised inside that window is retired on evidence about the *previous* episode, and the unset
-/// is unguarded, so it lands anyway. Accepted rather than fixed: `render::unset_pane_option` has no
-/// `-F` conditional form, the focus-hook clears have exactly the same shape, and the flag
-/// self-corrects — the next cycle reads the new `since`, finds no input after it, and the marker
-/// stands again for the cost of one cycle.
-pub fn clear_seen(tmux: &Tmux, raised: &[(String, u64)]) -> Vec<String> {
+/// Clear only the exact observation used to decide input was later than the raised marker.
+pub fn clear_seen(
+    tmux: &Tmux,
+    raised: &[tma_tmux::persistence::AttentionObservation],
+) -> Vec<String> {
     if raised.is_empty() {
         return Vec::new();
     }
     let Ok(clients) = tmux.client_views() else {
         return Vec::new();
     };
-    let cleared: Vec<String> = raised
+    raised
         .iter()
-        .filter(|(pane, since)| seen_by_input(&clients, pane, *since))
-        .map(|(pane, _)| pane.clone())
-        .collect();
-    let cmds: Vec<render::StampCommand> = cleared
-        .iter()
-        .map(|pane| render::unset_pane_option(pane, opt::ATTENTION))
-        .collect();
-    match tmux.apply(&cmds) {
-        Ok(()) => cleared,
-        Err(_) => Vec::new(),
+        .filter(|observation| {
+            seen_by_input(&clients, &observation.read.pane_id, observation.episode_at)
+        })
+        .filter_map(|observation| {
+            acknowledge(tmux, observation)
+                .ok()
+                .filter(|cleared| *cleared)
+                .map(|_| observation.read.pane_id.clone())
+        })
+        .collect()
+}
+
+pub fn acknowledge(
+    tmux: &Tmux,
+    observation: &tma_tmux::persistence::AttentionObservation,
+) -> Result<bool, tma_tmux::tmux::TmuxError> {
+    let outcome = tma_tmux::persistence::acknowledge_observation(tmux, observation)
+        .map_err(tma_tmux::stamp::persistence_error)?;
+    // Advisory clears are visible truth, never a transactional effect authorization.
+    Ok(outcome
+        .winner()
+        .options
+        .get(opt::ATTENTION)
+        .map(String::as_str)
+        != Some("1"))
+}
+
+/// Focus arrival/departure and UI jump capture their observation before deciding the clear.
+pub fn acknowledge_current(tmux: &Tmux, pane: &str) -> Result<(), tma_tmux::tmux::TmuxError> {
+    let read =
+        tma_tmux::persistence::read_pane(tmux, pane).map_err(tma_tmux::stamp::persistence_error)?;
+    if let Some(observation) =
+        tma_tmux::persistence::AttentionObservation::from_read(read, crate::now_ms())
+    {
+        acknowledge(tmux, &observation)?;
     }
+    Ok(())
+}
+
+/// A hook handler verifies its captured dispatch revision before forming an ACK observation.
+pub fn acknowledge_revision(
+    tmux: &Tmux,
+    revision: &tma_core::persistence::AttentionRevision,
+) -> Result<(), tma_tmux::tmux::TmuxError> {
+    let target = format!("${}:.%{}", revision.session().get(), revision.pane().get());
+    let read = tma_tmux::persistence::read_pane(tmux, &target)
+        .map_err(tma_tmux::stamp::persistence_error)?;
+    if revision.matches(&read.options) {
+        if let Some(observation) =
+            tma_tmux::persistence::AttentionObservation::from_read(read, crate::now_ms())
+        {
+            acknowledge(tmux, &observation)?;
+        }
+    }
+    Ok(())
+}
+
+/// Older known hook commands have no dispatch witness. Retain their legacy compatibility,
+/// but do not let a delayed command consume a newly published program result.
+pub fn acknowledge_legacy_current(
+    tmux: &Tmux,
+    pane: &str,
+) -> Result<(), tma_tmux::tmux::TmuxError> {
+    let read =
+        tma_tmux::persistence::read_pane(tmux, pane).map_err(tma_tmux::stamp::persistence_error)?;
+    if !read.program.program_origin {
+        if let Some(observation) =
+            tma_tmux::persistence::AttentionObservation::from_read(read, crate::now_ms())
+        {
+            acknowledge(tmux, &observation)?;
+        }
+    }
+    Ok(())
 }
 
 /// The `(pane_id, episode_at)` pairs a clear pass would consider: the rows whose flag stands and
@@ -75,7 +127,11 @@ pub fn raised_panes(rows: &[AgentRow]) -> Vec<(String, u64)> {
 /// [`clear_seen`] over a cycle's rows, clearing the flag on the rows it clears so the surface this
 /// cycle feeds shows the result of its own clear rather than lagging a cycle behind it. `raised` is
 /// the caller's own [`raised_panes`] result — the same list it gated on, never recomputed here.
-pub fn clear_seen_rows(tmux: &Tmux, rows: &mut [AgentRow], raised: &[(String, u64)]) {
+pub fn clear_seen_rows(
+    tmux: &Tmux,
+    rows: &mut [AgentRow],
+    raised: &[tma_tmux::persistence::AttentionObservation],
+) {
     let cleared = clear_seen(tmux, raised);
     for row in rows.iter_mut() {
         if cleared.contains(&row.pane_id) {
@@ -93,6 +149,7 @@ mod tests {
     /// by a later turn end that could not move `since`.
     fn done_row(since: u64, turn_at: u64) -> AgentRow {
         AgentRow {
+            acknowledgement: None,
             pane_id: "%1".to_string(),
             agent: "codex".to_string(),
             state: AgentState::Idle,

@@ -123,9 +123,8 @@ pub(crate) enum Command {
     /// Diagnose each agent pane's effective tier (3/2/1) and why: hooks wired, daemon alive,
     /// last evidence source + age, and the ambient-driver check. Read-only; `--json` for the schema.
     Doctor(DoctorArgs),
-    /// INTERNAL: clear a pane's `@agent_attention` flag; the tmux focus hooks call this with
-    /// `#{pane_id}`, plus `TMA_HOOK_KIND` naming the hook so the pane just DEPARTED is cleared
-    /// too. Also invoked by the picker's Enter-jump.
+    /// INTERNAL: acknowledge the generated focus hook's captured arrival/departure observations,
+    /// then nudge watchers. A direct invocation clears the named pane's current observation.
     #[command(hide = true)]
     ClearAttention(ClearAttentionArgs),
     /// INTERNAL: the detached-action supervisor. Spawned by the `tma act` broker's detach path

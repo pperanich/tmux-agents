@@ -350,6 +350,7 @@ fn main() -> ExitCode {
             config_dir: args.config_dir,
         }),
         Some(Command::Doctor(args)) => doctor::run(doctor::DoctorOpts {
+            program_mode: config.program_status.mode,
             json: args.json,
             exit_code: args.exit_code,
             server: server.clone(),

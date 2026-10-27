@@ -374,3 +374,213 @@ fn server_gone_terminates_daemon_via_control() {
         "server-gone (%exit/EOF on the control client) terminates the daemon"
     );
 }
+
+fn pump_protocol_pool(
+    pool: &mut tma_tmux::control::ControlPool,
+    tmux: &tma_tmux::tmux::Tmux,
+) -> tma_tmux::control::ProgramDrain {
+    let ready = tma_tmux::control::pollfds(pool)
+        .into_iter()
+        .map(|(session, _)| session)
+        .collect();
+    let effects = tma_tmux::control::dispatch_ready(pool, &ready, Instant::now());
+    if effects.need_reconcile {
+        pool.reconcile(tmux).unwrap();
+    }
+    tma_tmux::control::seed_attached(pool, tmux, Instant::now());
+    pool.drain_program()
+}
+
+fn emit_synthetic_report_after_sync(s: &Scratch, pane: &str) {
+    // Ordinary bytes establish the possible DCS phase before ST, even if the
+    // first observed ESC was paired with one emitted before attach.
+    let command = "printf 'framing\\033\\\\\\033]7501;state=working:app=pi\\033\\\\'";
+    assert!(s
+        .tmux(&["send-keys", "-t", pane, command, "Enter"])
+        .status
+        .success());
+}
+
+#[test]
+fn protocol_pool_linked_window_rename_and_owner_transfer() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        return;
+    }
+    let s = Scratch::new("protocol_owner");
+    let pane = new_shell_session(&s, "first");
+    let first_id = s.get("first", "#{session_id}");
+    assert!(s
+        .tmux(&["new-session", "-d", "-s", "second", "exec sleep 100000"])
+        .status
+        .success());
+    assert!(s
+        .tmux(&["link-window", "-s", "first:0", "-t", "second:1"])
+        .status
+        .success());
+    let tmux =
+        tma_tmux::tmux::Tmux::connect(&tma_tmux::tmux::Server::named(Some(s.socket.clone())));
+    let mut pool = tma_tmux::control::ControlPool::default();
+    pool.set_program_collection(true);
+    pool.reconcile(&tmux).unwrap();
+    // Rename before attach seeding. IDs must retain coverage and the activity seed.
+    assert!(s
+        .tmux(&["rename-session", "-t", &first_id, "renamed"])
+        .status
+        .success());
+    common::poll_until("both protocol clients attach and seed by stable ID", || {
+        pump_protocol_pool(&mut pool, &tmux);
+        !pool.pending_seed() && tma_tmux::control::pollfds(&pool).len() == 2
+    });
+    // Await attach handshake explicitly through the seed's activity edge.
+    let mut seeded = false;
+    common::poll_until("renamed session's pane is seeded", || {
+        pump_protocol_pool(&mut pool, &tmux);
+        tma_tmux::control::tick(
+            &mut pool,
+            Instant::now() + Duration::from_secs(2),
+            1,
+            Duration::from_secs(45),
+        );
+        seeded |= pool.drain_edges().iter().any(|edge| edge.pane == pane);
+        seeded
+    });
+    // Establish framing explicitly before the synthetic report, independent
+    // of whether shell startup already emitted a safe delimiter.
+    emit_synthetic_report_after_sync(&s, &pane);
+    let mut events = Vec::new();
+    common::poll_until("linked pane emits one owned report", || {
+        events.extend(pump_protocol_pool(&mut pool, &tmux).observations);
+        !events.is_empty()
+    });
+    let first_epoch = events[0].connection;
+    // Drain both clients fully to expose any duplicate of the same write.
+    for _ in 0..5 {
+        events.extend(pump_protocol_pool(&mut pool, &tmux).observations);
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    assert_eq!(
+        events.len(),
+        1,
+        "linked streams must yield one logical event"
+    );
+    assert!(s.tmux(&["kill-session", "-t", &first_id]).status.success());
+    pool.reconcile(&tmux).unwrap();
+    let gap = pool.drain_program();
+    assert!(gap
+        .invalidations
+        .iter()
+        .any(|event| event.pane == tma_core::program_status::PaneId::parse(&pane).unwrap()));
+    assert!(!gap.all_invalidated);
+    common::poll_until("surviving client remains attached", || {
+        pump_protocol_pool(&mut pool, &tmux);
+        tma_tmux::control::pollfds(&pool).len() == 1
+    });
+    emit_synthetic_report_after_sync(&s, &pane);
+    let mut transferred = Vec::new();
+    common::poll_until(
+        "fresh report recovers transferred stream after safe ST",
+        || {
+            transferred.extend(pump_protocol_pool(&mut pool, &tmux).observations);
+            !transferred.is_empty()
+        },
+    );
+    assert!(transferred[0].connection > first_epoch);
+}
+
+#[test]
+fn protocol_pool_real_output_tail_and_second_session_progress() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        return;
+    }
+    let s = Scratch::new("protocol_fairness");
+    let busy = new_shell_session(&s, "busy");
+    let quiet = new_shell_session(&s, "quiet");
+    let tmux =
+        tma_tmux::tmux::Tmux::connect(&tma_tmux::tmux::Server::named(Some(s.socket.clone())));
+    let mut pool = tma_tmux::control::ControlPool::default();
+    pool.set_program_collection(true);
+    pool.reconcile(&tmux).unwrap();
+    // Observe both attach seeds before issuing either pane's controlled output.
+    let mut seeded = std::collections::HashSet::new();
+    common::poll_until("both sessions attach before output", || {
+        pump_protocol_pool(&mut pool, &tmux);
+        tma_tmux::control::tick(
+            &mut pool,
+            Instant::now() + Duration::from_secs(2),
+            1,
+            Duration::from_secs(45),
+        );
+        seeded.extend(pool.drain_edges().into_iter().map(|edge| edge.pane));
+        seeded.contains(&busy) && seeded.contains(&quiet)
+    });
+    let command = "awk 'BEGIN { for (i=0; i<30000; i++) printf \"xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx\" }'; printf '\\033\\\\\\033]7501;state=working:app=pi\\033\\\\'";
+    assert!(s
+        .tmux(&["send-keys", "-t", &busy, command, "Enter"])
+        .status
+        .success());
+    emit_synthetic_report_after_sync(&s, &quiet);
+    let mut observed = std::collections::HashSet::new();
+    common::poll_until(
+        "quiet session and long ordinary output tail both make progress",
+        || {
+            for event in pump_protocol_pool(&mut pool, &tmux).observations {
+                observed.insert(event.pane);
+            }
+            observed.contains(&tma_core::program_status::PaneId::parse(&busy).unwrap())
+                && observed.contains(&tma_core::program_status::PaneId::parse(&quiet).unwrap())
+        },
+    );
+}
+
+#[test]
+fn native_tmux_dcs_keeps_cancel_and_escaped_escape_bytes_as_data() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        return;
+    }
+    let s = Scratch::new("protocol_dcs");
+    let mut bytes = Vec::new();
+    for (index, data) in [b"\x1b\x1b\\".as_slice(), b"\x18", b"\x1a"]
+        .iter()
+        .enumerate()
+    {
+        bytes.extend_from_slice(b"\x1bPtma;data");
+        bytes.extend_from_slice(data);
+        bytes.extend_from_slice(format!("HIDDEN{index}\x1b\\VISIBLE{index}\n").as_bytes());
+    }
+    let payload = s.workdir.join("dcs.bin");
+    let script = s.workdir.join("emit.sh");
+    std::fs::write(&payload, bytes).unwrap();
+    std::fs::write(&script, "cat \"$1\"; exec sleep 100000\n").unwrap();
+    assert!(s
+        .tmux(&[
+            "new-session",
+            "-d",
+            "-s",
+            "dcs",
+            "-x",
+            "80",
+            "-y",
+            "24",
+            "sh",
+            script.to_str().unwrap(),
+            payload.to_str().unwrap(),
+        ])
+        .status
+        .success());
+    let mut capture = String::new();
+    common::poll_until(
+        "native tmux consumes the DCS and renders each following marker",
+        || {
+            let output = s.tmux(&["capture-pane", "-p", "-t", "dcs"]);
+            capture = String::from_utf8(output.stdout).unwrap();
+            (0..3).all(|index| capture.contains(&format!("VISIBLE{index}")))
+        },
+    );
+    assert!(
+        !capture.contains("HIDDEN"),
+        "DCS data escaped into terminal display: {capture:?}"
+    );
+}

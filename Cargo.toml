@@ -25,6 +25,8 @@ thiserror = "2"
 # Screen-rule matching (contains/regex/line ordering). The measured detection need N12
 # anticipated — a pure-core dep, distinct from the deferred UI stack below.
 regex = "1"
+# OSC 7501 uses only slice decoding. No alloc/std features; base64 0.22.1 has MSRV 1.48.
+base64 = { version = "0.22.1", default-features = false }
 # Safe syscall layer (policy: no direct libc anywhere; all syscalls go through rustix).
 # 1.1 matches crossterm 0.29's transitive rustix, so one build of the crate serves both.
 rustix = { version = "1.1", features = ["event", "fs", "net", "pipe", "process", "system"] }

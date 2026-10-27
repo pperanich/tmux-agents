@@ -24,6 +24,17 @@ fn scratch(tag: &str) -> (Scratch, Tmux, String, String) {
         .success());
     let window = s.get("s1", "#{window_id}");
     assert!(window.starts_with('@'), "got window {window:?}");
+    // Keep automatic rename enabled and inherited, with a format that retains the
+    // current name. A process-derived default races the restore assertion.
+    assert!(s
+        .tmux(&[
+            "set-option",
+            "-gw",
+            "automatic-rename-format",
+            "#{window_name}"
+        ])
+        .status
+        .success());
     // The rename above pinned `automatic-rename off` at window scope, which is tmux's own side
     // effect and exactly what this suite is about. Put the window back to inheriting so each test
     // decides its own starting point.

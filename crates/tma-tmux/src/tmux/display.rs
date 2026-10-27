@@ -278,25 +278,49 @@ impl Tmux {
         self.write_pane_tty(pane_id, &passthrough(&osc9_4(progress)));
     }
 
+    /// Recheck scheduler permission after the tty lookup, before writing an edge.
+    /// Returns false when permission was lost or the tty could not be resolved.
+    pub fn osc_progress_checked(
+        &self,
+        pane_id: &str,
+        progress: Progress,
+        allowed: impl FnMut() -> bool,
+    ) -> bool {
+        self.write_pane_tty_checked(pane_id, &passthrough(&osc9_4(progress)), allowed)
+    }
+
     /// Write bytes to a pane's tty, best-effort: every failure is swallowed, and the tty is opened
     /// non-blocking so a pathological unread pty can never wedge the notify path.
     fn write_pane_tty(&self, pane_id: &str, bytes: &[u8]) {
+        self.write_pane_tty_checked(pane_id, bytes, || true);
+    }
+
+    fn write_pane_tty_checked(
+        &self,
+        pane_id: &str,
+        bytes: &[u8],
+        mut allowed: impl FnMut() -> bool,
+    ) -> bool {
         use std::io::Write;
         use std::os::unix::fs::OpenOptionsExt;
 
+        if !allowed() {
+            return false;
+        }
         let Ok(tty) = self.display(pane_id, "#{pane_tty}") else {
-            return;
+            return false;
         };
-        if tty.is_empty() {
-            return;
+        if tty.is_empty() || !allowed() {
+            return false;
         }
         if let Ok(mut f) = std::fs::OpenOptions::new()
             .write(true)
             .custom_flags(rustix::fs::OFlags::NONBLOCK.bits() as i32)
             .open(&tty)
         {
-            let _ = f.write_all(bytes);
+            return allowed() && f.write_all(bytes).is_ok();
         }
+        false
     }
 }
 

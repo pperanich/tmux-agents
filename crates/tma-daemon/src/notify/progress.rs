@@ -7,7 +7,6 @@
 
 use std::collections::BTreeSet;
 
-use tma_core::stamp::opt;
 use tma_core::AgentState;
 use tma_tmux::tmux::{PaneRecord, Progress};
 
@@ -29,8 +28,10 @@ pub(crate) fn progress_panes(panes: &[PaneRecord]) -> Vec<ProgressPane> {
         .map(|p| ProgressPane {
             key: (p.session.clone(), p.window_index),
             pane_id: p.pane_id.clone(),
-            working: p.options.get(opt::STATE).and_then(|v| v.parse().ok())
-                == Some(AgentState::Working),
+            working: tma_core::persistence::current_stamp(&p.options, tma_runtime::now_ms())
+                .ok()
+                .flatten()
+                .is_some_and(|s| s.into_inner().state == AgentState::Working),
         })
         .collect()
 }

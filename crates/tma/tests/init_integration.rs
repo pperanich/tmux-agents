@@ -98,7 +98,7 @@ fn init_wires_the_detected_agents_the_keys_and_nothing_else() {
     let env = Env::new();
     assert!(env
         .scratch
-        .tmux(&["new-session", "-d", "-s", "s1"])
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
         .status
         .success());
 
@@ -199,7 +199,7 @@ fn init_without_yes_declines_and_writes_nothing_when_stdin_is_not_a_tty() {
     let env = Env::new();
     assert!(env
         .scratch
-        .tmux(&["new-session", "-d", "-s", "s1"])
+        .tmux(&["new-session", "-d", "-s", "s1", "exec sleep 100000"])
         .status
         .success());
 

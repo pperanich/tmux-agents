@@ -7,12 +7,15 @@
 //! foreground ⇒ `unknown`, unless a live hook claim covers a pane whose agent process is still
 //! alive; (3) freeze (scrolled / history view) holds without touching the screen; (4) the
 //! screen/title order against the persisted claim.
+//! [`verdict_with_program`] first accepts a separately validated program selection,
+//! before this fallback ladder. Raw program evidence cannot enter that lane.
 
 use crate::evidence::{Claim, Evidence, Provenance, Source};
 use crate::manifest::Manifest;
+use crate::program_status::ProgramSelection;
 use crate::stamp::StampedState;
 use crate::state::{AgentState, Detail};
-use crate::verdict::{Verdict, WinningEvidence, WriteAction, WritePlan};
+use crate::verdict::{ProgramVerdict, Verdict, WinningEvidence, WriteAction, WritePlan};
 
 /// Fold tuning, injected by the bin (tma-core reads no config). The `Default` values are the
 /// canonical zero-config floor; the bin's `[fold]` section defaults each field back to these.
@@ -97,6 +100,21 @@ pub fn verdict(
     cfg: &FoldConfig,
     now: u64,
 ) -> Verdict {
+    verdict_with_program(prev, facts, evidence, manifest, cfg, now, None)
+}
+
+/// Runtime supplies a selection only while its process/stream episode remains valid.
+/// Raw `Source::ProgramStatus` evidence never grants authority. Silence does not
+/// expire this input; loss, exclusion, clear and episode validation happen first.
+pub fn verdict_with_program(
+    prev: Option<StampedState>,
+    facts: &SnapshotFacts,
+    evidence: &[Evidence],
+    manifest: &Manifest,
+    cfg: &FoldConfig,
+    now: u64,
+    program: Option<&ProgramSelection>,
+) -> Verdict {
     // Episode boundary: a pid change between cycles is same-pane agent replacement — discard the
     // prior claim and flag the reset (clears since/notified/attention). Guarded on nonzero pids
     // so an unknown pid never forces a spurious reset.
@@ -106,6 +124,34 @@ pub fn verdict(
     };
     let prev = if episode_reset { None } else { prev };
     let prev_ref = prev.as_ref();
+
+    if let Some(program) = program {
+        let mut decision = finish_publish(
+            Publish {
+                state: program.state(),
+                detail: program.detail().cloned(),
+                source: Provenance::Hook,
+                origin: Some(Source::ProgramStatus),
+                at: program.at(),
+                may_override: true,
+                label: "program status".to_owned(),
+            },
+            prev_ref,
+            episode_reset,
+        );
+        // Completion identity is independent of state equality, and explicit idle
+        // alone is not proof of a terminal result.
+        decision.writes.set_attention = if program.state() == AgentState::Blocked {
+            prev_ref.is_none_or(|previous| previous.state != AgentState::Blocked)
+        } else {
+            program.result().is_some_and(|result| result.pending)
+        };
+        decision.program = Some(ProgramVerdict {
+            authority: program.authority(),
+            result: program.result().cloned(),
+        });
+        return decision;
+    }
 
     // Precedence 1 — a fresh hook event this cycle wins outright. Safe to run before the
     // foreground cap only because hook evidence reaches the fold exclusively from agent-foreground
@@ -120,6 +166,7 @@ pub fn verdict(
                     state: sc.state,
                     detail: sc.detail.clone(),
                     source: Provenance::Hook,
+                    origin: Some(Source::HookEvent),
                     at: hook.at,
                     may_override: true,
                     label: format!("fresh hook event ({})", hook.meta),
@@ -152,6 +199,7 @@ pub fn verdict(
                 state: AgentState::Unknown,
                 detail: None,
                 source: Provenance::Process,
+                origin: None,
                 at: now,
                 may_override: true,
                 label: "foreground is not the agent".to_string(),
@@ -180,10 +228,12 @@ pub fn verdict(
                 && claim_state(e) == Some(AgentState::Blocked)
         }),
         working: latest(evidence, |e| {
-            e.source != Source::HookEvent && claim_state(e) == Some(AgentState::Working)
+            matches!(e.source, Source::ScreenRule | Source::Title)
+                && claim_state(e) == Some(AgentState::Working)
         }),
         idle: latest(evidence, |e| {
-            e.source != Source::HookEvent && claim_state(e) == Some(AgentState::Idle)
+            matches!(e.source, Source::ScreenRule | Source::Title)
+                && claim_state(e) == Some(AgentState::Idle)
         }),
     };
 
@@ -325,6 +375,7 @@ fn corroborate(p: &StampedState, e: &Evidence, episode_reset: bool) -> Verdict {
         state: p.state,
         detail: p.detail.clone(),
         winning_evidence: WinningEvidence {
+            origin: None,
             source: Provenance::Hook,
             at: e.at,
             label: format!("hook {} corroborated by {}", p.state, source_name(e.source)),
@@ -335,6 +386,7 @@ fn corroborate(p: &StampedState, e: &Evidence, episode_reset: bool) -> Verdict {
             set_attention: false,
             episode_reset,
         },
+        program: None,
     }
 }
 
@@ -343,6 +395,7 @@ struct Publish {
     state: AgentState,
     detail: Option<Detail>,
     source: Provenance,
+    origin: Option<Source>,
     at: u64,
     may_override: bool,
     label: String,
@@ -353,6 +406,7 @@ fn publish_from(e: &Evidence, state: AgentState) -> Publish {
         state,
         detail: claim_detail(e),
         source: e.source.provenance(),
+        origin: Some(e.source),
         at: e.at,
         may_override: false,
         label: format!("{} evidence ({})", source_name(e.source), e.meta),
@@ -372,6 +426,7 @@ fn finish_publish(p: Publish, prev: Option<&StampedState>, episode_reset: bool) 
         state: p.state,
         detail: p.detail,
         winning_evidence: WinningEvidence {
+            origin: p.origin,
             source: p.source,
             at: p.at,
             label: p.label,
@@ -382,6 +437,7 @@ fn finish_publish(p: Publish, prev: Option<&StampedState>, episode_reset: bool) 
             set_attention,
             episode_reset,
         },
+        program: None,
     }
 }
 
@@ -393,6 +449,7 @@ fn hold(prev: Option<&StampedState>, label: &str, episode_reset: bool, now: u64)
             state: p.state,
             detail: p.detail.clone(),
             winning_evidence: WinningEvidence {
+                origin: None,
                 source: p.source,
                 at: p.evidence_at,
                 label: label.to_string(),
@@ -403,11 +460,13 @@ fn hold(prev: Option<&StampedState>, label: &str, episode_reset: bool, now: u64)
                 set_attention: false,
                 episode_reset,
             },
+            program: None,
         },
         None => Verdict {
             state: AgentState::Unknown,
             detail: None,
             winning_evidence: WinningEvidence {
+                origin: None,
                 source: Provenance::Capture,
                 at: now,
                 label: format!("{label} (no prior; unknown)"),
@@ -418,6 +477,7 @@ fn hold(prev: Option<&StampedState>, label: &str, episode_reset: bool, now: u64)
                 set_attention: false,
                 episode_reset,
             },
+            program: None,
         },
     }
 }
@@ -448,6 +508,7 @@ fn claim_detail(e: &Evidence) -> Option<Detail> {
 
 fn source_name(s: Source) -> &'static str {
     match s {
+        Source::ProgramStatus => "program-status",
         Source::HookEvent => "hook",
         Source::ScreenRule => "screen",
         Source::Title => "title",

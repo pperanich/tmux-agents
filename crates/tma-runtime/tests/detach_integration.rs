@@ -8,7 +8,7 @@
 //! - the completion notification fires with the pinned payload (via `TMA_NOTIFY_CMD`).
 
 use std::path::Path;
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::Duration;
 
 use tma_test_support::{self as common, Scratch};
@@ -40,7 +40,7 @@ fn write_action(xdg: &Path, stem: &str, command: &str, detach_timeout_ms: u64) {
 /// Run `tma <args>` against the scratch server with the user-actions dir pinned via `XDG_CONFIG_HOME`
 /// and an optional `TMA_NOTIFY_CMD` completion observer.
 fn tma_act(s: &Scratch, xdg: &Path, notify_cmd: Option<&str>, args: &[&str]) -> Output {
-    let mut cmd = Command::new(common::tma_bin());
+    let mut cmd = s.command();
     cmd.args(args)
         .arg("--socket-name")
         .arg(&s.socket)

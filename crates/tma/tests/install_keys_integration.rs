@@ -7,7 +7,7 @@
 //! (SAFETY).
 
 use std::path::PathBuf;
-use std::process::{Command, Output};
+use std::process::Output;
 
 use common::{scratch_tmux, unique_id};
 use tma_test_support as common;
@@ -69,8 +69,10 @@ fn install_keys_mouse_bindings_source_into_the_root_table() {
 
     let managed = s.config_dir().join("tmux.conf");
     let conf = s.workdir.join(".tmux.conf");
-    let out = Command::new(env!("CARGO_BIN_EXE_tma"))
-        .args(["install-keys", "--mouse", "--yes"])
+    let out = common::isolated_tma_command(&s.workdir)
+        .args(["--socket-name", &s.socket])
+        // This fixture sources bindings, so it must not launch an unowned background daemon.
+        .args(["install-keys", "--mouse", "--no-daemon", "--yes"])
         .arg("--config-dir")
         .arg(s.config_dir())
         .arg("--conf")
@@ -120,8 +122,9 @@ fn install_keys_mouse_bindings_source_into_the_root_table() {
         "the chain still ends in tmux's own window-name click: {left}"
     );
     // Without --mouse none of it is written, so a plain install cannot claim the mouse keys.
-    let plain = Command::new(env!("CARGO_BIN_EXE_tma"))
-        .args(["install-keys", "--yes"])
+    let plain = common::isolated_tma_command(&s.workdir)
+        .args(["--socket-name", &s.socket])
+        .args(["install-keys", "--no-daemon", "--yes"])
         .arg("--config-dir")
         .arg(s.config_dir())
         .arg("--conf")
@@ -151,7 +154,8 @@ fn install_keys_marks_the_existing_xdg_config_and_creates_no_dotfile() {
     std::fs::write(&xdg_conf, user_conf).unwrap();
 
     let keys = |args: &[&str]| {
-        Command::new(env!("CARGO_BIN_EXE_tma"))
+        common::isolated_tma_command(&s.workdir)
+            .args(["--socket-name", &s.socket])
             .arg("install-keys")
             .args(args)
             .arg("--config-dir")
@@ -221,7 +225,8 @@ fn install_keys_creates_the_xdg_config_when_none_exists() {
     let xdg = s.workdir.join("xdg");
     std::fs::create_dir_all(&home).unwrap();
 
-    let out = Command::new(env!("CARGO_BIN_EXE_tma"))
+    let out = common::isolated_tma_command(&s.workdir)
+        .args(["--socket-name", &s.socket])
         .args(["install-keys", "--yes"])
         .arg("--config-dir")
         .arg(s.config_dir())

@@ -140,6 +140,7 @@ mod tests {
 
     fn row(pane: &str, repo: Option<&str>, state: AgentState, since: u64) -> AgentRow {
         AgentRow {
+            acknowledgement: None,
             pane_id: pane.to_string(),
             agent: "claude".to_string(),
             state,

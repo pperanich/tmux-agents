@@ -313,6 +313,7 @@ impl WatchModel {
         let mut effects = vec![
             Effect::Focus(Box::new(r.clone())),
             Effect::ClearAttention {
+                observation: r.acknowledgement.clone().map(Box::new),
                 pane: r.pane_id.clone(),
             },
         ];
@@ -754,6 +755,7 @@ mod tests {
 
     fn row(session: &str, w: u32, p: u32, state: AgentState, since: u64) -> AgentRow {
         AgentRow {
+            acknowledgement: None,
             pane_id: format!("%{w}{p}"),
             agent: "claude".to_string(),
             state,
@@ -861,7 +863,7 @@ mod tests {
         assert!(
             matches!(
                 fx.as_slice(),
-                [Effect::Focus(r), Effect::ClearAttention { pane: p }]
+                [Effect::Focus(r), Effect::ClearAttention { pane: p, .. }]
                     if r.pane_id == pane && *p == pane
             ),
             "the double-click jumps like Enter, got {fx:?}"
@@ -1079,7 +1081,7 @@ mod tests {
         assert!(
             matches!(
                 fx.as_slice(),
-                [Effect::Focus(_), Effect::ClearAttention { pane: cp }] if *cp == pane
+                [Effect::Focus(_), Effect::ClearAttention { pane: cp, .. }] if *cp == pane
             ),
             "Enter yields [Focus, ClearAttention], got {fx:?}"
         );
@@ -1097,7 +1099,7 @@ mod tests {
         assert!(
             matches!(
                 fx.as_slice(),
-                [Effect::Focus(_), Effect::ClearAttention { pane: cp }, Effect::Quit]
+                [Effect::Focus(_), Effect::ClearAttention { pane: cp, .. }, Effect::Quit]
                     if *cp == pane
             ),
             "temporary Enter yields [Focus, ClearAttention, Quit], got {fx:?}"
@@ -1441,7 +1443,7 @@ mod tests {
         assert!(
             matches!(
                 fx.as_slice(),
-                [Effect::Focus(r), Effect::ClearAttention { pane }]
+                [Effect::Focus(r), Effect::ClearAttention { pane, .. }]
                     if r.pane_id == "%01" && *pane == "%01"
             ),
             "Enter jumps to the selected pane, got {fx:?}"

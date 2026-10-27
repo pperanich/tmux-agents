@@ -336,6 +336,63 @@ mod tests {
         }
     }
 
+    #[test]
+    fn program_aliases_are_validated_once_with_the_manifest_path() {
+        let manifest = LoadedManifest::build(
+            "pi",
+            "/agents/pi.toml",
+            &format!("{GOOD}\n[program_status]\napps = [\"pi\", \"pi\", \"Pi+tool\"]\n"),
+        )
+        .unwrap();
+        let aliases = &manifest.manifest.program_status.as_ref().unwrap().apps;
+        assert_eq!(aliases.len(), 2);
+        assert_eq!(aliases[0].as_ref().as_str(), "pi");
+        assert!(LoadedManifest::build("legacy", "legacy.toml", GOOD)
+            .unwrap()
+            .manifest
+            .program_status
+            .is_none());
+        for declaration in [
+            "apps = [\"bad app\"]",
+            "apps = [\"\"]",
+            "apps = [1]",
+            "mode = \"prefer\"",
+        ] {
+            let error = LoadedManifest::build(
+                "pi",
+                "/agents/pi.toml",
+                &format!("{GOOD}\n[program_status]\n{declaration}\n"),
+            )
+            .err()
+            .unwrap()
+            .to_string();
+            assert!(error.contains("/agents/pi.toml"), "{error}");
+            assert!(
+                error.contains("apps") || error.contains("program_status"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn only_pi_ships_a_verified_program_alias() {
+        let set = load_raw(None).unwrap();
+        let declared: Vec<_> = set
+            .manifests
+            .iter()
+            .filter_map(|manifest| {
+                manifest
+                    .manifest
+                    .program_status
+                    .as_ref()
+                    .map(|apps| (manifest.name.as_str(), apps))
+            })
+            .collect();
+        assert_eq!(declared.len(), 1);
+        assert_eq!(declared[0].0, "pi");
+        assert_eq!(declared[0].1.apps[0].as_ref().as_str(), "pi");
+    }
+
     /// Every bundled `state = "idle"` hook entry is a turn end, and nothing else is. The flag is
     /// what lets a SECOND completion re-raise a cleared done marker (an idle→idle edge the fold
     /// cannot see), so a manifest that forgets it silently loses that pane's re-signal; and an

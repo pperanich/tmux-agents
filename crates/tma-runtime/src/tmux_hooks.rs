@@ -20,6 +20,8 @@ use tma_tmux::tmux::{DepartureKind, Tmux};
 /// environment variable is ignored in silence, which is the only acceptable failure mode for a hook
 /// that fires on every navigation. Read in the bin's `dispatch::run_clear_attention`.
 pub const HOOK_KIND_ENV: &str = "TMA_HOOK_KIND";
+pub const ATTENTION_REVISION_ENV: &str = "TMA_ATTENTION_REVISION";
+pub const DEPARTURE_REVISION_ENV: &str = "TMA_DEPARTURE_REVISION";
 
 /// The tma binary path referenced by the tmux hook command (`$TMA_BIN`, else the running exe).
 /// Tests point `$TMA_BIN` at the built binary.
@@ -37,6 +39,9 @@ pub fn tma_bin() -> PathBuf {
 /// leaving a dead command behind. The middle-tier nudge lives inside the same `clear-attention`
 /// subcommand. `hook` is the tmux hook the command is being written for; it selects the
 /// seen-on-leave posture (see [`HOOK_KIND_ENV`]).
+/// The bounded arrival/departure witness is captured when tmux expands this command. It does
+/// not recover a physical focus timestamp from before earlier hook work delayed dispatch.
+/// Older installed command strings must be regenerated to gain this dispatch-time fence.
 pub fn clear_attention_command(bin: &Path, hook: &str) -> String {
     // `#{pane_id}`, NOT `#{hook_pane}`. `hook_pane` is populated only on the notify_pane-style hooks
     // (`pane-focus-in` and friends); on `after-select-pane` and on `session-window-changed`
@@ -56,8 +61,14 @@ pub fn clear_attention_command(bin: &Path, hook: &str) -> String {
     // string written by a NEW install can still invoke an OLD binary (that is what late binding
     // buys), and a mismatch must not turn into a message on every pane switch.
     let kind = departure_kind_env(hook);
+    let arrival = tma_core::persistence::AttentionRevision::capture_shell_format();
+    let departure = DepartureKind::from_hook_name(hook)
+        .map(DepartureKind::attention_revision_format)
+        .unwrap_or_default();
     format!(
-        "run-shell \"if [ -x '{0}' ]; then {1}'{0}' clear-attention '#{{pane_id}}' 2>/dev/null \
+        "run-shell \"{ATTENTION_REVISION_ENV}={arrival} {DEPARTURE_REVISION_ENV}={departure}; \
+         export {ATTENTION_REVISION_ENV} {DEPARTURE_REVISION_ENV}; \
+         if [ -x '{0}' ]; then {1}'{0}' clear-attention '#{{pane_id}}' 2>/dev/null \
          || true; else {1}tma clear-attention '#{{pane_id}}' 2>/dev/null || true; fi\"",
         bin.display(),
         kind
@@ -73,17 +84,67 @@ fn departure_kind_env(hook: &str) -> String {
     }
 }
 
-/// Whether an installed hook command is what install would write now. Compared modulo whitespace and
-/// quoting: tmux re-serializes the stored command when printing it back, so quote style is its
-/// choice, while a changed binary path or command shape (the drift this detects) survives
-/// normalization.
+/// Compare the shell payload after decoding tmux's outer argument serialization. Quotes,
+/// backslashes and whitespace within that payload are shell syntax and must remain exact.
 pub fn hook_command_current(installed: &str, expected: &str) -> bool {
-    fn normalize(s: &str) -> String {
-        s.chars()
-            .filter(|c| !c.is_whitespace() && !matches!(c, '"' | '\'' | '\\'))
-            .collect()
+    run_shell_payload(installed)
+        .zip(run_shell_payload(expected))
+        .is_some_and(|(installed, expected)| installed == expected)
+}
+
+/// Only the single quoted argument emitted for our run-shell command is accepted. Unknown
+/// serialization is conservatively drift, without interpreting the shell or expanding formats.
+fn run_shell_payload(command: &str) -> Option<String> {
+    let argument = command.trim().strip_prefix("run-shell")?;
+    if !argument.as_bytes().first()?.is_ascii_whitespace() {
+        return None;
     }
-    normalize(installed) == normalize(expected)
+    let mut input = argument.trim().bytes();
+    let mut quote = None;
+    let mut payload = Vec::new();
+    let mut started = false;
+    while let Some(byte) = input.next() {
+        match (quote, byte) {
+            (Some(b'\''), b'\'') | (Some(b'"'), b'"') => quote = None,
+            (Some(b'\''), _) => payload.push(byte),
+            (None, b'\'' | b'"') => {
+                quote = Some(byte);
+                started = true;
+            }
+            (_, b'\\') => {
+                let escaped = input.next()?;
+                payload.push(match escaped {
+                    b'e' => 27,
+                    b'n' => b'\n',
+                    b'r' => b'\r',
+                    b't' => b'\t',
+                    b'0'..=b'7' => {
+                        let second = input.next()?.checked_sub(b'0').filter(|n| *n < 8)?;
+                        let third = input.next()?.checked_sub(b'0').filter(|n| *n < 8)?;
+                        u8::try_from(
+                            u16::from(escaped - b'0') * 64
+                                + u16::from(second) * 8
+                                + u16::from(third),
+                        )
+                        .ok()?
+                    }
+                    b'\'' | b'"' | b'\\' | b'$' | b'#' | b' ' => escaped,
+                    _ => return None,
+                });
+            }
+            (None, _) => {
+                if !byte.is_ascii_whitespace() || !input.all(|b| b.is_ascii_whitespace()) {
+                    return None;
+                }
+                break;
+            }
+            (Some(_), _) => payload.push(byte),
+        }
+    }
+    if !started || quote.is_some() {
+        return None;
+    }
+    String::from_utf8(payload).ok()
 }
 
 /// A hook command is ours iff it invokes `clear-attention`: the OWNERSHIP test (what uninstall may

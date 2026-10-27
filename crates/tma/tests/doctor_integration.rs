@@ -53,7 +53,7 @@ fn tma(s: &Scratch, args: &[&str]) -> Output {
 
 /// The command [`tma`] runs, for the one check that has to alter the child's environment.
 fn tma_cmd(s: &Scratch, args: &[&str]) -> Command {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tma"));
+    let mut cmd = s.command();
     cmd.args(args)
         .arg("--socket-name")
         .arg(&s.socket)
@@ -72,7 +72,8 @@ fn tma_cmd(s: &Scratch, args: &[&str]) -> Command {
 /// with `TMUX_PANE` set the way a hook fires (the state intake resolves its pane from that env).
 fn tma_stdin(s: &Scratch, pane: &str, args: &[&str], stdin_payload: &str) -> Output {
     use std::io::Write;
-    let mut child = Command::new(env!("CARGO_BIN_EXE_tma"))
+    let mut child = s
+        .command()
         .args(args)
         .arg("--socket-name")
         .arg(&s.socket)
@@ -298,7 +299,7 @@ fn doctor_names_a_nested_multiplexer_pane() {
     // panics, so a failing run leaks no tmux server.
     let inner = s.nested_socket("nested-inner");
 
-    let cmd = format!("exec tmux -L {inner} -f /dev/null new-session -A -s in");
+    let cmd = format!("exec tmux -L {inner} -f /dev/null new-session -A -s in 'exec sleep 100000'");
     assert!(s
         .tmux(&["new-session", "-d", "-x", "80", "-y", "24", &cmd])
         .status
@@ -343,14 +344,17 @@ fn doctor_names_a_remote_pane_and_its_held_stamp() {
     // needs no network and no remote host. The blocker is a copy of tmux rather than of `sleep`:
     // `sleep` is a multi-call binary in some coreutils builds (it dispatches on argv[0] and a copy
     // named `ssh` exits at once), and where it is a signed system binary macOS kills the copy.
-    let Some(tmux_bin) = which("tmux") else {
+    let Some(tmux_bin) = std::env::var_os("TMA_SCRATCH_REAL_TMUX")
+        .map(PathBuf::from)
+        .or_else(|| which("tmux"))
+    else {
         eprintln!("skipping: no tmux on PATH to copy");
         return;
     };
     let fake_ssh = s.workdir.join("ssh");
     std::fs::copy(&tmux_bin, &fake_ssh).expect("a copy of tmux named ssh");
     let cmd = format!(
-        "exec {} -L {inner} -f /dev/null new-session -A -s in",
+        "exec {} -L {inner} -f /dev/null new-session -A -s in 'exec sleep 100000'",
         fake_ssh.display()
     );
     assert!(s
@@ -362,6 +366,12 @@ fn doctor_names_a_remote_pane_and_its_held_stamp() {
         basename(&s.display(&pane, "#{pane_current_command}")) == "ssh"
     });
     if !ready {
+        assert_ne!(
+            std::env::var("TMA_REQUIRE_TMUX").as_deref(),
+            Ok("1"),
+            "the owned renamed native tmux process never became ssh: {}",
+            String::from_utf8_lossy(&s.tmux(&["capture-pane", "-p", "-t", &pane]).stdout)
+        );
         eprintln!("skipping: the pane's foreground never became ssh");
         return;
     }
@@ -705,7 +715,15 @@ fn doctor_degrades_when_the_process_walk_fails() {
     }
     let s = Scratch::new("no-ps");
     assert!(s
-        .tmux(&["new-session", "-d", "-x", "80", "-y", "24"])
+        .tmux(&[
+            "new-session",
+            "-d",
+            "-x",
+            "80",
+            "-y",
+            "24",
+            "exec sleep 100000"
+        ])
         .status
         .success());
 
@@ -766,7 +784,15 @@ fn doctor_names_a_second_writer_on_at_agent_state() {
     }
     let s = Scratch::new("foreign");
     assert!(s
-        .tmux(&["new-session", "-d", "-x", "80", "-y", "24"])
+        .tmux(&[
+            "new-session",
+            "-d",
+            "-x",
+            "80",
+            "-y",
+            "24",
+            "exec sleep 100000"
+        ])
         .status
         .success());
     let pane = s.display("", "#{pane_id}");

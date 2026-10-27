@@ -137,6 +137,7 @@ impl EventPlan {
 
     /// Whether the plan commits a state write, so the companion stamps (model, API endpoint) that
     /// ride the same suppression guard may land.
+    #[cfg(test)]
     pub(crate) fn commits(&self) -> bool {
         !matches!(self, EventPlan::Unmapped | EventPlan::Ignore)
     }

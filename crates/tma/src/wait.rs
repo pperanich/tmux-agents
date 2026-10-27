@@ -571,6 +571,7 @@ mod tests {
 
     fn row(pane: &str, agent: &str, state: AgentState, attention: bool, session: &str) -> AgentRow {
         AgentRow {
+            acknowledgement: None,
             pane_id: pane.to_string(),
             agent: agent.to_string(),
             state,
@@ -642,7 +643,7 @@ mod tests {
     /// A socket name no server listens on: the `--any`/`--count` paths never reach tmux (only the
     /// pane path's vanish check does), so `evaluate` runs offline.
     fn offline_tmux() -> Tmux {
-        Tmux::new(Some("tma_wait_unit_no_such_server".to_string()))
+        Tmux::new(Some("tma_test_wait_unit_no_such_server".to_string()))
     }
 
     /// The plain goal for `spec`, with no `--since` floor.

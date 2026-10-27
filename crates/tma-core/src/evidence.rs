@@ -9,7 +9,9 @@ use crate::state::{AgentState, Detail};
 /// persists to `@agent_source` — several sources fold to one bucket.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Source {
-    /// A fresh agent hook event — highest authority, decays over time.
+    /// Direct OSC 7501 report. Authority is a separate validated episode fact.
+    ProgramStatus,
+    /// A fresh agent hook event, decays over time.
     HookEvent,
     /// A `capture-pane` screen rule matched.
     ScreenRule,
@@ -22,7 +24,7 @@ impl Source {
     /// `hook` vs non-hook is load-bearing for the write guards; title and screen both record `capture`.
     pub fn provenance(self) -> Provenance {
         match self {
-            Source::HookEvent => Provenance::Hook,
+            Source::HookEvent | Source::ProgramStatus => Provenance::Hook,
             Source::ScreenRule | Source::Title => Provenance::Capture,
         }
     }
@@ -157,6 +159,7 @@ mod tests {
 
     #[test]
     fn source_folds_to_provenance() {
+        assert_eq!(Source::ProgramStatus.provenance(), Provenance::Hook);
         assert_eq!(Source::HookEvent.provenance(), Provenance::Hook);
         assert_eq!(Source::ScreenRule.provenance(), Provenance::Capture);
         assert_eq!(Source::Title.provenance(), Provenance::Capture);

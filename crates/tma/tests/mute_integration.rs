@@ -3,7 +3,7 @@
 //! contract (`0` applied, `3` nothing matched). Selector-resolved panes wear a hand-written claude
 //! stamp with a widened freshness window, which is what keeps the cycle on its consumer path.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tma_test_support::{AttachOutcome, Scratch};
 
@@ -18,7 +18,7 @@ fn have_tmux() -> bool {
 /// Run `tma mute <args>` against the scratch server, its `agents/` manifest dir, and the workdir
 /// config ([`hold_the_stamp`] writes it before any selector-resolved case).
 fn mute(s: &Scratch, args: &[&str]) -> Output {
-    Command::new(s.bin())
+    s.command()
         .arg("mute")
         .args(args)
         .arg("--socket-name")

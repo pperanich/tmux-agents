@@ -319,6 +319,7 @@ pub(crate) fn run(opts: InitOpts) -> ExitCode {
     // warning in it (no daemon, nothing polling yet) is not a failed setup.
     println!("\ntma: doctor:\n");
     let _ = doctor::run(doctor::DoctorOpts {
+        program_mode: opts.config.program_status.mode,
         json: false,
         exit_code: false,
         server: opts.server.clone(),

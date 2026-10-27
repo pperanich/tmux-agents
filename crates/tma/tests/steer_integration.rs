@@ -10,7 +10,7 @@
 //! `XDG_CONFIG_HOME` is pinned at the workdir so only the bundled actions load and a developer's
 //! own `~/.config/tma/actions` never leaks in.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tma_test_support::{empty_config_path, wait_capture_contains, Scratch, POLL_CEILING};
 
@@ -61,7 +61,7 @@ fn act(s: &Scratch, args: &[&str]) -> Output {
     } else {
         empty_config_path().to_path_buf()
     };
-    Command::new(s.bin())
+    s.command()
         .arg("act")
         .args(args)
         .arg("--socket-name")

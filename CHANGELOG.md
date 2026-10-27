@@ -10,6 +10,26 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ## [Unreleased]
 
+### Added
+
+- Opt-in native OSC 7501 state in the daemon. `[program_status] mode = "observe"`
+  collects diagnostics; `"prefer"` uses reports while process, stream and write
+  ownership remain verified. The default is `"off"`. Pi 1.3.0 is verified with
+  per-process `PI_PROGRAM_STATUS=1` on tmux 3.7b/macOS, including confirmation
+  dialogs, completion, failure and cancellation without tma state hooks. Claude
+  native coverage remains unverified. See the activation and coverage guides
+  before enabling it; Linux and older-tmux production paths remain unexecuted.
+
+### Changed
+
+- State producers and result consumers now preserve private program ownership
+  through guarded publication, exact acknowledgement and bounded recovery.
+  Public states, source tokens and JSON contracts stay compatible; native direct
+  evidence uses `source=hook`. Upgrade all tma writers together. Regenerate old
+  focus hooks with `tma install-hooks <agent>` for dispatch-time capture safety.
+  Metadata/action adapters remain independent, no hooks are removed, and
+  daemonless baseline operation remains available.
+
 ## [0.5.16] - 2026-10-12
 
 ### Fixed

@@ -95,11 +95,8 @@ fn setup_blocked_agent(label: &str) -> Option<Scratch> {
     }
     let mut s = Scratch::new(label);
 
-    // `home`: a shell where the picker will run (attached). `work`: a detached blocked agent.
-    assert!(s
-        .tmux(&["new-session", "-d", "-s", "home", "-x", "100", "-y", "30"])
-        .status
-        .success());
+    // `home`: an isolated shell where the picker will run (attached). `work`: a blocked agent.
+    s.new_shell_session("home", 100, 30);
     agent_session(&s, "work", BLOCKED_CHROME, "Do you want to proceed?");
     write_manifest(&s, "work");
 

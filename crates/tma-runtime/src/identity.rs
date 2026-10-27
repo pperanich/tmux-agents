@@ -9,6 +9,7 @@
 //! caps screen evidence at `unknown` when the agent is nested under a shell/editor. Title narrowing
 //! and its pid-anchored flicker stickiness live on [`identify`].
 
+#[cfg(test)]
 use tma_core::render::{self, StampCommand};
 use tma_core::snapshot::ProcInfo;
 use tma_core::stamp::opt;
@@ -122,7 +123,7 @@ impl<'a> TitleAnchor<'a> {
         })
     }
 
-    fn render(self) -> String {
+    pub(crate) fn render(self) -> String {
         format!("{}:{}", self.agent, self.pid)
     }
 }
@@ -322,6 +323,11 @@ fn out_of_scope_foreground(foreground: &str) -> Option<OutOfScope> {
         .map(|&mux| OutOfScope::Multiplexer(mux))
 }
 
+/// Protocol ownership cannot use the registered remote/nested carve-out.
+pub(crate) fn program_out_of_scope(command: &str) -> Option<OutOfScope> {
+    out_of_scope_foreground(normalize_comm(command))
+}
+
 /// The manifest a registration names, `None` when there is no registration or no manifest answers to
 /// its agent name (an uninstalled agent's leftover claim is not identity).
 fn registered_manifest<'a>(
@@ -335,6 +341,7 @@ fn registered_manifest<'a>(
 /// Reconcile the `@tma_title_match_pid` anchor. `desired` is [`Identified::title_anchor`], or
 /// `None` to clear a stale anchor. Returns a set/unset command only when it differs from `stored`,
 /// so a process-only pane or an already-correct anchor issues no write.
+#[cfg(test)]
 pub(crate) fn title_anchor_command(
     pane: &str,
     stored: Option<&str>,

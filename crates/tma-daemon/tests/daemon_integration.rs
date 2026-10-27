@@ -1084,8 +1084,26 @@ fn silent_connection_does_not_delay_a_hook_event() {
     }
     let s = Scratch::new_daemon("daemon");
     let pane = new_pane(&s, "s1");
-    let _daemon = spawn_daemon(&s);
+    let mut daemon = spawn_daemon_args(&s, &["--status-file", s.status_path().to_str().unwrap()]);
     let sock = wait_for_socket(&s, common::POLL_CEILING).expect("daemon must bind");
+    // A successful connect can enter the listen backlog during the startup probe.
+    // An actual read-only history response proves the application loop has dispatched.
+    let mut ready = UnixStream::connect(&sock).unwrap();
+    ready.set_read_timeout(Some(common::POLL_CEILING)).unwrap();
+    ready
+        .set_write_timeout(Some(Duration::from_secs(2)))
+        .unwrap();
+    ready.write_all(b"TMAH").unwrap();
+    let mut head = [0; 5];
+    ready
+        .read_exact(&mut head)
+        .expect("daemon processes readiness history request");
+    assert_eq!(head[0], tma_runtime::ipc::HIST_ACK);
+    let length = u32::from_le_bytes(head[1..].try_into().unwrap()) as usize;
+    assert!(length <= 64 * 1024);
+    let mut body = vec![0; length];
+    ready.read_exact(&mut body).unwrap();
+    drop(ready);
 
     // Four clients that connect and then sit silent, held open across the real event below. Under the
     // old synchronous accept each would block the loop for a full FRAME_DEADLINE before yielding.
@@ -1113,6 +1131,15 @@ fn silent_connection_does_not_delay_a_hook_event() {
     let mut ack = [0u8; 1];
     let start = Instant::now();
     let got = real.read_exact(&mut ack);
+    if got.is_err() || ack[0] != ACK {
+        eprintln!(
+            "silent-client failure: child={:?}; status={:?}; log={}{}",
+            daemon.child_status(),
+            s.status(),
+            std::fs::read_to_string(s.daemon_log_path()).unwrap_or_default(),
+            s.forensics(&[&pane])
+        );
+    }
     assert!(
         got.is_ok() && ack[0] == ACK,
         "the daemon must ACK the real frame within 1.5 s despite four silent connections \
@@ -1122,6 +1149,71 @@ fn silent_connection_does_not_delay_a_hook_event() {
 
     // Keep the silent clients alive until here so they were genuinely pending during the event.
     drop(silent);
+}
+
+#[test]
+fn foreground_socket_resolution_failure_is_reported_before_clean_no_server_handling() {
+    use std::os::unix::fs::PermissionsExt;
+    let _gate = common::DaemonTestGuard::acquire();
+    if !common::tmux_available() {
+        return;
+    }
+    let s = Scratch::new_daemon("socket_resolution");
+    let _pane = new_pane(&s, "s1");
+    let wrapper = s.workdir.join("fail-socket-resolution");
+    std::fs::write(&wrapper, "#!/bin/sh\nfor arg do\nif [ \"$arg\" = '#{socket_path}' ]; then echo 'owned injected resolution failure' >&2; exit 75; fi\ndone\nexec tmux \"$@\"\n").unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let out = s
+        .command()
+        .args(["daemon", "--socket-name", &s.socket])
+        .env("TMA_TMUX_BIN", &wrapper)
+        .output()
+        .unwrap();
+    eprintln!(
+        "injected startup resolution: exit={:?}, stderr={}",
+        out.status.code(),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !out.status.success(),
+        "a failed native socket lookup must not look like a successful foreground daemon"
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("owned injected resolution failure"));
+    let ensure = s
+        .command()
+        .args(["daemon", "--ensure", "--socket-name", &s.socket])
+        .env("TMA_TMUX_BIN", &wrapper)
+        .output()
+        .unwrap();
+    assert!(
+        ensure.status.success(),
+        "ensure keeps its best-effort lookup behavior"
+    );
+    std::fs::write(&wrapper, "#!/bin/sh\nexit 0\n").unwrap();
+    let empty = s
+        .command()
+        .args(["daemon", "--socket-name", &s.socket])
+        .env("TMA_TMUX_BIN", &wrapper)
+        .output()
+        .unwrap();
+    assert!(
+        empty.status.success(),
+        "empty socket resolution remains the intentional no-server no-op"
+    );
+    let absent = s
+        .command()
+        .args([
+            "daemon",
+            "--ensure",
+            "--socket-name",
+            "tma_test_resolution_absent",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        absent.status.success(),
+        "ensure with no server remains a clean no-op"
+    );
 }
 
 // ---- the upgrade restart: the explicit verb, and the opt-in automatic one ----------------

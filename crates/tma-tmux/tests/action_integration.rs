@@ -379,12 +379,7 @@ fn send_keys_delivers_the_sequence() {
     }
     let s = Scratch::new("lock_keys");
     // A real shell pane (no `sleep`) so typed keys echo to the screen.
-    assert!(s
-        .tmux(&["new-session", "-d", "-x", "80", "-y", "24"])
-        .status
-        .success());
-    let pane = s.get("", "#{pane_id}");
-    assert!(pane.starts_with('%'));
+    let pane = s.new_shell_pane();
     let t = adapter(&s);
 
     // Each element is one send-keys argument; individual chars prove the multi-key sequence.

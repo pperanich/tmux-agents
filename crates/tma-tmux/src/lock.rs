@@ -117,7 +117,7 @@ pub enum LockError {
 /// A fresh 128-bit nonce as 32 lowercase hex chars, from the kernel CSPRNG (`/dev/urandom`, the
 /// portable-unix source; rustix's `getrandom` is Linux-only). Uniqueness is load-bearing, so a read
 /// failure is surfaced rather than papered over with a weak fallback.
-fn fresh_nonce() -> Result<String, std::io::Error> {
+pub(crate) fn fresh_nonce() -> Result<String, std::io::Error> {
     let mut bytes = [0u8; 16];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
     let mut hex = String::with_capacity(32);

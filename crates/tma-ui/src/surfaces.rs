@@ -472,6 +472,7 @@ mod tests {
 
     fn row(pane: &str, agent: &str, state: AgentState, detail: Option<&str>) -> AgentRow {
         AgentRow {
+            acknowledgement: None,
             pane_id: pane.to_string(),
             agent: agent.to_string(),
             state,

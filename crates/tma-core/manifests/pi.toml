@@ -1,5 +1,8 @@
 min_engine_version = "0.1"
 
+[program_status]
+apps = ["pi"]
+
 # pi coding agent (https://github.com/earendil-works/pi) — LIVE-AUDITED on 0.82.1
 # (captured 2026-07-26) in a scratch tmux server, driving trivial / tool-using / trust-prompt
 # turns under an isolated `PI_CODING_AGENT_DIR` (a copy of the user's config so the real
@@ -62,14 +65,14 @@ title_patterns = ["^π "]
 #   tool_execution_end / tool_call / tool_result (redundant with tool_execution_start for
 #   `working`; agent_settled is the clean idle landing), model_select / input / user_bash.
 #
-# BLOCKED IS NOT HOOK-COVERED, and pi has NO recurring approval state (honest gap). pi auto-runs
-# tools with no per-tool permission prompt — tool gating is an EXTENSION concern (`tool_call` can
-# return `{block:true}` + `ctx.ui.confirm`), not a built-in blocked state. The only approval-class
-# native event is `project_trust` (the one-time "Trust project folder?" startup gate), and it
-# fires BEFORE the title is set and before `session_start`, so a pi pane showing it is not yet
-# identifiable as pi (see identity gap (a)) — mapping it to `blocked` could never fire on an
-# identified pane. So `blocked` is left OUT of `covers` and carries no screen rule: it is a genuine
-# absence in pi, not an unmet capture.
+# BLOCKED IS NOT HOOK-COVERED by this extension mapping. The historical hook survey
+# found tool gating through extensions (`tool_call` and `ctx.ui.confirm`) rather
+# than a recurring per-tool permission event. Its startup `project_trust` event
+# precedes the title and session_start identity (gap (a) above). This does not
+# imply an absence of native dialog state: Pi 1.3.0 emits OSC 7501
+# blocked/permission for its real confirmation UI with PI_PROGRAM_STATUS=1.
+# That separate daemon protocol coverage does not add a hook mapping or screen
+# rule here. See docs/reference/agent-coverage.md for executed native coverage.
 [hooks]
 covers = ["working", "idle", "lifecycle"]
 
@@ -110,7 +113,7 @@ turn_end = true
 #     the bug: co-rendering chrome is fine, the fold's slot order picks working while the loader
 #     is up. It stays OUT of `visible` below, because chrome that renders mid-turn is not
 #     evidence a turn ENDED and must never be allowed to decay an idle hook claim.
-#   - blocked has no state in pi at all (see the [hooks] note): no rule, honestly.
+#   - blocked has no verified screen rule here; native OSC dialog coverage is separate.
 [capture]
 visible = ["working"]
 
@@ -161,7 +164,8 @@ format = "pi-context-json"
 # Requiring both means a stray rule line in tool output is not enough on its own. Verified
 # present at both widths in pi_idle_w{100,60} AND pi_working_w{100,60} (the co-render).
 #
-# pi has no blocked state and no blocked rule, so there is no dialog for this to collide with.
+# No blocked screen rule is shipped. Native dialogs are covered only by the
+# separate opt-in protocol lane, not by this fallback idle predicate.
 # `idle` stays OUT of [capture].visible: the composer renders mid-turn too, so it is not
 # evidence a turn ENDED and must never be allowed to decay an idle hook claim.
 [[rules]]

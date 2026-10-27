@@ -1,7 +1,8 @@
 //! The output of the detection fold: a [`Verdict`] and the [`WritePlan`] that tells
 //! the write adapter how to commit it.
 
-use crate::evidence::Provenance;
+use crate::evidence::{Provenance, Source};
+use crate::program_status::{ProgramAuthority, ProgramResult};
 use crate::state::{AgentState, Detail};
 
 /// What the write adapter should do with a verdict.
@@ -32,6 +33,8 @@ pub struct WritePlan {
 /// fresh evidence and a hold-previous outcome (where the decider is the prior stamp).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WinningEvidence {
+    /// Actual origin when known. A legacy stamp carries only coarse provenance.
+    pub origin: Option<Source>,
     /// Coarse provenance bucket of the deciding evidence.
     pub source: Provenance,
     /// When that evidence was produced (epoch milliseconds, injected).
@@ -47,4 +50,12 @@ pub struct Verdict {
     pub detail: Option<Detail>,
     pub winning_evidence: WinningEvidence,
     pub writes: WritePlan,
+    /// Program ownership and result effects must survive even an idle -> idle projection.
+    pub program: Option<ProgramVerdict>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ProgramVerdict {
+    pub authority: ProgramAuthority,
+    pub result: Option<ProgramResult>,
 }

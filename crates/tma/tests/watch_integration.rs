@@ -46,10 +46,7 @@ fn setup_blocked_agent(label: &str) -> Option<Scratch> {
     let mut s = Scratch::new(label);
 
     // `home`: a shell where the watcher will run (attached). `work`: a detached blocked agent.
-    assert!(s
-        .tmux(&["new-session", "-d", "-s", "home", "-x", "100", "-y", "30"])
-        .status
-        .success());
+    s.new_shell_session("home", 100, 30);
     let chrome = "\\n\\n\\n\\n\\n\\n\\n\\n\
         ╭──────────────────────────╮\\n\
         │ Do you want to proceed?  │\\n\
@@ -228,10 +225,7 @@ fn watch_enter_jumps_to_highlighted_agent() {
     let mut s = Scratch::new("watch");
 
     // `home`: a shell where the watcher will run (attached). `work`: a detached blocked agent.
-    assert!(s
-        .tmux(&["new-session", "-d", "-s", "home", "-x", "100", "-y", "30"])
-        .status
-        .success());
+    s.new_shell_session("home", 100, 30);
     let chrome = "\\n\\n\\n\\n\\n\\n\\n\\n\
         ╭──────────────────────────╮\\n\
         │ Do you want to proceed?  │\\n\
@@ -431,10 +425,7 @@ fn watch_wide_groups_by_repo_and_g_flattens() {
     assert!(git(&repo, &["commit", "-q", "--allow-empty", "-m", "init"]));
 
     // `home`: the wide attached pane the watcher runs in. `work`: a detached blocked agent in the repo.
-    assert!(s
-        .tmux(&["new-session", "-d", "-s", "home", "-x", "100", "-y", "30"])
-        .status
-        .success());
+    s.new_shell_session("home", 100, 30);
     let chrome = "\\n\\n\\n\\n\\n\\n\\n\\n\
         ╭──────────────────────────╮\\n\
         │ Do you want to proceed?  │\\n\
@@ -562,10 +553,7 @@ fn clear_attention_nudges_advertised_watch_pid() {
         return;
     }
     let s = Scratch::new("watch");
-    assert!(s
-        .tmux(&["new-session", "-d", "-s", "home", "-x", "80", "-y", "24"])
-        .status
-        .success());
+    s.new_shell_session("home", 80, 24);
     let pane = s.display("home", "#{pane_id}");
 
     // A stand-in watcher process: a plain sleep, SIGUSR1 terminates it by default.

@@ -9,7 +9,7 @@
 //! Every tmux invocation handles a gone server gracefully: [`TmuxError::ServerGone`] is a clean,
 //! expected outcome distinct from a real failure.
 
-use std::io::Read;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -21,10 +21,15 @@ mod attach;
 mod display;
 mod hooks;
 mod options;
+mod process;
 mod read;
 mod window;
 
 pub use display::{escape_menu_label, MenuItem, Progress};
+pub use process::{
+    program_processes, sample_process_chain, sample_program_process, ProcessSnapshot,
+};
+pub(crate) use read::pane_option_keys;
 pub use read::{normalize_comm, ps_all, DepartureKind, PaneRecord};
 pub use window::WindowPaneRow;
 
@@ -55,6 +60,11 @@ pub enum TmuxError {
     },
     #[error("no tmux server running")]
     ServerGone,
+    /// A complete fresh membership read proved this canonical target absent.
+    #[error("pane {pane:?} no longer exists")]
+    PaneGone {
+        pane: tma_core::program_status::PaneId,
+    },
     #[error("`{cmd}` failed (exit {code}): {stderr}")]
     Failed {
         cmd: String,
@@ -211,6 +221,15 @@ impl Tmux {
     /// thread only sets a kill flag; the waiter, the sole owner of the `Child`, does every kill and
     /// reap, so no reaped-and-recycled pid is ever signalled.
     fn run_with_timeout(&self, args: &[&str], timeout: Duration) -> Result<String, TmuxError> {
+        self.run_with_input_timeout(args, None, timeout)
+    }
+
+    fn run_with_input_timeout(
+        &self,
+        args: &[&str],
+        input: Option<Vec<u8>>,
+        timeout: Duration,
+    ) -> Result<String, TmuxError> {
         let cmd_desc = || describe_argv(args);
         // Resolved once at construction: a miss is a guided NotInstalled, never a per-call PATH walk.
         let Some(bin) = self.bin.as_ref() else {
@@ -220,7 +239,11 @@ impl Tmux {
         let mut child = Command::new(bin)
             .args(&self.server_args)
             .args(args)
-            .stdin(Stdio::null())
+            .stdin(if input.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()
@@ -242,6 +265,12 @@ impl Tmux {
             let stderr = child.stderr.take();
             let out_reader = thread::spawn(move || drain(stdout));
             let err_reader = thread::spawn(move || drain(stderr));
+            // The writer shares this invocation's timeout and the waiter's exclusive child
+            // ownership. Killing the child also releases a writer blocked on a full stdin pipe.
+            let input_writer = input.map(|bytes| {
+                let mut stdin = child.stdin.take().expect("stdin was piped above");
+                thread::spawn(move || stdin.write_all(&bytes))
+            });
             // Poll for exit instead of a blocking `wait()`, so the thread that owns the `Child` is the
             // one that observes the kill flag and delivers the kill itself, then reaps on a later tick.
             // Backoff from 1ms to a 25ms cap: a fast one-shot (the common case, on the status-line and
@@ -265,11 +294,16 @@ impl Tmux {
             };
             let stdout = out_reader.join().unwrap_or_default();
             let stderr = err_reader.join().unwrap_or_default();
+            let input_result = input_writer.map_or(Ok(()), |writer| {
+                writer
+                    .join()
+                    .unwrap_or_else(|_| Err(std::io::Error::other("tmux stdin writer panicked")))
+            });
             // The receiver may be gone (we timed out); a failed send is expected, so ignore it.
-            let _ = tx.send((status, stdout, stderr));
+            let _ = tx.send((status, stdout, stderr, input_result));
         });
 
-        let (status, stdout, stderr) = match rx.recv_timeout(timeout) {
+        let (status, stdout, stderr, input_result) = match rx.recv_timeout(timeout) {
             Ok(triple) => triple,
             Err(_) => {
                 // Expired. Signal the waiter to kill and reap the child it owns, then return at once.
@@ -287,6 +321,10 @@ impl Tmux {
             source,
         })?;
         if status.success() {
+            input_result.map_err(|source| TmuxError::Spawn {
+                cmd: cmd_desc(),
+                source,
+            })?;
             return Ok(String::from_utf8_lossy(&stdout).into_owned());
         }
         let stderr = String::from_utf8_lossy(&stderr).trim().to_string();
@@ -666,5 +704,88 @@ mod tests {
             "the timed-out call must return promptly, took {:?}",
             start.elapsed()
         );
+    }
+
+    #[test]
+    fn piped_input_drains_output_and_rejects_a_successful_early_close() {
+        let sh = resolve_binary("sh").expect("sh should resolve on unix");
+        let tmux = Tmux::with_bin(Some(sh), &Server::default());
+        let input = "quoted '#{literal}, text\n".repeat(4096).into_bytes();
+        let output = tmux
+            .run_with_input_timeout(
+                &[
+                    "-c",
+                    "dd if=/dev/zero bs=16384 count=16 >&2 2>/dev/null; cat",
+                ],
+                Some(input.clone()),
+                Duration::from_secs(3),
+            )
+            .unwrap();
+        assert_eq!(output.as_bytes(), input);
+        let error = tmux
+            .run_with_input_timeout(
+                &["-c", "exit 0"],
+                Some(vec![b'x'; 512 * 1024]),
+                Duration::from_secs(3),
+            )
+            .unwrap_err();
+        assert!(matches!(error, TmuxError::Spawn { .. }), "{error:?}");
+    }
+
+    #[test]
+    fn blocked_input_writer_shares_the_command_timeout() {
+        let sh = resolve_binary("sh").expect("sh should resolve on unix");
+        let tmux = Tmux::with_bin(Some(sh), &Server::default());
+        let start = std::time::Instant::now();
+        let error = tmux
+            .run_with_input_timeout(
+                &["-c", "exec sleep 30"],
+                Some(vec![b'x'; 512 * 1024]),
+                Duration::from_millis(150),
+            )
+            .unwrap_err();
+        assert!(matches!(error, TmuxError::Timeout { .. }), "{error:?}");
+        assert!(start.elapsed() < Duration::from_secs(15));
+    }
+
+    #[test]
+    fn timed_out_input_child_is_killed_and_reaped() {
+        let sh = resolve_binary("sh").expect("sh should resolve on unix");
+        let tmux = Tmux::with_bin(Some(sh.clone()), &Server::default());
+        let path = std::env::temp_dir().join(format!(
+            "tma_input_child_{}_{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let error = tmux
+            .run_with_input_timeout(
+                &[
+                    "-c",
+                    "printf '%s' \"$$\" > \"$0\"; exec sleep 30",
+                    path.to_str().unwrap(),
+                ],
+                Some(vec![b'x'; 256 * 1024]),
+                Duration::from_millis(150),
+            )
+            .unwrap_err();
+        assert!(matches!(error, TmuxError::Timeout { .. }), "{error:?}");
+        let pid = std::fs::read_to_string(&path).unwrap();
+        std::fs::remove_file(path).unwrap();
+        let deadline = std::time::Instant::now() + Duration::from_secs(3);
+        loop {
+            let alive = Command::new(&sh)
+                .args(["-c", "kill -0 \"$0\" 2>/dev/null", &pid])
+                .status()
+                .unwrap()
+                .success();
+            if !alive {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline, "unreaped child {pid}");
+            thread::sleep(Duration::from_millis(10));
+        }
     }
 }

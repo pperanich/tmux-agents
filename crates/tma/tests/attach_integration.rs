@@ -5,14 +5,14 @@
 //! the argv it would have exec'd instead of exec'ing it, so both halves are assertable. The scratch
 //! `tmux -L tma_test_<unique>` server (`-f /dev/null`) is killed on drop, never the default one.
 
-use std::process::{Command, Output, Stdio};
+use std::process::{Output, Stdio};
 
 use tma_test_support::{empty_config_path, Scratch};
 
 /// `tma <args>` against the scratch server with an explicitly empty stdin. The tty refusal is the
 /// point of one of these tests, so the child's stdin is wired here rather than left to a default.
 fn tma_no_tty(s: &Scratch, args: &[&str]) -> Output {
-    Command::new(s.bin())
+    s.command()
         .args(args)
         .arg("--socket-name")
         .arg(&s.socket)

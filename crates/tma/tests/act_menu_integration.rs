@@ -11,7 +11,7 @@
 //! menu, not some other success path. As in the jump suite, the PTY attach needs `python3`; absent
 //! it, the attach-based test skips rather than failing.
 
-use std::process::{Command, Output};
+use std::process::Output;
 
 use tma_test_support::{empty_config_path, AttachOutcome, Scratch};
 
@@ -60,7 +60,7 @@ fn stamp_blocked_claude(s: &Scratch, pane: &str) {
 /// Run `tma act --menu` against the scratch server with the user action dir pinned empty
 /// (`XDG_CONFIG_HOME` at the workdir) so only the bundled actions load. Mirrors `act_integration.rs`.
 fn act_menu(s: &Scratch, pane: &str) -> Output {
-    Command::new(s.bin())
+    s.command()
         .args(["act", "--menu", "--pane", pane])
         .arg("--socket-name")
         .arg(&s.socket)

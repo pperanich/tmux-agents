@@ -327,8 +327,12 @@ pub fn poll_context_tails(
             let _ = stamp::apply_quota(tmux, panes, &rec.pane_id, &quota, now, g);
         }
         if let Some(model) = result.model {
-            let cmd = tma_core::render::set_pane_option(&rec.pane_id, opt::MODEL, &model);
-            let _ = tmux.apply(&[cmd]);
+            let _ = stamp::apply_metadata_edits(
+                tmux,
+                panes,
+                &rec.pane_id,
+                &[tma_tmux::persistence::OptionEdit::set(opt::MODEL, model)],
+            );
         }
     }
 }
