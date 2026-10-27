@@ -1015,11 +1015,7 @@ fn explicit_targets_use_same_hook_scope_for_lease_and_pane_mutations() {
     );
 }
 
-#[test]
-fn maximum_lineage_fits_native_publication_and_contextual_guards() {
-    let Some(s) = Scratch::new() else {
-        return;
-    };
+fn maximum_lineage_owner() -> PaneOwner {
     let mut owner = owner(1);
     owner.episode = EpisodeId::new(u64::MAX);
     owner.stream_epoch = u64::MAX;
@@ -1035,6 +1031,55 @@ fn maximum_lineage_fits_native_publication_and_contextual_guards() {
             .collect(),
     )
     .unwrap();
+    owner
+}
+
+#[test]
+fn maximum_lineage_notification_markers_arm_and_rearm() {
+    let Some(s) = Scratch::new() else {
+        return;
+    };
+    let owner = maximum_lineage_owner();
+    s.lease(&owner.collector);
+    let mut p = publish(&s, AgentState::Idle);
+    p.pid = owner.processes.agent().pid;
+    commit(&s, &owner, &p, None);
+    for key in [public::CONTEXT_NOTIFIED_AT, public::STALL_NOTIFIED_AT] {
+        let armed = store::update_notify_marker(&s.tmux, &s.read(), key, Some(NOW)).unwrap();
+        assert!(armed.won());
+        assert_eq!(s.read().options[key], NOW.to_string());
+        assert!(
+            !store::update_notify_marker(&s.tmux, &s.read(), key, Some(NOW + 1))
+                .unwrap()
+                .won()
+        );
+        assert!(store::update_notify_marker(&s.tmux, &s.read(), key, None)
+            .unwrap()
+            .won());
+        assert!(!s.read().options.contains_key(key));
+    }
+    let key = public::CONTEXT_NOTIFIED_AT;
+    assert!(
+        store::advisory_notify_marker(&s.tmux, &s.read(), key, Some(NOW))
+            .unwrap()
+            .claimed()
+    );
+    assert_eq!(s.read().options[key], NOW.to_string());
+    let stale = s.read();
+    assert!(store::update_notify_marker(&s.tmux, &stale, key, None)
+        .unwrap()
+        .won());
+    assert!(!store::advisory_notify_marker(&s.tmux, &stale, key, None)
+        .unwrap()
+        .claimed());
+}
+
+#[test]
+fn maximum_lineage_fits_native_publication_and_contextual_guards() {
+    let Some(s) = Scratch::new() else {
+        return;
+    };
+    let owner = maximum_lineage_owner();
     s.lease(&owner.collector);
     let mut p = publish(&s, AgentState::Idle);
     p.pid = owner.processes.agent().pid;
