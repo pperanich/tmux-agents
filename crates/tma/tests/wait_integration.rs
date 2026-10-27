@@ -1243,7 +1243,16 @@ fn daemon_killed_mid_wait_degrades_and_still_times_out() {
         let _ = attempt.kill();
         let _ = attempt.wait();
         // A late subscriber must be reaped before the next attempt, or its stale 1 passes for ours.
-        let _ = wait_status_eq(&status, "wait_subscribers", "0", Duration::from_secs(3));
+        assert!(
+            wait_status_eq(
+                &status,
+                "wait_subscribers",
+                "0",
+                subscribe_by.saturating_duration_since(Instant::now()),
+            ),
+            "the previous wait subscription was not reaped{}",
+            s.forensics(&[&pane])
+        );
         assert!(
             Instant::now() < subscribe_by,
             "tma wait never subscribed to the daemon before it was killed{}",
