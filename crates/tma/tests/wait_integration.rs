@@ -1226,14 +1226,39 @@ fn daemon_killed_mid_wait_degrades_and_still_times_out() {
         s.forensics(&[&pane])
     );
 
-    let mut child = spawn_wait(
-        &s,
-        &["--pane", &pane, "--until", "blocked", "--timeout", "5"],
-    );
-    assert!(
-        wait_status_eq(&status, "wait_subscribers", "1", POLL_CEILING),
-        "tma wait subscribed before the daemon is killed"
-    );
+    // `try_subscribe` is one-shot with a 500 ms ack budget: a daemon still busy starting up misses
+    // it, and that waiter polls for its whole life and never subscribes (a degrade, not an error).
+    // So a waiter that has not registered within a few seconds is replaced with a fresh one, which
+    // gives the daemon another chance to ack. The 30 s `--timeout` outlasts every attempt and stays
+    // under `POLL_CEILING`, so `await_exit` below still observes the legitimate exit 124.
+    let subscribe_by = Instant::now() + POLL_CEILING;
+    let mut child = loop {
+        let mut attempt = spawn_wait(
+            &s,
+            &["--pane", &pane, "--until", "blocked", "--timeout", "30"],
+        );
+        if wait_status_eq(&status, "wait_subscribers", "1", Duration::from_secs(3)) {
+            break attempt;
+        }
+        let _ = attempt.kill();
+        let _ = attempt.wait();
+        // A late subscriber must be reaped before the next attempt, or its stale 1 passes for ours.
+        assert!(
+            wait_status_eq(
+                &status,
+                "wait_subscribers",
+                "0",
+                subscribe_by.saturating_duration_since(Instant::now()),
+            ),
+            "the previous wait subscription was not reaped{}",
+            s.forensics(&[&pane])
+        );
+        assert!(
+            Instant::now() < subscribe_by,
+            "tma wait never subscribed to the daemon before it was killed{}",
+            s.forensics(&[&pane])
+        );
+    };
     // Kill the daemon mid-wait: the subscription EOFs, so wait degrades to the poll loop.
     let _ = daemon.0.kill();
     let _ = daemon.0.wait();

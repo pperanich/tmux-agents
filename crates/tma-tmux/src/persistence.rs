@@ -194,6 +194,12 @@ fn equal(key: &str, value: &str) -> String {
 fn and(a: &str, b: &str) -> String {
     format!("#{{&&:{a},{b}}}")
 }
+fn conjunction(checks: &[String]) -> String {
+    checks
+        .iter()
+        .rev()
+        .fold("1".to_owned(), |rest, check| and(check, &rest))
+}
 fn not(a: &str) -> String {
     format!("#{{?{a},0,1}}")
 }
@@ -217,12 +223,14 @@ pub(crate) const PROJECTION_KEYS: &[&str] = &[
 ];
 
 fn projection_unchanged(observed: &PaneRead) -> String {
-    PROJECTION_KEYS
-        .iter()
-        .copied()
-        .fold("1".to_owned(), |predicate, key| {
-            and(&predicate, &equal(key, observed.value(key)))
-        })
+    // tmux rescans each nested operand. Keep the large OWNER and COMMIT comparisons near the
+    // root to avoid repeatedly parsing a maximum process chain under its format time limit.
+    conjunction(
+        &PROJECTION_KEYS
+            .iter()
+            .map(|key| equal(key, observed.value(key)))
+            .collect::<Vec<_>>(),
+    )
 }
 
 fn live_projection(observed: &PaneRead, now: u64) -> String {
@@ -253,10 +261,7 @@ fn ownership_predicate(
             match &observed.program.lease {
                 Some(lease) if lease.token == owner.collector && lease.live_at(*now) => and(
                     &equal(opt::COLLECTOR, &lease.encode()),
-                    &and(
-                        &equal(opt::OWNER, observed.value(opt::OWNER)),
-                        &projection_unchanged(observed),
-                    ),
+                    &projection_unchanged(observed),
                 ),
                 _ => "0".into(),
             }
@@ -1339,18 +1344,19 @@ pub fn update_notify_marker(
     if ![public::CONTEXT_NOTIFIED_AT, public::STALL_NOTIFIED_AT].contains(&key) {
         return Err(PersistenceError::Invalid("invalid notification marker"));
     }
-    let mut predicate = projection_unchanged(observed);
-    for field in [
+    let mut checks: Vec<_> = [
         key,
         public::CONTEXT_PCT,
         public::CONTEXT_AT,
         opt::METADATA_OWNER,
-    ] {
-        predicate = and(&predicate, &equal(field, observed.value(field)));
-    }
+    ]
+    .iter()
+    .map(|field| equal(field, observed.value(field)))
+    .collect();
     if arm_at.is_some() {
-        predicate = and(&predicate, &equal(key, ""));
+        checks.push(equal(key, ""));
     }
+    let predicate = and(&conjunction(&checks), &projection_unchanged(observed));
     transaction(
         tmux,
         observed,
@@ -1385,24 +1391,27 @@ pub fn advisory_notify_marker(
         return Err(PersistenceError::Unsupported);
     }
     let claim = fresh_token()?;
-    let mut predicate = projection_unchanged(observed);
-    for field in [
+    let mut checks: Vec<_> = [
         key,
         opt::METADATA_OWNER,
         opt::METADATA_UPDATE,
         opt::RECEIPT,
         public::CONTEXT_PCT,
         public::CONTEXT_AT,
-    ] {
-        predicate = and(&predicate, &equal(field, observed.value(field)));
-    }
+    ]
+    .iter()
+    .map(|field| equal(field, observed.value(field)))
+    .collect();
     if arm_at.is_some() {
-        predicate = and(&predicate, &equal(key, ""));
+        checks.push(equal(key, ""));
     }
-    let admission = and(
-        &predicate,
-        &equal(opt::MARKER_CLAIM, observed.value(opt::MARKER_CLAIM)),
-    );
+    let projection = projection_unchanged(observed);
+    let guarded_by = |claim: &str| {
+        let mut claimed = checks.clone();
+        claimed.push(equal(opt::MARKER_CLAIM, claim));
+        and(&conjunction(&claimed), &projection)
+    };
+    let admission = guarded_by(observed.value(opt::MARKER_CLAIM));
     tmux.apply_persistence(
         &observed.target,
         &[render::conditional_group(
@@ -1411,7 +1420,7 @@ pub fn advisory_notify_marker(
             &[OptionEdit::set(opt::MARKER_CLAIM, claim.as_str()).command(&observed.target)],
         )],
     )?;
-    let predicate = and(&predicate, &equal(opt::MARKER_CLAIM, claim.as_str()));
+    let predicate = guarded_by(claim.as_str());
     let edit = match arm_at {
         Some(at) => OptionEdit::set(key, at.to_string()),
         None => OptionEdit::unset(key),

@@ -40,6 +40,10 @@ fn opencode_store(path: &Path, session: &str) {
     let conn = rusqlite::Connection::open(path).expect("create the store");
     conn.pragma_update(None, "journal_mode", "wal")
         .expect("wal journalling");
+    // A throwaway fixture needs no durability, and an fsync the CI runner's disk refuses
+    // (SQLITE_IOERR_FSYNC) would otherwise fail the build of the store rather than the reader.
+    conn.pragma_update(None, "synchronous", "off")
+        .expect("no fsync");
     conn.execute_batch(include_str!(
         "../../tma-transcript/fixtures/stores/opencode/1.18.18/opencode-1.18.18-schema.sql"
     ))
