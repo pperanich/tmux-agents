@@ -528,7 +528,7 @@ upgrade, no consumer-side changes between tiers (goal 5):
    tmux focus hooks. Event-latency state, instant refresh, still no daemon.
 3. **Daemon tier** — event hub (socket + control-mode client + on-demand capture +
    30–60 s reconciliation sweep). Adds fallback-detection scheduling for hookless
-   agents, history, notification dispatch/dedup, self-healing, and opt-in native
+   agents, history, notification dispatch/dedup, self-healing, and native
    OSC collection. That collection has no daemonless counterpart; baseline
    operation remains daemon-optional.
 

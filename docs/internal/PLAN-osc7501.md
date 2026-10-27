@@ -1,6 +1,6 @@
 # OSC 7501 Integration Work Order
 
-Status: B1 through B8 accepted. Implementation, independent fixing reviews, native workspace checks, Rust 1.88, isolated Nix packaging and documentation checks are complete. The feature remains opt-in; default changes, hook retirement and daemonless removal are separate decisions.
+Status: B1 through B8 accepted. Implementation, independent fixing reviews, native workspace checks, Rust 1.88, isolated Nix packaging and documentation checks are complete. On 2026-10-27 the user selected `prefer` as the default for v0.6.0, superseding the initial opt-in rollout below. Explicit `off` and `observe` remain available. Agent eligibility, hook retirement and daemonless removal are unchanged.
 
 Prepared 2026-10-26 against `17470d5c1bdcf25376678f8ca0f98bd578588d89` on `main`. Revalidate the baseline before execution. This document is the repository copy of the planning Page; keep both synchronized when decisions change.
 

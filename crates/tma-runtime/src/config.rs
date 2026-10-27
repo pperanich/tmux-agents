@@ -59,13 +59,13 @@ pub struct Config {
     legacy_agents: Option<toml::Value>,
 }
 
-/// Native program reporting is opt-in and independent of manifest app aliases.
+/// Prefer eligible native reports by default, independently of manifest app aliases.
 #[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum ProgramStatusMode {
-    #[default]
     Off,
     Observe,
+    #[default]
     Prefer,
 }
 
@@ -1083,9 +1083,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn program_status_modes_are_typed_opt_in_and_strict() {
-        let default: Config = toml::from_str("").unwrap();
-        assert_eq!(default.program_status.mode, ProgramStatusMode::Off);
+    fn program_status_modes_default_to_prefer_and_are_strict() {
+        assert_eq!(
+            Config::default().program_status.mode,
+            ProgramStatusMode::Prefer
+        );
+        for input in ["", "[program_status]"] {
+            let config: Config = toml::from_str(input).unwrap();
+            assert_eq!(config.program_status.mode, ProgramStatusMode::Prefer);
+        }
         for (word, mode) in [
             ("off", ProgramStatusMode::Off),
             ("observe", ProgramStatusMode::Observe),

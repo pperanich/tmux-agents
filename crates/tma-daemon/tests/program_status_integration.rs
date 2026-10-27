@@ -332,6 +332,20 @@ fn release_owner_read(f: &Fixture) {
 }
 
 #[test]
+fn default_mode_collects_native_reports() {
+    let _gate = common::DaemonTestGuard::acquire();
+    if !available() {
+        return;
+    }
+    let f = Fixture::new_with("prefer", |scratch| {
+        scratch.write_config("[notify]\non = []\n");
+        None
+    });
+    f.report("working");
+    f.wait_live("working");
+}
+
+#[test]
 fn term_during_maintenance_read_retires_lease_before_another_pane_mutation() {
     let _gate = common::DaemonTestGuard::acquire();
     if !available() {

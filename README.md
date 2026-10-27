@@ -70,7 +70,7 @@ run, on a machine you own, answered from wherever you are.
 
 Six agents ship with detection out of the box. `tma` reads state from three
 kinds of evidence: hook events the agent fires, its on-screen chrome, and the
-process in the pane. Opt-in daemon OSC 7501 collection adds verified native Pi
+process in the pane. Daemon OSC 7501 collection adds verified native Pi
 reporting. The table below separates that from hook coverage; the full,
 evidence-backed record is in
 [docs/reference/agent-coverage.md](docs/reference/agent-coverage.md).
@@ -88,7 +88,7 @@ evidence-backed record is in
 (which exposes no permission hook). Pi's extension has no blocked mapping, but
 native Pi 1.3.0 confirmation dialogs report it with per-process
 `PI_PROGRAM_STATUS=1` and daemon `[program_status] mode = "prefer"`.
-The mode defaults to off; see [activation and limits](docs/how-to/run-the-daemon.md#use-native-pi-state).
+The mode defaults to prefer; see [activation and limits](docs/how-to/run-the-daemon.md#use-native-pi-state).
 Claude's native OSC coverage remains unverified. Agents that
 run under a generic process name (`node`) are disambiguated by their pane title.
 

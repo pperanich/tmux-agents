@@ -14,13 +14,15 @@ Every release ships prebuilt tarballs and a `SHA256SUMS` file; see
 
 ### Added
 
-- Opt-in native OSC 7501 state in the daemon. `[program_status] mode = "observe"`
+- Native OSC 7501 state in the daemon. `[program_status] mode = "observe"`
   collects diagnostics; `"prefer"` uses reports while process, stream and write
-  ownership remain verified. The default is `"off"`. Pi 1.3.0 is verified with
-  per-process `PI_PROGRAM_STATUS=1` on tmux 3.7b/macOS, including confirmation
+  ownership remain verified. The default is `"prefer"`; set `"off"` to disable
+  collection. Pi 1.3.0 is verified with per-process `PI_PROGRAM_STATUS=1` on
+  tmux 3.7b/macOS, including confirmation
   dialogs, completion, failure and cancellation without tma state hooks. Claude
   native coverage remains unverified. See the activation and coverage guides
-  before enabling it; Linux and older-tmux production paths remain unexecuted.
+  for agent activation requirements; Linux and older-tmux production paths remain
+  unexecuted.
 
 ### Changed
 

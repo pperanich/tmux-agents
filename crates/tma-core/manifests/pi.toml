@@ -165,7 +165,7 @@ format = "pi-context-json"
 # present at both widths in pi_idle_w{100,60} AND pi_working_w{100,60} (the co-render).
 #
 # No blocked screen rule is shipped. Native dialogs are covered only by the
-# separate opt-in protocol lane, not by this fallback idle predicate.
+# separate protocol lane, not by this fallback idle predicate.
 # `idle` stays OUT of [capture].visible: the composer renders mid-turn too, so it is not
 # evidence a turn ENDED and must never be allowed to decay an idle hook claim.
 [[rules]]

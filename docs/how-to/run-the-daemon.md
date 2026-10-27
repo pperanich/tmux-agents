@@ -1,7 +1,7 @@
 # Run the daemon
 
 Add the optional daemon tier for lower latency, fallback detection of hookless
-agents, deduplicated notifications and opt-in native OSC 7501 state. Every
+agents, deduplicated notifications and native OSC 7501 state. Every
 surface has baseline polling behavior without it; collecting native program
 state requires the daemon.
 
@@ -117,7 +117,8 @@ executed transitions and platform limits. Upgrade all tma writers together;
 older tma binaries and third-party direct option writers lack the ownership
 guards needed on authoritative panes.
 
-Set this in your tma config before starting the daemon:
+The daemon prefers eligible native reports by default. If your tma config
+previously disabled collection or selected observation only, change it to:
 
 ```toml
 [program_status]

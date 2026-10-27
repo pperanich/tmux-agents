@@ -162,7 +162,7 @@ OSC has no completion event id, so identical results without intervening
 observed work are idempotent.
 
 Only Pi's configuration in the [coverage ledger](../reference/agent-coverage.md#osc-7501-rollout-ledger)
-has native acceptance. The default is off; observe mode collects diagnostics
+has native acceptance. The default is prefer; observe mode collects diagnostics
 while leaving publication with baseline detection.
 
 Without eligible native authority, `tma` learns a pane's state from three kinds

@@ -29,8 +29,8 @@ The values shown are the defaults. Copy any subset; omitted sections and keys
 keep their defaults.
 
 ```toml
-[program_status]             # daemon-owned OSC 7501 reporting, explicit opt-in
-mode = "off"                # off | observe | prefer
+[program_status]             # daemon-owned OSC 7501 reporting
+mode = "prefer"             # off | observe | prefer
 
 [fold]                       # state-machine tuning (seconds)
 dwell_secs = 3               # anti-flicker dwell before a working->idle drop
@@ -103,7 +103,7 @@ process_names = ["claude"]   # extra launcher basenames to match
 
 | key | default | meaning |
 |---|---|---|
-| `mode` | `"off"` | `off`, `observe`, or `prefer`, lowercase only |
+| `mode` | `"prefer"` | `off`, `observe`, or `prefer`, lowercase only |
 
 `off` keeps baseline hook/screen/process detection and control-mode activity
 tracking. It parses no protocol payloads, retains no protocol stores and acquires
@@ -111,7 +111,8 @@ no collector lease. `observe` collects reports and recovery diagnostics while
 baseline detection owns the state; it produces no protocol attention, turn,
 notification or action effects. `prefer` lets an eligible report own state while
 the daemon verifies the current process, observation stream and guarded writes.
-Without that coverage it uses baseline detection.
+Without that coverage it uses baseline detection. `prefer` is the default when
+the section or its `mode` key is absent; an explicit `off` remains disabled.
 
 This section requires a running daemon. It neither launches an agent nor changes
 its environment or installed hooks. The manifest's separate

@@ -2,7 +2,7 @@
 
 `tma` detects an agent's state from three kinds of evidence: hook events the
 agent fires, the pane's on-screen chrome, and the process running in the pane.
-The opt-in daemon collector also accepts native OSC 7501 reports for verified
+The daemon collector also accepts native OSC 7501 reports for verified
 configurations, recorded separately below.
 This page documents, per agent, which hook events map to which states, which
 states the screen rules cover, and how each agent's pane is identified.
@@ -289,10 +289,11 @@ carries a prompt too, but that lane is not what this action uses.
 
 ## OSC 7501 rollout ledger
 
-Native reporting is **off by default**. `[program_status] mode = "observe"`
-collects diagnostics without publishing protocol state or effects; `"prefer"`
+Native reporting defaults to **prefer**. `[program_status] mode = "prefer"`
 uses eligible reports while process, stream and guarded-write coverage remain
-valid. [Run the daemon](../how-to/run-the-daemon.md#use-native-pi-state) gives the
+valid. `"observe"` collects diagnostics without publishing protocol state or
+effects, and `"off"` disables collection.
+[Run the daemon](../how-to/run-the-daemon.md#use-native-pi-state) gives the
 activation and disable steps. An app alias or capability query proves neither
 emission nor lifecycle coverage.
 
