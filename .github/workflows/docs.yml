@@ -34,7 +34,7 @@ jobs:
             -H "Forge-Authorization: token ${TOKEN}" \
             -H "Content-Type: application/x-tar" \
             --data-binary @/tmp/site.tar \
-            "https://${{ github.repository_owner }}.pages.prestonperanich.com/${{ github.event.repository.name }}/"
+            "https://pages.prestonperanich.com/${{ github.event.repository.name }}/"
 
   # Pages cannot serve a private repo on the free plan, so deployment is gated on visibility:
   # it starts working the moment the repo goes public, with no workflow change.
