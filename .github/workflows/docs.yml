@@ -20,14 +20,26 @@ jobs:
             | tar xz -C "$HOME/mdbook-bin"
           echo "$HOME/mdbook-bin" >> "$GITHUB_PATH"
       - run: mdbook build
-      - uses: actions/upload-pages-artifact@v3
+      - if: github.server_url == 'https://github.com'
+        uses: actions/upload-pages-artifact@v3
         with:
           path: book
+      - name: Publish to git-pages
+        if: github.server_url == 'https://gitea.prestonperanich.com'
+        env:
+          TOKEN: ${{ secrets.GIT_PAGES_TOKEN || github.token }}
+        run: |
+          tar -cf /tmp/site.tar -C book .
+          curl --fail-with-body -X PUT \
+            -H "Forge-Authorization: token ${TOKEN}" \
+            -H "Content-Type: application/x-tar" \
+            --data-binary @/tmp/site.tar \
+            "https://${{ github.repository_owner }}.pages.prestonperanich.com/${{ github.event.repository.name }}/"
 
   # Pages cannot serve a private repo on the free plan, so deployment is gated on visibility:
   # it starts working the moment the repo goes public, with no workflow change.
   deploy:
-    if: github.event.repository.private == false
+    if: github.server_url == 'https://github.com' && github.event.repository.private == false
     needs: build
     runs-on: ubuntu-latest
     permissions:
